@@ -131,7 +131,8 @@ pub fn build(b: *std.Build) void {
         mod.linkSystemLibrary("portaudio-2.0", .{ .use_pkg_config = .force });
         translate.linkSystemLibrary("portaudio-2.0", .{});
     }
-    const libs = [_][]const u8{ "sdl3", "sdl3-ttf", "sqlite3", "lua5.4", "libarchive", "libavformat", "libavcodec", "libavutil", "libswscale", "libavfilter" };
+    // sdl3-ttf also brings SDL3; naming both links it twice, which macOS refuses at startup.
+    const libs = [_][]const u8{ "sdl3-ttf", "sqlite3", "lua5.4", "libarchive", "libavformat", "libavcodec", "libavutil", "libswscale", "libavfilter" };
     for (libs) |lib| mod.linkSystemLibrary(lib, .{ .use_pkg_config = .force });
     for (libs) |lib| translate.linkSystemLibrary(lib, .{});
 
