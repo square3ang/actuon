@@ -5,9 +5,9 @@
   <img src="assets/brand/actuon_widelogo_light.svg" alt="actuon" width="360">
 </picture>
 
-**Every pulse counts.**
+**Nothing between you and the note.**
 
-A BMS player.
+The next-generation BMS player.
 
 [![CI](https://github.com/square3ang/actuon/actions/workflows/ci.yml/badge.svg)](https://github.com/square3ang/actuon/actions/workflows/ci.yml)
 [![License: GPLv3](https://img.shields.io/badge/license-GPLv3-489CFF)](LICENSE)
