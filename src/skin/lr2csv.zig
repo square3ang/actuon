@@ -21,6 +21,7 @@ const Parser = struct {
     taken: bool = false,
     in_if: bool = false,
     depth: u32 = 0,
+    includes: u32 = 0,
     files: std.StringHashMapUnmanaged([]const u8) = .empty,
     resolver: *const fn (i32) bool,
     conf: jsonskin.Conf = .{},
@@ -43,8 +44,11 @@ fn int(s: []const u8) i32 {
             }
         }
     }
-    return std.fmt.parseInt(i32, buf[0..n], 10) catch 0;
+    return m.skinValue(std.fmt.parseInt(i64, buf[0..n], 10) catch 0);
 }
+
+/// Depth alone lets each file include many: the count stops the fan-out.
+pub const max_includes = 256;
 
 fn vals(str: []const []const u8) [24]i32 {
     var v: [24]i32 = @splat(0);
@@ -118,7 +122,7 @@ fn laneOf(mode: core.types.Mode, code: i32) ?u8 {
 }
 
 fn srcOf(v: [24]i32) m.Src {
-    return .{ .tex = v[2], .x = v[3], .y = v[4], .w = v[5], .h = v[6], .divx = @max(v[7], 1), .divy = @max(v[8], 1), .cycle = v[9], .timer = v[10] };
+    return .{ .tex = v[2], .x = v[3], .y = v[4], .w = v[5], .h = v[6], .divx = std.math.clamp(v[7], 1, m.max_div), .divy = std.math.clamp(v[8], 1, m.max_div), .cycle = v[9], .timer = v[10] };
 }
 
 fn begin(p: *Parser, o: m.Object) !void {
@@ -233,7 +237,7 @@ fn line(p: *Parser, raw: []const u8) anyerror!void {
         if (str.len > 2 and int(str[2]) != 0) try p.skin.enabled.put(p.a, int(str[1]), {});
     } else if (eq(cmd, "RESOLUTION")) {
         const res = [_][2]f32{ .{ 640, 480 }, .{ 1280, 720 }, .{ 1920, 1080 }, .{ 3840, 2160 } };
-        const i = int(str[1]);
+        const i = if (str.len > 1) int(str[1]) else -1;
         if (i >= 0 and i < res.len) {
             p.skin.w = res[@intCast(i)][0];
             p.skin.h = res[@intCast(i)][1];
@@ -241,6 +245,8 @@ fn line(p: *Parser, raw: []const u8) anyerror!void {
     } else if (eq(cmd, "INCLUDE")) {
         if (str.len < 2 or p.depth > 8) return;
         const path = resolve(p, str[1]) orelse return;
+        p.includes += 1;
+        if (p.includes > max_includes) return error.BadInclude;
         p.depth += 1;
         defer p.depth -= 1;
         try runFile(p, path);
@@ -252,9 +258,10 @@ fn line(p: *Parser, raw: []const u8) anyerror!void {
         if (v[2] < 100) try begin(p, .{ .kind = .image, .src = srcOf(v) });
     } else if (eq(cmd, "SRC_NUMBER")) {
         p.current = null;
-        const n = @max(v[7], 1) * @max(v[8], 1);
+        const src = srcOf(v);
+        const n = src.divx * src.divy;
         if (n < 10) return;
-        var o: m.Object = .{ .kind = .number, .src = srcOf(v), .ref = v[11], .align_ = v[12], .digits = v[13] };
+        var o: m.Object = .{ .kind = .number, .src = src, .ref = v[11], .align_ = v[12], .digits = m.clampDigits(v[13]) };
         if (@mod(n, 24) == 0) {
             o.signed = true;
             o.digits += 1;
@@ -277,8 +284,7 @@ fn line(p: *Parser, raw: []const u8) anyerror!void {
             const idx: i32 = @intCast(i);
             nd.* = .{ .tex = src.tex, .x = src.x + fw * @mod(idx, cols), .y = src.y + fh * @divTrunc(idx, cols), .w = fw, .h = fh };
         }
-        var parts_n = v[13];
-        if (parts_n <= 0) parts_n = 50;
+        const parts_n = if (v[13] <= 0) 50 else @min(v[13], m.max_parts);
         try begin(p, .{ .kind = .gauge, .nodes = nodes, .parts = parts_n, .dir = v[11] });
     } else if (eq(cmd, "SRC_BGA")) {
         try begin(p, .{ .kind = .bga });
@@ -292,9 +298,10 @@ fn line(p: *Parser, raw: []const u8) anyerror!void {
         try applyDst(p, &p.judge_imgs[idx], &p.judge_keys[idx], v);
     } else if (std.mem.startsWith(u8, cmd, "SRC_NOWCOMBO_1P")) {
         const idx: usize = @intCast(std.math.clamp(5 - v[1], 0, 5));
-        const n = @max(v[7], 1) * @max(v[8], 1);
+        const src = srcOf(v);
+        const n = src.divx * src.divy;
         // LR2PlaySkinLoader.setSrcNowCombo: align 1 means centred here.
-        p.judge_nums[idx] = .{ .kind = .number, .src = srcOf(v), .ref = 104, .digits = v[13], .align_ = if (v[12] == 1) 2 else v[12], .signed = @mod(n, 24) == 0 };
+        p.judge_nums[idx] = .{ .kind = .number, .src = src, .ref = 104, .digits = m.clampDigits(v[13]), .align_ = if (v[12] == 1) 2 else v[12], .signed = @mod(n, 24) == 0 };
     } else if (std.mem.startsWith(u8, cmd, "DST_NOWCOMBO_1P")) {
         const idx: usize = @intCast(std.math.clamp(5 - v[1], 0, 5));
         var kv = v;
@@ -342,11 +349,12 @@ pub const CustomOption = struct { title: []const u8, items: []const []const u8 }
 /// Every #CUSTOMOPTION a skin file declares, includes too. #IF is ignored: a chooser shows them all.
 pub fn customOptions(a: std.mem.Allocator, path: []const u8) ![]const CustomOption {
     var out: std.ArrayList(CustomOption) = .empty;
-    try scanOptions(a, skinRoot(path), path, &out, 0);
+    var includes: u32 = 0;
+    try scanOptions(a, skinRoot(path), path, &out, 0, &includes);
     return out.items;
 }
 
-fn scanOptions(a: std.mem.Allocator, root: []const u8, path: []const u8, out: *std.ArrayList(CustomOption), depth: u32) anyerror!void {
+fn scanOptions(a: std.mem.Allocator, root: []const u8, path: []const u8, out: *std.ArrayList(CustomOption), depth: u32, includes: *u32) anyerror!void {
     var lines = std.mem.splitScalar(u8, try readText(a, path), '\n');
     while (lines.next()) |raw| {
         const text = std.mem.trimEnd(u8, raw, " \r\t");
@@ -355,7 +363,9 @@ fn scanOptions(a: std.mem.Allocator, root: []const u8, path: []const u8, out: *s
         if (std.ascii.eqlIgnoreCase(cmd, "#INCLUDE")) {
             if (depth > 8) continue;
             const inc = resolvePath(a, root, fields.next() orelse continue) orelse continue;
-            try scanOptions(a, root, inc, out, depth + 1);
+            includes.* += 1;
+            if (includes.* > max_includes) return error.BadInclude;
+            try scanOptions(a, root, inc, out, depth + 1, includes);
         } else if (std.ascii.eqlIgnoreCase(cmd, "#CUSTOMOPTION")) {
             const title = fields.next() orelse continue;
             _ = fields.next() orelse continue;
@@ -432,6 +442,74 @@ test "a saved pick selects its #CUSTOMOPTION item, includes too" {
     try std.testing.expect(skin.enabled.contains(902));
     try std.testing.expect(!skin.enabled.contains(900));
     try std.testing.expect(skin.enabled.contains(910));
+}
+
+test "paths that climb out of the skin are refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const inner = try std.fs.path.join(a, &.{ root, "skin" });
+    try fs.mkdirs(inner);
+    try fs.write(try std.fs.path.join(a, &.{ inner, "in.png" }), "");
+    try fs.write(try std.fs.path.join(a, &.{ root, "out.png" }), "");
+    try std.testing.expect(resolvePath(a, inner, "LR2files\\Theme\\x\\in.png") != null);
+    try std.testing.expectEqual(@as(?[]const u8, null), resolvePath(a, inner, "LR2files\\Theme\\x\\..\\out.png"));
+    try std.testing.expectEqual(@as(?[]const u8, null), resolvePath(a, inner, "../out.png"));
+    try std.testing.expectEqual(@as(?[]const u8, null), resolvePath(a, inner, "/etc/hostname"));
+}
+
+fn noneEnabled(_: i32) bool {
+    return false;
+}
+
+test "a skin that includes itself twice is refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const play = try std.fs.path.join(a, &.{ root, "play" });
+    try fs.mkdirs(play);
+    const path = try std.fs.path.join(a, &.{ play, "s.lr2skin" });
+    const once = "#INCLUDE,LR2files\\Theme\\x\\play\\s.lr2skin\n";
+    try fs.write(path, once ++ once);
+    var skin: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
+    defer skin.arena.deinit();
+    try std.testing.expectError(error.BadInclude, load(&skin, path, .beat7, &noneEnabled, .{}));
+    try std.testing.expectError(error.BadInclude, customOptions(a, path));
+    // One self-include is only a long chain, which depth ends.
+    try fs.write(path, once);
+    _ = try load(&skin, path, .beat7, &noneEnabled, .{});
+}
+
+test "hostile numbers in a CSV skin are bounded" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const path = try std.fs.path.join(a, &.{ root, "s.lr2skin" });
+    try fs.write(path,
+        \\#RESOLUTION
+        \\#IF,-2147483648
+        \\#ENDIF
+        \\#SRC_NUMBER,0,0,0,0,10,10,2147483647,2147483647,0,0,0,0,2147483647
+        \\#DST_NUMBER,0,-2147483648,-2147483648,-2147483648,-2147483648,-2147483648
+        \\#SRC_GROOVEGAUGE,0,0,0,0,40,10,1,1,0,0,0,0,2147483647
+        \\#SRC_NOWCOMBO_1P,0,0,0,0,10,10,2147483647,2147483647,0,0,0,0,-2147483648
+        \\#DST_NOWCOMBO_1P,0,0,-2147483648,-2147483648,2147483647,2147483647
+    );
+    var skin: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
+    defer skin.arena.deinit();
+    _ = try load(&skin, path, .beat7, &noneEnabled, .{});
+    try std.testing.expectEqual(@as(i32, m.max_div), skin.objects[0].src.divx);
+    try std.testing.expect(skin.objects[0].digits <= 33); // 32 and a sign
+    try std.testing.expectEqual(@as(i32, m.max_parts), skin.objects[1].parts);
 }
 
 test "lane codes" {

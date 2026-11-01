@@ -164,6 +164,20 @@ pub const Skin = struct {
     }
 };
 
+fn fontSize(px: f32) u16 {
+    return @intFromFloat(std.math.clamp(px, 8, 1024));
+}
+
+/// Skin numbers are untrusted; this range leaves room for the arithmetic drawing does on them.
+pub fn skinValue(v: i64) i32 {
+    return @intCast(std.math.clamp(v, -10_000_000, 10_000_000));
+}
+pub const max_div = 4096;
+pub const max_parts = 4096;
+pub fn clampDigits(d: i32) i32 {
+    return std.math.clamp(d, 0, 32);
+}
+
 /// What a scene exposes to skins.
 pub const Ctx = struct {
     ud: *anyopaque,
@@ -446,7 +460,7 @@ pub const Renderer = struct {
             r.ctx.lua_call_str.?(r.s, o.lua_value, &buf)
         else if (o.constant.len > 0) o.constant else r.ctx.str(r.ctx.ud, o.ref);
         if (s.len == 0 or k.a <= 0) return;
-        const size: u16 = @intFromFloat(@max(k.h * r.sy, 8));
+        const size = fontSize(k.h * r.sy);
         r.g.text_font = o.font;
         defer r.g.text_font = null;
         const col: gfx.Color = .{ .r = @intFromFloat(std.math.clamp(k.r, 0, 255)), .g = @intFromFloat(std.math.clamp(k.g, 0, 255)), .b = @intFromFloat(std.math.clamp(k.b, 0, 255)), .a = @intFromFloat(std.math.clamp(k.a, 0, 255)) };
@@ -466,7 +480,7 @@ pub const Renderer = struct {
         r.g.text_font = o.font;
         defer r.g.text_font = null;
         const col: gfx.Color = .{ .r = byte(k.r), .g = byte(k.g), .b = byte(k.b), .a = byte(k.a) };
-        r.g.textClip(s, k.x * r.sx, k.y * r.sy, k.w * r.sx, @intFromFloat(@max(k.h * r.sy, 8)), col);
+        r.g.textClip(s, k.x * r.sx, k.y * r.sy, k.w * r.sx, fontSize(k.h * r.sy), col);
     }
 
     /// A horizontal fill in BMS gauge colors: green below the border, red from it up.
@@ -646,4 +660,13 @@ test "a number picks a run of frames, and only that run animates" {
     try std.testing.expectEqual(@as(i32, 18), runFrame(33, 11, 6, 192, 192));
     try std.testing.expectEqual(@as(i32, 30), runFrame(33, 11, 99, 0, 0));
     try std.testing.expectEqual(@as(i32, 2), runFrame(4, 1, 0, 50, 100));
+}
+
+test "skin numbers are bounded" {
+    try std.testing.expectEqual(@as(i32, 10_000_000), skinValue(std.math.maxInt(i64)));
+    try std.testing.expectEqual(@as(i32, -10_000_000), skinValue(std.math.minInt(i64)));
+    try std.testing.expectEqual(@as(u16, 1024), fontSize(1e30));
+    try std.testing.expectEqual(@as(u16, 8), fontSize(-1e30));
+    try std.testing.expectEqual(@as(i32, 0), clampDigits(-5));
+    try std.testing.expectEqual(@as(i32, 32), clampDigits(std.math.maxInt(i32)));
 }

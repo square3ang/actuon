@@ -52,8 +52,9 @@ pub fn parseFile(a: std.mem.Allocator, path: []const u8) !J {
 fn int(v: ?J, d: i32) i32 {
     const x = v orelse return d;
     return switch (x) {
-        .integer => |i| @intCast(std.math.clamp(i, std.math.minInt(i32), std.math.maxInt(i32))),
-        .float => |f| @intFromFloat(std.math.clamp(f, -2e9, 2e9)),
+        .integer => |i| m.skinValue(i),
+        // Lua's 0/0 gets here as NaN.
+        .float => |f| if (std.math.isNan(f)) d else m.skinValue(@intFromFloat(std.math.clamp(f, -2e9, 2e9))),
         else => d,
     };
 }
@@ -216,6 +217,7 @@ const Loader = struct {
     protos: std.StringHashMapUnmanaged(m.Object) = .empty,
     note_id: []const u8 = "notes",
     files: std.StringHashMapUnmanaged([]const u8) = .empty,
+    includes: u32 = 0,
 
     fn testOp(l: *Loader, v: J) bool {
         switch (v) {
@@ -273,6 +275,8 @@ const Loader = struct {
 
     fn loadInclude(l: *Loader, rel: []const u8, depth: u32) anyerror!J {
         if (std.mem.indexOf(u8, rel, "..") != null or std.fs.path.isAbsolute(rel)) return error.BadInclude;
+        l.includes += 1;
+        if (l.includes > lr2.max_includes) return error.BadInclude;
         const p = lr2.walk(l.a, l.dir, rel) orelse return error.BadInclude;
         return l.expand(try parseFile(l.a, p), depth + 1);
     }
@@ -287,8 +291,8 @@ const Loader = struct {
             .y = int(o.get("y"), 0),
             .w = if (w == 0) -1 else w,
             .h = if (h == 0) -1 else h,
-            .divx = @max(int(o.get("divx"), 1), 1),
-            .divy = @max(int(o.get("divy"), 1), 1),
+            .divx = std.math.clamp(int(o.get("divx"), 1), 1, m.max_div),
+            .divy = std.math.clamp(int(o.get("divy"), 1), 1, m.max_div),
             .cycle = int(o.get("cycle"), 0),
             .timer = int(o.get("timer"), 0),
             .len = @max(int(o.get("len"), 1), 1),
@@ -414,7 +418,7 @@ const Loader = struct {
                 .src = s,
                 .ref = int(o.get("ref"), 0),
                 .lua_value = fnRef(o.get("value")),
-                .digits = int(o.get("digit"), 0),
+                .digits = m.clampDigits(int(o.get("digit"), 0)),
                 .align_ = int(o.get("align"), 0),
                 .zero_pad = int(o.get("zeropadding"), 0) != 0 or int(o.get("padding"), 0) != 0,
                 .signed = @mod(n, 24) == 0,
@@ -438,7 +442,7 @@ const Loader = struct {
         if (r.get("gauge")) |gv| if (gv == .object) {
             var nodes: std.ArrayList(m.Src) = .empty;
             for (arr(gv.object.get("nodes"))) |x| try nodes.append(a, try l.lookupSrc(x));
-            try l.protos.put(a, try idOf(a, gv.object.get("id")), .{ .kind = .gauge, .nodes = nodes.items, .parts = int(gv.object.get("parts"), 50) });
+            try l.protos.put(a, try idOf(a, gv.object.get("id")), .{ .kind = .gauge, .nodes = nodes.items, .parts = @min(int(gv.object.get("parts"), 50), m.max_parts) });
         };
         for (arr(r.get("judgegraph"))) |v| {
             if (v == .object) try l.protos.put(a, try idOf(a, v.object.get("id")), .{ .kind = .notes_graph });
@@ -620,6 +624,71 @@ test "sanitize strips comments and trailing commas" {
     const out = try sanitize(a, "{\"a\":[1,2,],// x,\n \"b\":\"//,]\",}");
     defer a.free(out);
     try std.testing.expectEqualStrings("{\"a\":[1,2], \"b\":\"//,]\"}", out);
+}
+
+fn noneEnabled(_: i32) bool {
+    return false;
+}
+
+test "includes that climb, are absolute or fan out are refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try fs.write(try std.fs.path.join(a, &.{ dir, "twice.json" }), "[{\"include\":\"twice.json\"},{\"include\":\"twice.json\"}]");
+    var skin: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
+    defer skin.arena.deinit();
+    for ([_][]const u8{ "{\"a\":{\"include\":\"../x.json\"}}", "{\"a\":{\"include\":\"/etc/hostname\"}}", "{\"a\":{\"include\":\"missing.json\"}}", "{\"a\":{\"include\":\"twice.json\"}}" }) |text| {
+        const root = try std.json.parseFromSliceLeaky(J, a, text, .{});
+        try std.testing.expectError(error.BadInclude, fromJson(&skin, root, root, dir, &noneEnabled, .{}));
+    }
+}
+
+test "assets outside the skin folder are refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const dir = try std.fs.path.join(a, &.{ root, "skin" });
+    try fs.mkdirs(dir);
+    try fs.write(try std.fs.path.join(a, &.{ dir, "in.png" }), "");
+    try fs.write(try std.fs.path.join(a, &.{ root, "out.png" }), "");
+    var skin: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
+    defer skin.arena.deinit();
+    var l: Loader = .{ .a = a, .skin = &skin, .dir = dir, .resolver = &noneEnabled };
+    try std.testing.expect((try l.assetPath("in.png")) != null);
+    try std.testing.expect((try l.assetPath(try std.fmt.allocPrint(a, "{s}/in.png", .{dir}))) != null);
+    try std.testing.expectEqual(@as(?[]const u8, null), try l.assetPath("../out.png"));
+    try std.testing.expectEqual(@as(?[]const u8, null), try l.assetPath("..\\out.png"));
+    try std.testing.expectEqual(@as(?[]const u8, null), try l.assetPath(try std.fmt.allocPrint(a, "{s}/../out.png", .{dir})));
+    try std.testing.expectEqual(@as(?[]const u8, null), try l.assetPath("/etc/hostname"));
+}
+
+test "hostile numbers in a JSON skin are bounded" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqual(@as(i32, 7), int(.{ .float = std.math.nan(f64) }, 7));
+    const root = try std.json.parseFromSliceLeaky(J, a,
+        \\{"value":[{"id":"n","divx":2147483647,"divy":2147483647,"digit":2147483647}],
+        \\ "gauge":{"id":"g","parts":2147483647},
+        \\ "destination":[
+        \\  {"if":-2147483648,"value":{"id":"never"}},
+        \\  {"id":"n","op":[-2147483648],"dst":[{"x":2147483647,"y":-2147483648,"w":1e300,"h":-1e300,"time":2147483647},{"time":-2147483648}]},
+        \\  {"id":"g","dst":[{"x":1}]}
+        \\]}
+    , .{});
+    var skin: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
+    defer skin.arena.deinit();
+    _ = try fromJson(&skin, root, root, ".", &noneEnabled, .{});
+    const number = skin.objects[skin.objects.len - 2];
+    try std.testing.expectEqual(@as(i32, m.max_div), number.src.divx);
+    try std.testing.expectEqual(@as(i32, 32), number.digits);
+    try std.testing.expectEqual(@as(i32, m.max_parts), skin.objects[skin.objects.len - 1].parts);
 }
 
 test "wildcards resolve to the default, or the closest name" {

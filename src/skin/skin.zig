@@ -77,7 +77,7 @@ fn typeOfFile(a: std.mem.Allocator, path: []const u8) ?i32 {
         const h = lua.header(a, path) catch return null;
         if (h != .object) return null;
         const t = h.object.get("type") orelse return null;
-        return if (t == .integer) @intCast(t.integer) else null;
+        return if (t == .integer) std.math.cast(i32, t.integer) else null;
     }
     // A lexical peek at the JSON's `type` field avoids parsing every file.
     const at = std.mem.indexOf(u8, bytes, "type") orelse return null;
@@ -500,4 +500,18 @@ test "each screen offers only its own file's options" {
     const result = try options(a, dir, type_result);
     try std.testing.expectEqual(@as(usize, 1), result.len);
     try std.testing.expectEqualStrings("Result", result[0].name);
+}
+
+test "a Lua header with a huge type has no type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const path = try std.fs.path.join(a, &.{ dir, "s.luaskin" });
+    try fs.write(path, "return { type = 1 << 40 }");
+    try std.testing.expectEqual(@as(?i32, null), typeOfFile(a, path));
+    try fs.write(path, "return { type = 3 }");
+    try std.testing.expectEqual(@as(?i32, 3), typeOfFile(a, path));
 }
