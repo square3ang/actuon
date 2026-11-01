@@ -71,6 +71,21 @@ pub fn build(b: *std.Build) void {
     mod.addAnonymousImport("font_medium", .{ .root_source_file = b.path("assets/fonts/SUITE-Medium.ttf") });
     mod.addAnonymousImport("font_heavy", .{ .root_source_file = b.path("assets/fonts/SUITE-ExtraBold.ttf") });
     const os = target.result.os.tag;
+    // Shaders are WGSL. Vulkan reads naga's SPIR-V; spirv-cross turns that into what the other backends read.
+    const shaders = [_][]const u8{ "sprite.vert", "sprite.frag", "upscale.vert", "upscale.frag", "fsrcnnx_unpack.frag", "fsrcnnx_0.frag", "fsrcnnx_1.frag", "fsrcnnx_2.frag", "fsrcnnx_3.frag", "fsrcnnx_4.frag", "fsrcnnx_5.frag", "fsrcnnx_6.frag", "fsrcnnx_7.frag", "fsrcnnx_8.frag", "fsrcnnx_9.frag", "fsrcnnx_10.frag", "fsrcnnx_11.frag", "fsrcnnx_12.frag" };
+    for (shaders) |name| {
+        const naga = b.addSystemCommand(&.{ "naga", "--keep-coordinate-space" });
+        naga.addFileArg(b.path(b.fmt("src/ui/shaders/{s}.wgsl", .{name})));
+        var shader = naga.addOutputFileArg(b.fmt("{s}.spv", .{name}));
+        if (os == .windows or os == .macos) {
+            const cross = b.addSystemCommand(&.{"spirv-cross"});
+            cross.addFileArg(shader);
+            if (os == .windows) cross.addArgs(&.{ "--hlsl", "--shader-model", "50" }) else cross.addArgs(&.{ "--msl", "--msl-version", "20000", "--msl-decoration-binding" });
+            cross.addArg("--output");
+            shader = cross.addOutputFileArg(b.fmt("{s}.src", .{name}));
+        }
+        mod.addAnonymousImport(name, .{ .root_source_file = shader });
+    }
     if (os == .macos) {
         mod.addCSourceFile(.{ .file = b.path("src/ui/render_backend.m"), .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" } });
         mod.linkFramework("Metal", .{});

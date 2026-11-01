@@ -46,6 +46,7 @@ flowchart LR
 
 Needs Zig 0.17.x and these libraries, found through pkg-config: SDL3, SDL3_ttf, PortAudio, SQLite, Lua 5.4,
 libarchive and FFmpeg (avformat, avcodec, avfilter, avutil, swscale). Linux also needs Vulkan.
+Shaders build from WGSL with `naga` (`cargo install naga-cli`); Windows and macOS also need `spirv-cross`.
 
 ```sh
 zig build -Doptimize=ReleaseSafe

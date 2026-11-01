@@ -195,12 +195,12 @@ fn spriteVerts(tw: f32, th: f32, src: c.SDL_FRect, dst: c.SDL_FRect, o: SpriteOp
 }
 
 const os = @import("builtin").os.tag;
-// Generated from the GLSL by shaders/gen.sh.
-const vert_src = if (os == .windows) @embedFile("shaders/sprite.vert.hlsl") else if (os == .macos) @embedFile("shaders/sprite.vert.metal") else {};
-const frag_src = if (os == .windows) @embedFile("shaders/sprite.frag.hlsl") else if (os == .macos) @embedFile("shaders/sprite.frag.metal") else {};
+// Built from the WGSL in shaders/ by build.zig.
+const vert_src = if (os == .windows) @embedFile("sprite.vert") else if (os == .macos) @embedFile("sprite.vert") else {};
+const frag_src = if (os == .windows) @embedFile("sprite.frag") else if (os == .macos) @embedFile("sprite.frag") else {};
 // Vulkan reads SPIR-V as 32-bit words.
-const vert_spv align(4) = if (os == .linux) @embedFile("shaders/sprite.vert.spv").* else {};
-const frag_spv align(4) = if (os == .linux) @embedFile("shaders/sprite.frag.spv").* else {};
+const vert_spv align(4) = if (os == .linux) @embedFile("sprite.vert").* else {};
+const frag_spv align(4) = if (os == .linux) @embedFile("sprite.frag").* else {};
 const shader_entry: [*c]const u8 = if (os == .macos) "main0" else "main";
 
 /// FSRCNNX's layers, each writing the image with its own index. `inputs` are earlier images, the movie being -1.
@@ -224,7 +224,7 @@ const up_passes = [_][]const i8{
 
 fn SpirV(comptime name: []const u8) type {
     return struct {
-        const bytes align(4) = @embedFile("shaders/" ++ name ++ ".spv").*;
+        const bytes align(4) = @embedFile(name).*;
     };
 }
 
@@ -233,8 +233,7 @@ fn shaderFunc(comptime name: []const u8, comptime target: [*:0]const u8) c.sg_sh
     f.entry = shader_entry;
     f.d3d11_target = target;
     switch (os) {
-        .windows => f.source = @embedFile("shaders/" ++ name ++ ".hlsl"),
-        .macos => f.source = @embedFile("shaders/" ++ name ++ ".metal"),
+        .windows, .macos => f.source = @embedFile(name),
         else => f.bytecode = .{ .ptr = &SpirV(name).bytes, .size = SpirV(name).bytes.len },
     }
     return f;
@@ -343,7 +342,7 @@ pub const Gfx = struct {
         d.samplers[0].stage = c.SG_SHADERSTAGE_FRAGMENT;
         d.samplers[0].sampler_type = c.SG_SAMPLERTYPE_FILTERING;
         d.texture_sampler_pairs[0].stage = c.SG_SHADERSTAGE_FRAGMENT;
-        // spirv-cross keeps the GLSL's binding as the register number.
+        // spirv-cross keeps the WGSL's binding as the register number.
         d.samplers[0].spirv_set1_binding_n = 1;
         d.samplers[0].hlsl_register_s_n = 1;
         d.samplers[0].msl_sampler_n = 1;
