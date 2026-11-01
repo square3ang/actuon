@@ -6,6 +6,17 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     container: archlinux:latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: ci
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-retries 20
+      redis:
+        image: redis:8-alpine
     steps:
       - run: pacman -Syu --noconfirm git zig sdl3 sdl3_ttf portaudio sqlite lua54 libarchive ffmpeg vulkan-icd-loader vulkan-headers rust python base-devel pkgconf
       - uses: actions/checkout@v4
@@ -22,6 +33,9 @@ jobs:
       - run: cargo build --release
         working-directory: server
       - run: python3 tests/ir_e2e.py server/target/release/actuon-ir zig-out/bin/mkreplay tests/charts/stop.bms "$(mktemp -d)"
+        env:
+          DATABASE_URL: postgres://postgres:ci@postgres/postgres
+          REDIS_URL: redis://redis/
   macos:
     runs-on: macos-latest
     continue-on-error: true

@@ -14,9 +14,9 @@ pub fn request(gpa: std.mem.Allocator, method: std.http.Method, url: []const u8,
         .method = method,
         .payload = payload,
         .response_writer = &body.writer,
-        .extra_headers = headers,
+        .privileged_headers = headers, // a redirect to another host must not carry the IR token
     });
-    return .{ .status = @intFromEnum(res.status), .body = try body.toOwnedSlice() };
+    return .{ .status = @backingInt(res.status), .body = try body.toOwnedSlice() };
 }
 
 pub fn get(gpa: std.mem.Allocator, url: []const u8) ![]u8 {
@@ -44,12 +44,12 @@ pub fn download(gpa: std.mem.Allocator, url: []const u8, path: []const u8, progr
     defer file.close(fs.io);
     var buf: [1 << 16]u8 = undefined;
     var w = file.writer(fs.io, &buf);
-    var req = try client.request(.GET, try std.Uri.parse(url), .{ .redirect_behavior = @enumFromInt(3), .headers = .{ .accept_encoding = .omit } });
+    var req = try client.request(.GET, try std.Uri.parse(url), .{ .redirect_behavior = @fromBackingInt(@intCast(3)), .headers = .{ .accept_encoding = .omit } });
     defer req.deinit();
     try req.sendBodiless();
     var redirect_buf: [8192]u8 = undefined;
     var res = try req.receiveHead(&redirect_buf);
-    if (@intFromEnum(res.head.status) >= 400) return error.HttpStatus;
+    if (@backingInt(res.head.status) >= 400) return error.HttpStatus;
     progress.done.store(0, .release);
     progress.total.store(res.head.content_length orelse 0, .release);
     var transfer: [64]u8 = undefined;

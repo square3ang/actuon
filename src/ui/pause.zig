@@ -3,6 +3,7 @@
 const std = @import("std");
 const c = @import("c");
 const gfx = @import("gfx.zig");
+const testing = @import("testing.zig");
 const App = @import("app.zig").App;
 
 const slide_ms: f32 = 280;
@@ -28,7 +29,7 @@ fn easeOut(x: f32) f32 {
 }
 
 pub fn open(a: *App) void {
-    a.pause = .{ .open = true, .opened_at = c.SDL_GetTicks() };
+    a.pause = .{ .open = true, .opened_at = c.SDL_GetTicks(), .last_mx = a.g.mx, .last_my = a.g.my };
     a.session.?.setPaused(true);
     a.sfx(.back);
 }
@@ -43,7 +44,7 @@ fn itemCount(a: *const App) u8 {
 }
 
 fn actionOf(a: *const App, i: u8) Action {
-    return if (a.course != null and i == 1) .quit else @enumFromInt(i);
+    return if (a.course != null and i == 1) .quit else @fromBackingInt(@intCast(i));
 }
 
 fn activate(a: *App, act: Action) void {
@@ -112,6 +113,12 @@ pub fn tick(a: *App) void {
     const top = g.h * 0.5 - row_h * @as(f32, @floatFromInt(n)) / 2;
     g.rect(g.w - band_w * k, 0, band_w, g.h, gfx.plate.alpha(235));
     var clicked: ?u8 = null;
+    // Measured from where the mouse last counted, so sensor jitter never adds up to a move.
+    const moved = @abs(g.mx - p.last_mx) + @abs(g.my - p.last_my) > 8 * u;
+    if (moved) {
+        p.last_mx = g.mx;
+        p.last_my = g.my;
+    }
     for (0..n) |i| {
         const idx: u8 = @intCast(i);
         const delay = stagger_ms * @as(f32, @floatFromInt(i));
@@ -120,7 +127,7 @@ pub fn tick(a: *App) void {
         const y = top + row_h * @as(f32, @floatFromInt(i));
         if (p.closing_at == null and g.hit(x, y, band_w, row_h)) {
             // Only a moving mouse takes the selection, so a resting one cannot fight the keyboard.
-            if ((g.mx != p.last_mx or g.my != p.last_my) and p.sel != idx) {
+            if (moved and p.sel != idx) {
                 p.sel = idx;
                 a.sfx(.move);
             }
@@ -131,7 +138,7 @@ pub fn tick(a: *App) void {
             g.rect(x, y, band_w, row_h, gfx.slab);
             g.rect(x, y, 5 * u, row_h, gfx.cyan);
         }
-        _ = g.text(labels[@intFromEnum(actionOf(a, idx))], x + 36 * u, y + 16 * u, g.scaled(28), if (on) gfx.white else gfx.dim);
+        _ = g.text(labels[@backingInt(actionOf(a, idx))], x + 36 * u, y + 16 * u, g.scaled(28), if (on) gfx.white else gfx.dim);
     }
 
     if (p.closing_at) |at| {
@@ -149,8 +156,6 @@ pub fn tick(a: *App) void {
         const scale = 1 + 0.7 * (1 - easeOut(age / 350));
         g.textPop(digit, g.w / 2, g.h * 0.5 - 48 * u, g.scaled(96), gfx.white, scale);
     }
-    p.last_mx = g.mx;
-    p.last_my = g.my;
     if (clicked) |i| activate(a, actionOf(a, i));
 }
 
@@ -158,4 +163,32 @@ test "the menu eases to rest" {
     try std.testing.expectEqual(@as(f32, 0), easeOut(0));
     try std.testing.expectEqual(@as(f32, 1), easeOut(2));
     try std.testing.expect(easeOut(0.5) > 0.5);
+}
+
+test "the menu wraps, and a course has no retry" {
+    const a = try testing.open();
+    defer testing.close(a);
+    key(a, c.SDL_SCANCODE_UP);
+    try std.testing.expectEqual(@as(u8, 2), a.pause.sel);
+    key(a, c.SDL_SCANCODE_DOWN);
+    try std.testing.expectEqual(@as(u8, 0), a.pause.sel);
+    try std.testing.expectEqual(Action.retry, actionOf(a, 1));
+    a.course = undefined;
+    defer a.course = null;
+    key(a, c.SDL_SCANCODE_UP);
+    try std.testing.expectEqual(@as(u8, 1), a.pause.sel);
+    try std.testing.expectEqual(Action.quit, actionOf(a, 1));
+}
+
+test "escape counts down to resume, and again goes back to the menu" {
+    const a = try testing.open();
+    defer testing.close(a);
+    key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expect(a.pause.closing_at != null);
+    key(a, c.SDL_SCANCODE_DOWN);
+    try std.testing.expectEqual(@as(u8, 0), a.pause.sel);
+    key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expect(a.pause.closing_at == null);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expect(a.pause.closing_at != null);
 }

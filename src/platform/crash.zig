@@ -26,7 +26,7 @@ fn onSignal(sig: std.posix.SIG) callconv(.c) void {
         const fd = std.c.open(&path_buf, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
         if (fd >= 0) {
             var buf: [64]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "actuon crashed: signal {d}\n", .{@intFromEnum(sig)}) catch "actuon crashed\n";
+            const msg = std.fmt.bufPrint(&buf, "actuon crashed: signal {d}\n", .{@backingInt(sig)}) catch "actuon crashed\n";
             _ = std.c.write(fd, msg.ptr, msg.len);
             _ = std.c.close(fd);
         }

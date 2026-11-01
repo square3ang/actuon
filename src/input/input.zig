@@ -204,7 +204,7 @@ const evdev = if (builtin.os.tag == .linux) struct {
                 _ = linux.close(fd);
                 continue;
             }
-            var clock: i32 = @intFromEnum(linux.clockid_t.MONOTONIC);
+            var clock: i32 = @backingInt(linux.clockid_t.MONOTONIC);
             _ = linux.ioctl(fd, EVIOCSCLOCKID, @intFromPtr(&clock));
             fds[n] = .{ .fd = fd, .events = linux.POLL.IN, .revents = 0 };
             n += 1;

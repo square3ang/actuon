@@ -58,17 +58,19 @@ pub fn extract(a: std.mem.Allocator, archive_path: []const u8, dest: []const u8)
         std.mem.replaceScalar(u8, clean, '\\', '/');
         const out_path = try std.fs.path.join(a, &.{ dest, clean });
         if (std.fs.path.dirname(out_path)) |d| try fs.mkdirs(d);
-        var data: std.ArrayList(u8) = .empty;
+        const file = try std.Io.Dir.cwd().createFile(fs.io, out_path, .{});
+        defer file.close(fs.io);
+        var out_buf: [1 << 16]u8 = undefined;
+        var w = file.writer(fs.io, &out_buf);
         while (true) {
             const n = c.archive_read_data(ar, &buf, buf.len);
             if (n < 0) return error.Archive;
             if (n == 0) break;
             written += @intCast(n);
             if (written > max_unpacked) return error.TooLarge;
-            try data.appendSlice(a, buf[0..@intCast(n)]);
+            try w.interface.writeAll(buf[0..@intCast(n)]);
         }
-        try fs.write(out_path, data.items);
-        data.deinit(a);
+        try w.interface.flush();
         files += 1;
     }
     return files;

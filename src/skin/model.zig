@@ -68,6 +68,8 @@ pub const Object = struct {
     /// graph: 0 horizontal, 1 vertical. slider: 0 up, 1 right, 2 down, 3 left.
     dir: i32 = 0,
     range: f32 = 0,
+    /// slider: the mouse can move it.
+    changeable: bool = false,
     font_size: u16 = 24,
     /// bga: beatoraja's stretch type, -1 when the skin gives none.
     stretch: i32 = -1,
@@ -172,6 +174,7 @@ pub const Ctx = struct {
     num: *const fn (ud: *anyopaque, id: i32) ?i64,
     float: *const fn (ud: *anyopaque, id: i32) f32,
     str: *const fn (ud: *anyopaque, id: i32) []const u8,
+    set_float: ?*const fn (ud: *anyopaque, id: i32, value: f32) bool = null,
     /// Lift and hidden in skin pixels.
     lift_px: f32 = 0,
     hidden_px: f32 = 0,
@@ -179,6 +182,32 @@ pub const Ctx = struct {
     lua_call_num: ?*const fn (skin: *Skin, r: i32) f64 = null,
     lua_call_str: ?*const fn (skin: *Skin, r: i32, buf: []u8) []const u8 = null,
 };
+
+/// Where a point on a slider's track puts it, from 0 at the resting place to 1, as in beatoraja's
+/// SkinSlider. Null off the track. Dragging is this on every frame the button is down.
+fn sliderValue(dir: i32, range: f32, k: Key, x: f32, y: f32) ?f32 {
+    if (range <= 0) return null;
+    const across = if (dir == 0 or dir == 2) x >= k.x and x <= k.x + k.w else y >= k.y and y <= k.y + k.h;
+    if (!across) return null;
+    const along = switch (dir) {
+        0 => k.y - y,
+        1 => x - k.x,
+        2 => y - k.y,
+        else => k.x - x,
+    };
+    return if (along >= 0 and along <= range) along / range else null;
+}
+
+test "slider tracks run from the resting place" {
+    const k: Key = .{ .x = 100, .y = 200, .w = 28, .h = 70 };
+    try std.testing.expectEqual(@as(?f32, 0.5), sliderValue(2, 600, k, 110, 500));
+    try std.testing.expectEqual(@as(?f32, 0), sliderValue(2, 600, k, 110, 200));
+    try std.testing.expectEqual(@as(?f32, null), sliderValue(2, 600, k, 90, 500));
+    try std.testing.expectEqual(@as(?f32, null), sliderValue(2, 600, k, 110, 801));
+    try std.testing.expectEqual(@as(?f32, 0.5), sliderValue(0, 100, k, 110, 150));
+    try std.testing.expectEqual(@as(?f32, 0.25), sliderValue(1, 100, k, 125, 210));
+    try std.testing.expectEqual(@as(?f32, 0.5), sliderValue(3, 100, k, 50, 210));
+}
 
 fn timerStart(ctx: *const Ctx, id: i32) i64 {
     if (id == 0) return 0;
@@ -240,6 +269,18 @@ pub fn sample(keys: []const Key, t_in: i64, loop: i32) ?Key {
 }
 
 /// Private float ids for the gauge object, outside LR2's id range.
+/// Added to an option button's ref, as `imageRef` does.
+pub const button_index: i32 = 91000;
+
+/// beatoraja keeps image values apart from numbers: 390 is a ranking row's clear here, its place
+/// elsewhere, and 12 the sort button here, the judge timing elsewhere.
+fn imageRef(ref: i32) i32 {
+    return switch (ref) {
+        390...399 => ref + 10000,
+        11, 12, 40, 42, 55, 78, 308 => ref + button_index,
+        else => ref,
+    };
+}
 pub const gauge_value: i32 = 90107;
 pub const gauge_border: i32 = 90108;
 /// Private number id: the gauge type, as main_state.gauge_type returns it.
@@ -274,14 +315,14 @@ pub const Renderer = struct {
         const n = @max(src.divx, 1) * @max(src.divy, 1);
         const st = timerStart(r.ctx, src.timer);
         const t = if (st < 0) 0 else r.ctx.now_ms - st;
-        const row = if (src.len > 1) r.ctx.num(r.ctx.ud, src.ref) orelse 0 else 0;
+        const row = if (src.len > 1) r.ctx.num(r.ctx.ud, imageRef(src.ref)) orelse 0 else 0;
         return runFrame(n, src.len, row, t, src.cycle);
     }
 
     pub fn blit(r: *const Renderer, src_in: *const Src, frame: i32, k: Key, blend: u8, center: u8, crop: ?[4]f32) void {
         var src = src_in;
         if (src.set.len > 0) {
-            const v = r.ctx.num(r.ctx.ud, src.set_ref) orelse 0;
+            const v = r.ctx.num(r.ctx.ud, imageRef(src.set_ref)) orelse 0;
             src = &src.set[@intCast(std.math.clamp(v, 0, @as(i64, @intCast(src.set.len)) - 1))];
         }
         const dst: c.SDL_FRect = .{ .x = k.x * r.sx, .y = k.y * r.sy, .w = k.w * r.sx, .h = k.h * r.sy };
@@ -338,6 +379,8 @@ pub const Renderer = struct {
 
     fn drawNumber(r: *const Renderer, o: *const Object, k: Key) void {
         const v = if (o.lua_value != 0 and r.ctx.lua_call_num != null) @as(?i64, @intFromFloat(r.ctx.lua_call_num.?(r.s, o.lua_value))) else r.ctx.num(r.ctx.ud, o.ref);
+        // beatoraja's value for "nothing to show", such as an empty ranking row.
+        if (v == std.math.minInt(i32)) return;
         r.drawValue(o, k, v orelse return);
     }
 
@@ -457,7 +500,7 @@ pub const Renderer = struct {
         const per_type: usize = if (o.nodes.len >= 6) 6 else 4;
         const types = o.nodes.len / per_type;
         const ty: usize = @intCast(std.math.clamp(r.ctx.num(r.ctx.ud, gauge_type) orelse 0, 0, @as(i64, @intCast(types)) - 1));
-        const nodes = o.nodes[ty * per_type..][0..per_type];
+        const nodes = o.nodes[ty * per_type ..][0..per_type];
         const pw = k.w / @as(f32, @floatFromInt(parts));
         const lit: i32 = @intFromFloat(@ceil(pct * @as(f32, @floatFromInt(parts))));
         var kk = k;
@@ -522,6 +565,11 @@ pub const Renderer = struct {
                 }
             },
             .slider => {
+                if (o.changeable and r.g.down) if (r.ctx.set_float) |set| {
+                    if (sliderValue(o.dir, o.range, k, r.g.mx / r.sx, r.g.my / r.sy)) |value| {
+                        if (set(r.ctx.ud, o.ref, value)) r.g.clicked = false;
+                    }
+                };
                 const v = std.math.clamp(r.ctx.float(r.ctx.ud, o.ref), 0, 1);
                 var kk = k;
                 switch (o.dir) {

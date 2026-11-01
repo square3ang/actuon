@@ -31,17 +31,17 @@ pub fn main(init: std.process.Init) !void {
         defer chart.deinit();
         var h: u64 = 0xcbf29ce484222325;
         for (chart.notes) |n| {
-            if (args.len > 2) try w.print("{d} {d} {d} {d}\n", .{ n.time_us, n.lane, @intFromEnum(n.kind), if (n.wav < 0) -1 else n.wav });
+            if (args.len > 2) try w.print("{d} {d} {d} {d}\n", .{ n.time_us, n.lane, @backingInt(n.kind), if (n.wav < 0) -1 else n.wav });
             h = mix(h, n.time_us);
             h = mix(h, n.lane);
-            h = mix(h, @intFromEnum(n.kind));
+            h = mix(h, @backingInt(n.kind));
             h = mix(h, if (n.wav < 0) -1 else n.wav);
         }
         const is_bmson = std.ascii.endsWithIgnoreCase(path, ".bmson");
         try w.print("{s}\t{s}\t{s}\t{d}\t{d}\t{d}\t{d}\t{x}\n", .{
-            path,                                    if (is_bmson) "" else chart.md5[0..],  chart.sha256[0..],
-            chart.mode.keys(),                       chart.total_notes,                     @divTrunc(chart.last_time_us, 1000),
-            @divTrunc(chart.last_note_us, 1000),     h,
+            path,                                if (is_bmson) "" else chart.md5[0..], chart.sha256[0..],
+            chart.mode.keys(),                   chart.total_notes,                    @divTrunc(chart.last_time_us, 1000),
+            @divTrunc(chart.last_note_us, 1000), h,
         });
     }
     try w.flush();

@@ -17,6 +17,23 @@ fn keyLanes(mode: types.Mode, side: u8, buf: *[9]u8) []u8 {
     return buf[0..n];
 }
 
+pub const LnMode = enum(u8) { ln, cn, hcn };
+
+/// Decides the LNs the chart leaves open. False when nothing changed, so the play is an ordinary one.
+pub fn applyLnMode(chart: *types.Chart, mode: LnMode) bool {
+    if (mode == .ln) return false;
+    var changed = false;
+    for (chart.notes) |*n| {
+        if (!n.ln_open) continue;
+        changed = true;
+        n.ln_type = if (mode == .cn) .cn else .hcn;
+        // LN scores once, CN and HCN at both ends.
+        if (n.kind == .ln_end) chart.total_notes += 1;
+    }
+    if (changed and !chart.total_defined) chart.total = types.defaultTotal(chart.total_notes);
+    return changed;
+}
+
 /// Rewrites lanes in place. Scratch stays on scratch, as in LR2.
 pub fn apply(chart: *types.Chart, opt: Random, seed: u64) void {
     if (opt == .off) return;

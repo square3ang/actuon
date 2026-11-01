@@ -61,6 +61,7 @@ pub const Params = struct {
     table_level: []const u8 = "",
     table_name: []const u8 = "",
     random: core.options.Random = .off,
+    ln_mode: core.options.LnMode = .ln,
     seed: u64 = 0,
     autoplay: bool = false,
     /// Replay to play back instead of live input.
@@ -156,6 +157,8 @@ pub const Session = struct {
     pub fn create(gpa: std.mem.Allocator, engine: *engine_mod.Engine, cfg: *const config.Config, params: Params, progress: *std.atomic.Value(usize), total: *std.atomic.Value(usize), parsed: *Parsed) !*Session {
         var chart = try parseFile(gpa, params.path, params.selected_random orelse if (params.replay) |r| r.bms_random else null, params.seed);
         errdefer chart.deinit();
+        var played = params;
+        if (!core.options.applyLnMode(&chart, params.ln_mode)) played.ln_mode = .ln;
         core.options.apply(&chart, params.random, params.seed);
         total.store(chart.wavs.len, .release);
         parsed.chart = chart;
@@ -182,7 +185,7 @@ pub const Session = struct {
         errdefer gpa.free(sched);
         const sim = try Sim.create(gpa, &chart, .{ .gauge = params.gauge, .autoplay = params.autoplay, .gas = params.gas });
         errdefer sim.destroy();
-        if (params.initial_gauge) |v| sim.gauges[@intFromEnum(params.gauge)].set(v);
+        if (params.initial_gauge) |v| sim.gauges[@backingInt(params.gauge)].set(v);
         const vis = try gpa.alloc(u8, sim.state.len);
         errdefer gpa.free(vis);
         @memset(vis, 0);
@@ -196,7 +199,7 @@ pub const Session = struct {
             .samples = samples,
             .schedule = sched,
             .vis = vis,
-            .params = params,
+            .params = played,
             .bind = config.bindings(cfg, chart.mode),
             .lock = c.SDL_CreateMutex() orelse return error.NoMutex,
             .end_us = chart.last_time_us + post_us,
@@ -400,6 +403,7 @@ pub const Session = struct {
             .gauge = s.params.gauge,
             .gas = s.params.gas,
             .random = s.params.random,
+            .ln_mode = s.params.ln_mode,
             .seed = s.params.seed,
             .bms_random = s.chart.random,
             .events = s.events.items,

@@ -29,7 +29,7 @@ pub const Cursor = struct {
         cur.last_t = t;
         while (cur.next < events.len and events[cur.next].time_us <= t) : (cur.next += 1) {
             const e = events[cur.next];
-            const l = @intFromEnum(e.layer);
+            const l = @backingInt(e.layer);
             cur.id[l] = e.id;
             cur.since[l] = e.time_us;
         }

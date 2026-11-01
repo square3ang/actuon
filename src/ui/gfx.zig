@@ -20,12 +20,10 @@ pub const well: Color = .{ .r = 5, .g = 8, .b = 16 };
 pub const rule: Color = .{ .r = 52, .g = 68, .b = 104 };
 pub const accent: Color = .{ .r = 38, .g = 92, .b = 240 };
 pub const slab: Color = .{ .r = 22, .g = 40, .b = 88 };
-pub const slab_fail: Color = .{ .r = 92, .g = 30, .b = 32 };
 pub const cyan: Color = .{ .r = 176, .g = 212, .b = 255 };
 pub const steel: Color = .{ .r = 92, .g = 106, .b = 134 };
 pub const plate: Color = .{ .r = 26, .g = 36, .b = 64 };
 pub const sky: Color = .{ .r = 130, .g = 190, .b = 255 };
-pub const on_accent_dim: Color = .{ .r = 196, .g = 212, .b = 252 };
 pub const danger: Color = .{ .r = 214, .g = 62, .b = 54 };
 pub const amber: Color = .{ .r = 240, .g = 170, .b = 70 };
 
@@ -352,12 +350,8 @@ pub const Gfx = struct {
         return d;
     }
 
-    fn upPipeline(comptime i: usize) c.sg_pipeline {
-        const name = if (i == up_passes.len - 1) "fsrcnnx_unpack.frag" else std.fmt.comptimePrint("fsrcnnx_{d}.frag", .{i});
-        var s = std.mem.zeroes(c.sg_shader_desc);
-        s.vertex_func = shaderFunc("upscale.vert", "vs_5_0");
-        s.fragment_func = shaderFunc(name, "ps_5_0");
-        for (0..up_passes[i].len) |b| {
+    fn fragmentTextures(s: *c.sg_shader_desc, count: usize) void {
+        for (0..count) |b| {
             s.views[b].texture.stage = c.SG_SHADERSTAGE_FRAGMENT;
             s.views[b].texture.image_type = c.SG_IMAGETYPE_2D;
             s.views[b].texture.sample_type = c.SG_IMAGESAMPLETYPE_FLOAT;
@@ -365,6 +359,14 @@ pub const Gfx = struct {
             s.views[b].texture.hlsl_register_t_n = @intCast(b);
             s.views[b].texture.msl_texture_n = @intCast(b);
         }
+    }
+
+    fn upPipeline(comptime i: usize) c.sg_pipeline {
+        const name = if (i == up_passes.len - 1) "fsrcnnx_unpack.frag" else std.fmt.comptimePrint("fsrcnnx_{d}.frag", .{i});
+        var s = std.mem.zeroes(c.sg_shader_desc);
+        s.vertex_func = shaderFunc("upscale.vert", "vs_5_0");
+        s.fragment_func = shaderFunc(name, "ps_5_0");
+        fragmentTextures(&s, up_passes[i].len);
         var d = std.mem.zeroes(c.sg_pipeline_desc);
         d.shader = c.sg_make_shader(&s);
         d.colors[0].pixel_format = c.SG_PIXELFORMAT_RGBA16F;
@@ -377,14 +379,7 @@ pub const Gfx = struct {
         var s = std.mem.zeroes(c.sg_shader_desc);
         s.vertex_func = shaderFunc("upscale.vert", "vs_5_0");
         s.fragment_func = shaderFunc("upscale.frag", "ps_5_0");
-        for (0..2) |b| {
-            s.views[b].texture.stage = c.SG_SHADERSTAGE_FRAGMENT;
-            s.views[b].texture.image_type = c.SG_IMAGETYPE_2D;
-            s.views[b].texture.sample_type = c.SG_IMAGESAMPLETYPE_FLOAT;
-            s.views[b].texture.spirv_set1_binding_n = @intCast(b);
-            s.views[b].texture.hlsl_register_t_n = @intCast(b);
-            s.views[b].texture.msl_texture_n = @intCast(b);
-        }
+        fragmentTextures(&s, 2);
         s.samplers[0].stage = c.SG_SHADERSTAGE_FRAGMENT;
         s.samplers[0].sampler_type = c.SG_SAMPLERTYPE_FILTERING;
         s.samplers[0].spirv_set1_binding_n = 2;
@@ -549,7 +544,7 @@ pub const Gfx = struct {
         defer if (packed_px.len > 0) g.gpa.free(packed_px);
         if (pitch != tight) {
             packed_px = g.gpa.alloc(u8, tight * h) catch return;
-            for (0..h) |row| @memcpy(packed_px[row * tight..][0..tight], px[row * pitch..][0..tight]);
+            for (0..h) |row| @memcpy(packed_px[row * tight ..][0..tight], px[row * pitch ..][0..tight]);
         }
         var d = std.mem.zeroes(c.sg_image_desc);
         d.width = @intCast(w);
@@ -852,19 +847,6 @@ pub const Gfx = struct {
         g.quad(.{ vert(x, y, left), vert(x + w, y, right), vert(x + w, y + h, right), vert(x, y + h, left) });
     }
 
-    /// Rectangle with cut corners, the frame shape of every panel.
-    pub fn chamfer(g: *Gfx, x: f32, y: f32, w: f32, h: f32, cut: f32, top: Color, bottom: Color) void {
-        const k = cut / h;
-        const t1 = mix(top, bottom, k);
-        const t2 = mix(top, bottom, 1 - k);
-        const v = [8]Vertex{
-            vert(x + cut, y, top),     vert(x + w - cut, y, top),      vert(x + w, y + cut, t1), vert(x + w, y + h - cut, t2),
-            vert(x + w - cut, y + h, bottom), vert(x + cut, y + h, bottom), vert(x, y + h - cut, t2), vert(x, y + cut, t1),
-        };
-        const idx = [18]u32{ 0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 5, 0, 5, 6, 0, 6, 7 };
-        g.push(&v, &idx);
-    }
-
     /// Arc as a strip. `from`, `to` in radians; a full circle when they differ by tau.
     pub fn ring(g: *Gfx, cx: f32, cy: f32, r: f32, thick: f32, from: f32, to: f32, col: Color) void {
         const segs = 48;
@@ -1113,7 +1095,7 @@ pub fn loadTexture(g: *Gfx, path: []const u8, bytes: []const u8) ?*Texture {
         for (0..@intCast(size[0])) |x| {
             const sx = x * @as(usize, @intCast(w)) / @as(usize, @intCast(size[0]));
             const at = (sy * @as(usize, @intCast(w)) + sx) * 4;
-            @memcpy(small[(y * @as(usize, @intCast(size[0])) + x) * 4..][0..4], from[at..][0..4]);
+            @memcpy(small[(y * @as(usize, @intCast(size[0])) + x) * 4 ..][0..4], from[at..][0..4]);
         }
     }
     return g.textureFromPixels(small.ptr, size[0], size[1], @intCast(size[0] * 4));

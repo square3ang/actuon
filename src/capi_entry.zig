@@ -20,6 +20,8 @@ export fn actuon_verify(input: *const VerifyInput, out: *replay.Result) callconv
     const a = arena.allocator();
     const chart_bytes = input.chart[0..input.chart_len];
     const r = replay.decode(a, input.replay[0..input.replay_len]) catch return -1;
+    // A CN or HCN play changes the note count, so it cannot rank against the chart's own board.
+    if (r.ln_mode != .ln) return -1;
     var chart = (if (input.format == 3)
         core.bmson.parse(gpa, chart_bytes)
     else
@@ -28,6 +30,15 @@ export fn actuon_verify(input: *const VerifyInput, out: *replay.Result) callconv
     if (!std.mem.eql(u8, &chart.sha256, &r.sha256)) return -3;
     out.* = replay.resimulate(gpa, &chart, r) catch return -2;
     return 0;
+}
+
+/// Returns 0 when the bytes parse as a chart with notes to play, otherwise -2.
+export fn actuon_check_chart(data: [*]const u8, len: usize, format: u8) callconv(.c) i32 {
+    const gpa = std.heap.c_allocator;
+    const bytes = data[0..len];
+    var chart = (if (format == 3) core.bmson.parse(gpa, bytes) else core.bms.parse(gpa, bytes, .{ .is_pms = format == 2 })) catch return -2;
+    defer chart.deinit();
+    return if (chart.total_notes > 0) 0 else -2;
 }
 
 /// Lowercase hex SHA-256 and MD5 of a chart file, without decoding it.

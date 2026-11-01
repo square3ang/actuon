@@ -7,6 +7,7 @@ const app_mod = @import("app.zig");
 const settings = @import("settings.zig");
 const skin_mod = @import("../skin/skin.zig");
 const jsonskin = @import("../skin/jsonskin.zig");
+const testing = @import("testing.zig");
 const App = app_mod.App;
 const Option = skin_mod.Option;
 
@@ -155,4 +156,19 @@ pub fn draw(a: *App) void {
         }
     }
     _ = g.text("Left/Right changes the value. Changes show on song select and from the next play. Esc goes back.", 22 * u, help_y + 10 * u, g.scaled(14), gfx.dim);
+}
+
+test "the cursor wraps and escape returns where it came from" {
+    const a = try testing.open();
+    defer testing.close(a);
+    const rows = [_]Option{ undefined, undefined, undefined };
+    a.skinconf = .{ .rows = &rows, .back = .skinslots };
+    a.scene = .skinconf;
+    key(a, c.SDL_SCANCODE_UP);
+    try std.testing.expectEqual(@as(usize, 2), a.skinconf.cursor);
+    key(a, c.SDL_SCANCODE_DOWN);
+    try std.testing.expectEqual(@as(usize, 0), a.skinconf.cursor);
+    key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expectEqual(.skinslots, a.scene);
+    try std.testing.expectEqual(@as(usize, 0), a.skinconf.rows.len);
 }

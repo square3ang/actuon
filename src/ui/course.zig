@@ -4,7 +4,6 @@ const c = @import("c");
 const core = @import("actuon_core");
 const app_mod = @import("app.zig");
 const result = @import("result.zig");
-const db_mod = @import("../db/db.zig");
 const table = @import("../table/table.zig");
 const session_mod = @import("../game/session.zig");
 const App = app_mod.App;
@@ -69,7 +68,7 @@ fn startImpl(a: *App, id: i64) !void {
         };
         try paths.append(al, p);
     }
-    const chosen: core.options.Random = @enumFromInt(@min(a.cfg.random, 4));
+    const chosen: core.options.Random = @fromBackingInt(@intCast(@min(a.cfg.random, 4)));
     const allowed: core.options.Random = switch (limits.random) {
         0 => .off,
         1 => if (chosen == .mirror) .mirror else .off,
@@ -141,7 +140,7 @@ pub fn finish(a: *App) void {
     ) catch return;
     defer st.deinit();
     st.bindInt(1, r.id);
-    st.bindInt(2, @intFromEnum(res.clear));
+    st.bindInt(2, @backingInt(res.clear));
     st.bindInt(3, r.total.exScore());
     _ = st.step() catch {};
 }

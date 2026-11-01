@@ -12,6 +12,8 @@ const app_mod = @import("app.zig");
 const select = @import("select.zig");
 const db_mod = @import("../db/db.zig");
 const input = @import("../input/input.zig");
+const ir = @import("../net/ir.zig");
+const testing = @import("testing.zig");
 const App = app_mod.App;
 
 const Section = enum {
@@ -68,6 +70,8 @@ const Item = enum {
     import_lr2,
     ir_url,
     ir_token,
+    ir_upload,
+    ir_download,
     download_url,
     input_poll,
     bind_4k,
@@ -77,6 +81,8 @@ const Item = enum {
     bind_10k,
     bind_14k,
     bind_9k,
+    beatoraja_select,
+    bind_start,
 
     fn section(it: Item) Section {
         return switch (it) {
@@ -86,8 +92,8 @@ const Item = enum {
             .fullscreen, .vsync, .reflex, .bga_upscale, .skin, .skin_slots => .display,
             .green, .lift, .hidden, .judge_offset, .visual_offset => .timing,
             .import_beatoraja, .import_lr2 => .scores,
-            .ir_url, .ir_token, .download_url => .online,
-            .input_poll, .bind_4k, .bind_5k, .bind_6k, .bind_7k, .bind_10k, .bind_14k, .bind_9k => .controls,
+            .ir_url, .ir_token, .ir_upload, .ir_download, .download_url => .online,
+            .input_poll, .bind_4k, .bind_5k, .bind_6k, .bind_7k, .bind_10k, .bind_14k, .bind_9k, .beatoraja_select, .bind_start => .controls,
         };
     }
 
@@ -121,6 +127,8 @@ const Item = enum {
             .import_lr2 => "Import LR2 scores",
             .ir_url => "IR server",
             .ir_token => "IR token",
+            .ir_upload => "Upload my scores to IR",
+            .ir_download => "Download my scores from IR",
             .download_url => "Download URL",
             .input_poll => "Key polling",
             .bind_4k => "4 key",
@@ -130,6 +138,8 @@ const Item = enum {
             .bind_10k => "10 key",
             .bind_14k => "14 key",
             .bind_9k => "9 key (PMS)",
+            .beatoraja_select => "beatoraja controls",
+            .bind_start => "Start, Select",
         };
     }
 
@@ -159,10 +169,12 @@ const Item = enum {
             .hidden => "Hides notes just above the judge line. Insert and Delete change it during play.",
             .judge_offset => "Positive forgives a player who hits late.",
             .visual_offset => "Moves the notes without moving the judgement.",
-            .import_beatoraja => "Choose beatoraja's score.db.",
+            .import_beatoraja => "Choose score.db. Note: judging differs from beatoraja, so lr2oraja scores are recommended.",
             .import_lr2 => "Choose the LR2 score database.",
             .ir_url => "Base address of the internet ranking server.",
             .ir_token => "Sign-in token for that server. It is never shown here.",
+            .ir_upload => "Sends saved replays the server does not have yet. Scores without a replay, like imported ones, rank as unverified.",
+            .ir_download => "Merges your scores on the server into this library. Better local scores stay.",
             .download_url => "Where missing charts come from: an archive or a lookup service. {md5} becomes the chart's hash.",
             .input_poll => "Key checks per second during play. Higher takes more CPU. Event uses OS key events. macOS always does.",
             .bind_5k, .bind_10k => "Enter, then press each input in turn: 5 keys, scratch A, scratch B, per side.",
@@ -170,6 +182,8 @@ const Item = enum {
             .bind_4k => "Enter, then press each of the 4 keys in turn.",
             .bind_6k => "Enter, then press each of the 6 keys in turn.",
             .bind_9k => "Enter, then press each of the 9 buttons in turn.",
+            .beatoraja_select => "Song select, result and play take the 7 key inputs and Start, Select as in beatoraja, on keyboard or controller.",
+            .bind_start => "Enter, then press Start, then Select. They open option panels in song select and change speed in play.",
         };
     }
 };
@@ -195,6 +209,7 @@ pub const State = struct {
     drop: Drop = .{},
     drop_for: Item = .skin,
     drop_values: []const []const u8 = &.{},
+    sync: ?*ir.Sync = null,
 };
 
 const items = std.enums.values(Item);
@@ -271,6 +286,32 @@ fn pollPicker(a: *App) void {
     }
 }
 
+fn startSync(a: *App, upload: bool) void {
+    if (a.set.sync != null) return;
+    if (a.cfg.ir_url.len == 0 or a.cfg.ir_token.len == 0) return say(a, "Set an IR server and token first", .{});
+    a.set.sync = ir.startSync(a.gpa, a.cfg.ir_url, a.cfg.ir_token, upload);
+    if (a.set.sync == null) say(a, "Could not start IR sync", .{});
+}
+
+fn pollSync(a: *App) void {
+    const s = a.set.sync orelse return;
+    if (!s.done.load(.acquire)) {
+        const total = s.total.load(.acquire);
+        if (total > 0) return say(a, "Uploading {d} of {d}...", .{ s.progress.load(.acquire), total });
+        return say(a, "Talking to the IR server...", .{});
+    }
+    if (s.err) |e| {
+        say(a, "IR sync failed: {t}", .{e});
+    } else if (s.upload) {
+        say(a, "Uploaded {d} replays, {d} unverified scores, {d} failed", .{ s.accepted, s.claimed, s.failed });
+    } else {
+        say(a, "Downloaded {d} scores", .{s.accepted});
+        select.reload(a);
+    }
+    s.destroy();
+    a.set.sync = null;
+}
+
 fn startEditing(a: *App, it: Item) void {
     a.set.editing = it;
     var green_buf: [16]u8 = undefined;
@@ -285,12 +326,20 @@ fn startEditing(a: *App, it: Item) void {
     });
 }
 
+/// beatoraja's key config key lands here.
+pub fn openControls(a: *App) void {
+    a.set.cursor = firstOf(.controls);
+    a.set.inside = true;
+    a.scene = .settings;
+}
+
 fn firstOf(sec: Section) usize {
     for (items, 0..) |it, i| if (it.section() == sec) return i;
     return 0;
 }
 
 fn bindsOf(a: *App, it: Item) []u16 {
+    if (it == .bind_start) return &a.cfg.start_select;
     return config.keysOf(&a.cfg, switch (it) {
         .bind_4k => .beat4,
         .bind_5k => .beat5,
@@ -302,7 +351,7 @@ fn bindsOf(a: *App, it: Item) []u16 {
     });
 }
 
-fn keyName(code: u16, buf: []u8) []const u8 {
+pub fn keyName(code: u16, buf: []u8) []const u8 {
     if (code >= input.joy_base) return std.fmt.bufPrint(buf, "Pad {d}", .{code - input.joy_base}) catch "";
     const name = std.mem.span(c.SDL_GetScancodeName(code));
     return if (name.len > 0) name else "-";
@@ -528,6 +577,7 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
         },
         .fullscreen => drawToggle(g, right, y, h, cfg.fullscreen, on),
         .bga_upscale => drawToggle(g, right, y, h, cfg.bga_upscale, on),
+        .beatoraja_select => drawToggle(g, right, y, h, cfg.beatoraja_select, on),
         .vsync => if (drawChoices(g, right, y, h, &.{ "Off", "On", "Adaptive" }, if (cfg.vsync == 0) 0 else if (cfg.vsync == 1) 1 else 2, on)) |i| {
             a.sfx(.adjust);
             cfg.vsync = switch (i) {
@@ -569,7 +619,7 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
         .hidden => step(a, it, drawStepper(g, right, y, h, std.fmt.bufPrint(&buf, "{d}%", .{@as(u32, @intFromFloat(@round(cfg.hidden * 100)))}) catch "", on)),
         .judge_offset => step(a, it, drawStepper(g, right, y, h, std.fmt.bufPrint(&buf, "{d} ms", .{cfg.judge_offset_ms}) catch "", on)),
         .visual_offset => step(a, it, drawStepper(g, right, y, h, std.fmt.bufPrint(&buf, "{d} ms", .{cfg.visual_offset_ms}) catch "", on)),
-        .bind_4k, .bind_5k, .bind_6k, .bind_7k, .bind_10k, .bind_14k, .bind_9k => drawKeys(a, it, right, y, h, on),
+        .bind_4k, .bind_5k, .bind_6k, .bind_7k, .bind_10k, .bind_14k, .bind_9k, .bind_start => drawKeys(a, it, right, y, h, on),
         else => {
             const value = switch (it) {
                 .add_root => std.fmt.bufPrint(&buf, "{d} configured", .{cfg.roots.len}) catch "",
@@ -589,20 +639,13 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
     }
 }
 
-pub fn draw(a: *App) void {
+/// Tabs down the left. A tab is picked first, then entered to reach its items.
+fn drawNav(a: *App, current: Section, nav_w: f32) void {
     const g = &a.g;
     const s = &a.set;
     const u = g.h / 720;
-    pollPicker(a);
-    if (select.tickTables(a)) say(a, "{s}", .{a.sel.status});
-    const current = items[s.cursor].section();
-    const drop_click = s.drop.open and g.clicked;
-    if (drop_click) g.clicked = false;
-
-    // Tabs down the left. A tab is picked first, then entered to reach its items.
     _ = g.text("Settings", 22 * u, 18 * u, g.scaled(32), gfx.white);
     var sy = 76 * u;
-    const nav_w = 196 * u;
     for (std.enums.values(Section)) |sec| {
         const here = sec == current;
         const hover = g.hit(14 * u, sy, nav_w, 38 * u);
@@ -617,11 +660,12 @@ pub fn draw(a: *App) void {
         _ = g.text(sec.title(), 30 * u, sy + 8 * u, g.scaled(16), if (here or hover) gfx.white else gfx.dim);
         sy += 42 * u;
     }
+}
 
-    const px = 14 * u + nav_w + 14 * u;
-    const pw = g.w - px - 14 * u;
-    const help_h = 56 * u;
-    const help_y = g.h - 34 * u - help_h;
+fn drawRows(a: *App, current: Section, px: f32, pw: f32, help_y: f32) void {
+    const g = &a.g;
+    const s = &a.set;
+    const u = g.h / 720;
     g.panel(px, 18 * u, pw, help_y - 26 * u, "");
     _ = g.text(current.title(), px + 18 * u, 28 * u, g.scaled(24), if (s.inside) gfx.white else gfx.dim);
     var y = 72 * u;
@@ -656,7 +700,12 @@ pub fn draw(a: *App) void {
         } else drawValue(a, it, rx + 12 * u, rx + rw - 14 * u, y, rh, on);
         y += row_h;
     }
+}
 
+fn drawHelp(a: *App, px: f32, pw: f32, help_y: f32, help_h: f32) void {
+    const g = &a.g;
+    const s = &a.set;
+    const u = g.h / 720;
     g.panel(px, help_y, pw, help_h, "");
     const help = if (s.picker_for != null)
         "Waiting for the file dialog..."
@@ -670,6 +719,26 @@ pub fn draw(a: *App) void {
     if (s.message.len > 0) g.textClip(s.message, px + 18 * u, help_y + 30 * u, pw - 36 * u, g.scaled(14), gfx.white);
     const hint = if (s.inside) "Up/Down select    Left/Right change    Enter edit    Esc or right click back" else "Up/Down choose a tab    Enter open    Esc or right click leave";
     _ = g.text(hint, px, g.h - 26 * u, g.scaled(12), gfx.dim);
+}
+
+pub fn draw(a: *App) void {
+    const g = &a.g;
+    const s = &a.set;
+    const u = g.h / 720;
+    pollPicker(a);
+    pollSync(a);
+    if (select.tickTables(a)) say(a, "{s}", .{a.sel.status});
+    const current = items[s.cursor].section();
+    const drop_click = s.drop.open and g.clicked;
+    if (drop_click) g.clicked = false;
+    const nav_w = 196 * u;
+    drawNav(a, current, nav_w);
+    const px = 14 * u + nav_w + 14 * u;
+    const pw = g.w - px - 14 * u;
+    const help_h = 56 * u;
+    const help_y = g.h - 34 * u - help_h;
+    drawRows(a, current, px, pw, help_y);
+    drawHelp(a, px, pw, help_y, help_h);
     if (s.drop.open) {
         if (s.drop.draw(a, drop_click)) |i| chooseDrop(a, i);
     }
@@ -715,6 +784,7 @@ fn adjust(a: *App, it: Item, dir: i32) void {
             cfg.reflex = @mod(cfg.reflex + dir, 3);
             a.g.setReflex(cfg.reflex);
         },
+        .beatoraja_select => cfg.beatoraja_select = !cfg.beatoraja_select,
         .bga_upscale => {
             cfg.bga_upscale = !cfg.bga_upscale;
             a.g.upscale_on = cfg.bga_upscale;
@@ -742,7 +812,7 @@ fn adjust(a: *App, it: Item, dir: i32) void {
 /// ALSA names run long; the end, with its hw:N,N, is what tells them apart.
 fn deviceLabel(name: []const u8) []const u8 {
     if (name.len == 0) return "Default";
-    return name[name.len - @min(name.len, 48)..];
+    return name[name.len - @min(name.len, 48) ..];
 }
 
 fn cycleDevice(a: *App, dir: i32) void {
@@ -1014,64 +1084,95 @@ pub fn captured(a: *App, code: u16) void {
     if (s.capture_slot == null) a.saveConfig();
 }
 
-pub fn key(a: *App, sc: u32) void {
+fn keyEditing(a: *App, it: Item, sc: u32) void {
     const s = &a.set;
-    if (s.editing) |it| {
-        switch (sc) {
-            c.SDL_SCANCODE_ESCAPE => {
-                s.editing = null;
-                a.stopText();
-            },
-            c.SDL_SCANCODE_RETURN => {
-                s.editing = null;
-                a.stopText();
-                commit(a, it);
-            },
-            c.SDL_SCANCODE_BACKSPACE => while (a.text.items.len > 0) {
-                const ch = a.text.pop().?;
-                if (ch & 0xC0 != 0x80) break;
-            },
-            c.SDL_SCANCODE_V => if (c.SDL_GetModState() & c.SDL_KMOD_CTRL != 0) {
-                const clip = c.SDL_GetClipboardText();
-                defer c.SDL_free(clip);
-                if (clip != null) a.text.appendSlice(a.gpa, std.mem.span(clip)) catch {};
-            },
-            else => {},
-        }
-        return;
+    switch (sc) {
+        c.SDL_SCANCODE_ESCAPE => {
+            s.editing = null;
+            a.stopText();
+        },
+        c.SDL_SCANCODE_RETURN => {
+            s.editing = null;
+            a.stopText();
+            commit(a, it);
+        },
+        c.SDL_SCANCODE_BACKSPACE => while (a.text.items.len > 0) {
+            const ch = a.text.pop().?;
+            if (ch & 0xC0 != 0x80) break;
+        },
+        c.SDL_SCANCODE_V => if (c.SDL_GetModState() & c.SDL_KMOD_CTRL != 0) {
+            const clip = c.SDL_GetClipboardText();
+            defer c.SDL_free(clip);
+            if (clip != null) a.text.appendSlice(a.gpa, std.mem.span(clip)) catch {};
+        },
+        else => {},
     }
-    if (s.picker_for != null) return;
-    if (s.drop.open) {
-        if (s.drop.key(a, sc)) |i| chooseDrop(a, i);
-        return;
+}
+
+/// Picking a tab, before going into it.
+fn keyTabs(a: *App, it: Item, sc: u32) void {
+    const s = &a.set;
+    const sections = std.enums.values(Section);
+    const at: usize = @backingInt(it.section());
+    switch (sc) {
+        c.SDL_SCANCODE_UP => {
+            a.sfx(.move);
+            s.cursor = firstOf(sections[if (at == 0) sections.len - 1 else at - 1]);
+        },
+        c.SDL_SCANCODE_DOWN => {
+            a.sfx(.move);
+            s.cursor = firstOf(sections[(at + 1) % sections.len]);
+        },
+        c.SDL_SCANCODE_RETURN, c.SDL_SCANCODE_RIGHT => {
+            a.sfx(.confirm);
+            s.inside = true;
+        },
+        c.SDL_SCANCODE_ESCAPE => {
+            a.sfxOr(a.sfx_option_close, .back);
+            a.saveConfig();
+            a.engine.switchDevice(a.cfg.audio_frames, a.cfg.audio_device);
+            a.scene = .select;
+        },
+        else => {},
     }
-    const it = items[s.cursor];
-    if (!s.inside) {
-        const sections = std.enums.values(Section);
-        const at: usize = @intFromEnum(it.section());
-        switch (sc) {
-            c.SDL_SCANCODE_UP => {
-                a.sfx(.move);
-                s.cursor = firstOf(sections[if (at == 0) sections.len - 1 else at - 1]);
-            },
-            c.SDL_SCANCODE_DOWN => {
-                a.sfx(.move);
-                s.cursor = firstOf(sections[(at + 1) % sections.len]);
-            },
-            c.SDL_SCANCODE_RETURN, c.SDL_SCANCODE_RIGHT => {
-                a.sfx(.confirm);
-                s.inside = true;
-            },
-            c.SDL_SCANCODE_ESCAPE => {
-                a.sfxOr(a.sfx_option_close, .back);
-                a.saveConfig();
-                a.engine.switchDevice(a.cfg.audio_frames, a.cfg.audio_device);
-                a.scene = .select;
-            },
-            else => {},
-        }
-        return;
+}
+
+/// What Enter does on a row.
+fn activate(a: *App, it: Item) void {
+    const s = &a.set;
+    // Arrow rows step with Left/Right and their arrows only.
+    switch (it) {
+        .lift, .hidden, .judge_offset, .visual_offset => return,
+        else => {},
     }
+    a.sfx(.confirm);
+    if (hasDrop(it)) return openDrop(a, it);
+    if (usesPicker(it)) return openPicker(a, it);
+    switch (it) {
+        .clear_roots => {
+            a.cfg.roots = &.{};
+            a.saveConfig();
+        },
+        .update_tables => {
+            if (tablesBusy(a)) return;
+            select.startTableFetch(a, null);
+            say(a, "Loading tables...", .{});
+        },
+        .table_list => toggleTableRow(a),
+        .ir_upload => startSync(a, true),
+        .ir_download => startSync(a, false),
+        .skin_slots => skinslots.open(a),
+        .bind_4k, .bind_5k, .bind_6k, .bind_7k, .bind_10k, .bind_14k, .bind_9k, .bind_start => {
+            s.capture_group = it;
+            s.capture_slot = 0;
+        },
+        .green, .add_table, .ir_url, .ir_token, .download_url => startEditing(a, it),
+        else => adjust(a, it, 1),
+    }
+}
+
+fn keyItems(a: *App, it: Item, sc: u32) void {
+    const s = &a.set;
     if (it == .table_list) {
         if (sc == c.SDL_SCANCODE_UP and s.table_row > 0) {
             a.sfx(.move);
@@ -1111,37 +1212,21 @@ pub fn key(a: *App, sc: u32) void {
             a.sfx(.back);
             s.inside = false;
         },
-        c.SDL_SCANCODE_RETURN => {
-            // Arrow rows step with Left/Right and their arrows only.
-            switch (it) {
-                .lift, .hidden, .judge_offset, .visual_offset => return,
-                else => {},
-            }
-            a.sfx(.confirm);
-            if (hasDrop(it)) return openDrop(a, it);
-            if (usesPicker(it)) return openPicker(a, it);
-            switch (it) {
-                .clear_roots => {
-                    a.cfg.roots = &.{};
-                    a.saveConfig();
-                },
-                .update_tables => {
-                    if (tablesBusy(a)) return;
-                    select.startTableFetch(a, null);
-                    say(a, "Loading tables...", .{});
-                },
-                .table_list => toggleTableRow(a),
-                .skin_slots => skinslots.open(a),
-                .bind_4k, .bind_5k, .bind_6k, .bind_7k, .bind_10k, .bind_14k, .bind_9k => {
-                    s.capture_group = it;
-                    s.capture_slot = 0;
-                },
-                .green, .add_table, .ir_url, .ir_token, .download_url => startEditing(a, it),
-                else => adjust(a, it, 1),
-            }
-        },
+        c.SDL_SCANCODE_RETURN => activate(a, it),
         else => {},
     }
+}
+
+pub fn key(a: *App, sc: u32) void {
+    const s = &a.set;
+    if (s.editing) |it| return keyEditing(a, it, sc);
+    if (s.picker_for != null) return;
+    if (s.drop.open) {
+        if (s.drop.key(a, sc)) |i| chooseDrop(a, i);
+        return;
+    }
+    const it = items[s.cursor];
+    if (s.inside) keyItems(a, it, sc) else keyTabs(a, it, sc);
 }
 
 test "a click selects first, and stepped rows never open a dialog" {
@@ -1169,4 +1254,141 @@ test "a typed green number comes back exactly" {
     }
     try std.testing.expectEqual(@as(u32, green_min), greenShown(greenMs(1)));
     try std.testing.expectEqual(@as(u32, green_max), greenShown(greenMs(99999)));
+}
+
+fn openItem(a: *App, it: Item) void {
+    a.set.cursor = std.mem.indexOfScalar(Item, items, it).?;
+    a.set.inside = true;
+}
+
+test "tabs wrap, enter goes in and escape comes out, then leaves" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.scene = .settings;
+    key(a, c.SDL_SCANCODE_UP);
+    try std.testing.expectEqual(.controls, items[a.set.cursor].section());
+    key(a, c.SDL_SCANCODE_DOWN);
+    try std.testing.expectEqual(.library, items[a.set.cursor].section());
+    try std.testing.expectEqual(firstOf(.library), a.set.cursor);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expect(a.set.inside);
+    key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expect(!a.set.inside);
+    try std.testing.expectEqual(.settings, a.scene);
+    key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expectEqual(.select, a.scene);
+}
+
+test "up and down stay inside a tab" {
+    const a = try testing.open();
+    defer testing.close(a);
+    openItem(a, .add_root);
+    key(a, c.SDL_SCANCODE_UP);
+    try std.testing.expectEqual(.clear_roots, items[a.set.cursor]);
+    key(a, c.SDL_SCANCODE_DOWN);
+    try std.testing.expectEqual(.add_root, items[a.set.cursor]);
+    key(a, c.SDL_SCANCODE_DOWN);
+    try std.testing.expectEqual(.clear_roots, items[a.set.cursor]);
+}
+
+test "the table list moves row by row before it leaves" {
+    const a = try testing.open();
+    defer testing.close(a);
+    openItem(a, .table_list);
+    for (1..tableRowCount(a)) |row| {
+        key(a, c.SDL_SCANCODE_DOWN);
+        try std.testing.expectEqual(row, a.set.table_row);
+        try std.testing.expectEqual(.table_list, items[a.set.cursor]);
+    }
+    key(a, c.SDL_SCANCODE_DOWN);
+    try std.testing.expectEqual(.add_table, items[a.set.cursor]);
+    try std.testing.expectEqual(@as(usize, 0), a.set.table_row);
+    key(a, c.SDL_SCANCODE_UP);
+    try std.testing.expectEqual(.table_list, items[a.set.cursor]);
+    try std.testing.expectEqual(tableRowCount(a) - 1, a.set.table_row);
+}
+
+test "left and right step a value, and arrow rows ignore enter" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.cfg.volume = 0.5;
+    openItem(a, .volume);
+    key(a, c.SDL_SCANCODE_RIGHT);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.55), a.cfg.volume, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.55), a.engine.gain, 0.001);
+    key(a, c.SDL_SCANCODE_LEFT);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), a.cfg.volume, 0.001);
+    openItem(a, .judge_offset);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expectEqual(@as(i32, 0), a.cfg.judge_offset_ms);
+    key(a, c.SDL_SCANCODE_RIGHT);
+    try std.testing.expectEqual(@as(i32, 1), a.cfg.judge_offset_ms);
+    a.cfg.audio_rate = 48000;
+    openItem(a, .audio_rate);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expectEqual(@as(u32, 44100), a.cfg.audio_rate);
+}
+
+test "editing a value commits on enter and cancels on escape" {
+    const a = try testing.open();
+    defer testing.close(a);
+    openItem(a, .green);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expectEqual(.green, a.set.editing.?);
+    a.text.clearRetainingCapacity();
+    try a.text.appendSlice(a.gpa, "2500");
+    key(a, c.SDL_SCANCODE_BACKSPACE);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expect(a.set.editing == null);
+    try std.testing.expectEqual(greenMs(250), a.cfg.green_ms);
+    const before = a.cfg.green_ms;
+    key(a, c.SDL_SCANCODE_RETURN);
+    a.text.clearRetainingCapacity();
+    try a.text.appendSlice(a.gpa, "999");
+    key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expect(a.set.editing == null);
+    try std.testing.expectEqual(before, a.cfg.green_ms);
+    key(a, c.SDL_SCANCODE_RETURN);
+    a.text.clearRetainingCapacity();
+    try a.text.appendSlice(a.gpa, "soon");
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expectEqual(before, a.cfg.green_ms);
+    try std.testing.expect(std.mem.startsWith(u8, a.set.message, "Type a number"));
+}
+
+test "a table address must look like one" {
+    const a = try testing.open();
+    defer testing.close(a);
+    openItem(a, .add_table);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try a.text.appendSlice(a.gpa, "stellabms.xyz");
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expectEqual(@as(usize, 0), a.cfg.tables.len);
+    try std.testing.expect(std.mem.startsWith(u8, a.set.message, "A table address"));
+}
+
+test "binding walks every button and escape stops it" {
+    const a = try testing.open();
+    defer testing.close(a);
+    openItem(a, .bind_4k);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expectEqual(@as(?u8, 0), a.set.capture_slot);
+    captured(a, 100);
+    try std.testing.expectEqual(@as(u16, 100), a.cfg.keys4[0]);
+    captured(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expect(a.set.capture_slot == null);
+    try std.testing.expectEqual(@as(u16, 9), a.cfg.keys4[1]);
+    key(a, c.SDL_SCANCODE_RETURN);
+    for (a.cfg.keys4, 0..) |_, i| captured(a, @intCast(200 + i));
+    try std.testing.expect(a.set.capture_slot == null);
+    try std.testing.expectEqual(@as(u16, 203), a.cfg.keys4[3]);
+}
+
+test "clearing library folders empties the list" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.cfg.roots = &.{"/lib"};
+    openItem(a, .clear_roots);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expectEqual(@as(usize, 0), a.cfg.roots.len);
 }

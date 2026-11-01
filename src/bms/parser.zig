@@ -4,6 +4,7 @@ const std = @import("std");
 const types = @import("../core/types.zig");
 const encoding = @import("encoding.zig");
 const hash = @import("hash.zig");
+const options = @import("../core/options.zig");
 const Chart = types.Chart;
 const Mode = types.Mode;
 const Note = types.Note;
@@ -234,6 +235,21 @@ const Decoder = struct {
     }
 };
 
+/// The value of a #RANDOM, #SETRANDOM, #SWITCH or #SETSWITCH line, also kept in `values` so a replay
+/// can repeat it. Null when the line has no number.
+fn pickBranch(a: std.mem.Allocator, line: []const u8, is_set: bool, opts: Options, rng: *Rng, values: *std.ArrayList(i32)) !?i32 {
+    const off: usize = if (is_set) 10 else 7;
+    if (line.len <= off) return null;
+    const r = parseI(line[off..]) orelse return null;
+    const v: i32 = blk: {
+        if (is_set) break :blk r;
+        if (opts.selected_random) |sel| if (values.items.len < sel.len) break :blk sel[values.items.len];
+        break :blk rng.below(r) + 1;
+    };
+    try values.append(a, v);
+    return v;
+}
+
 /// Parses a BMS/BME/BML/PMS file. All returned memory lives in `Chart.arena`.
 pub fn parse(gpa: std.mem.Allocator, data: []const u8, opts: Options) Error!Chart {
     var chart: Chart = .{ .arena = std.heap.ArenaAllocator.init(gpa) };
@@ -278,15 +294,7 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8, opts: Options) Error!Char
 
         if (reserve(line, "RANDOM") or reserve(line, "SETRANDOM")) {
             const is_set = reserve(line, "SETRANDOM");
-            const off: usize = if (is_set) 10 else 7;
-            if (line.len <= off) continue;
-            const r = parseI(line[off..]) orelse continue;
-            const v: i32 = blk: {
-                if (is_set) break :blk r;
-                if (opts.selected_random) |sel| if (random_values.items.len < sel.len) break :blk sel[random_values.items.len];
-                break :blk rng.below(r) + 1;
-            };
-            try random_values.append(a, v);
+            const v = (try pickBranch(a, line, is_set, opts, &rng, &random_values)) orelse continue;
             try rnd_stack.append(a, v);
             chart.has_random = true;
             continue;
@@ -333,15 +341,7 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8, opts: Options) Error!Char
         }
         if (reserve(line, "SWITCH") or reserve(line, "SETSWITCH")) {
             const is_set = reserve(line, "SETSWITCH");
-            const off: usize = if (is_set) 10 else 7;
-            if (line.len <= off) continue;
-            const r = parseI(line[off..]) orelse continue;
-            const v: i32 = blk: {
-                if (is_set) break :blk r;
-                if (opts.selected_random) |sel| if (random_values.items.len < sel.len) break :blk sel[random_values.items.len];
-                break :blk rng.below(r) + 1;
-            };
-            try random_values.append(a, v);
+            const v = (try pickBranch(a, line, is_set, opts, &rng, &random_values)) orelse continue;
             try sw_stack.append(a, .{ .value = v, .matched = false, .active = false });
             chart.has_random = true;
             continue;
@@ -520,7 +520,7 @@ fn build(d: *Decoder, maxsec: usize) !void {
             const channel = int36(line[4], line[5]);
             if (channel == 2) {
                 const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-                if (parseF(line[colon + 1..])) |rate| {
+                if (parseF(line[colon + 1 ..])) |rate| {
                     const next = s.sectionnum + rate;
                     if (rate > 0 and next > s.sectionnum and !std.math.isInf(next)) s.rate = rate;
                 }
@@ -902,7 +902,7 @@ fn flatten(d: *Decoder, tls: *Timelines) !void {
                         else => .ln,
                     };
                     ln.index = @intCast(notes.items.len);
-                    var n: Note = .{ .time_us = tl.micro, .y = y, .wav = ln.wav, .lane = lane, .kind = if (ln.end) .ln_end else .ln_start, .ln_type = ty };
+                    var n: Note = .{ .time_us = tl.micro, .y = y, .wav = ln.wav, .lane = lane, .kind = if (ln.end) .ln_end else .ln_start, .ln_type = ty, .ln_open = ln.ln_type == 0 };
                     if (ln.pair) |p| if (p.index >= 0) {
                         n.pair = p.index;
                         notes.items[@intCast(p.index)].pair = ln.index;
@@ -1019,6 +1019,27 @@ test "lnobj and channel 5x LN" {
     defer c.deinit();
     try std.testing.expectEqual(@as(u32, 2), c.total_notes);
     try std.testing.expect(c.has_ln);
+}
+
+test "LN mode changes only LNs the chart leaves open, and CN ends count as notes" {
+    const open =
+        \\#BPM 120
+        \\#WAV01 a.wav
+        \\#00152:0101
+    ;
+    var c = try parse(std.testing.allocator, open, .{});
+    defer c.deinit();
+    try std.testing.expectEqual(@as(u32, 1), c.total_notes);
+    try std.testing.expect(!options.applyLnMode(&c, .ln));
+    try std.testing.expect(options.applyLnMode(&c, .hcn));
+    try std.testing.expectEqual(@as(u32, 2), c.total_notes);
+    try std.testing.expectEqual(types.LnType.hcn, c.notes[0].ln_type);
+    try std.testing.expectEqual(types.defaultTotal(2), c.total);
+
+    var fixed = try parse(std.testing.allocator, "#LNMODE 1\n" ++ open, .{});
+    defer fixed.deinit();
+    try std.testing.expect(!options.applyLnMode(&fixed, .cn));
+    try std.testing.expectEqual(types.LnType.ln, fixed.notes[0].ln_type);
 }
 
 test "no bpm is an error" {

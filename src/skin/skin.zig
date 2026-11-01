@@ -68,7 +68,7 @@ fn typeOfFile(a: std.mem.Allocator, path: []const u8) ?i32 {
     const bytes = fs.readAlloc(a, path, 1 << 25) catch return null;
     if (std.ascii.endsWithIgnoreCase(path, ".lr2skin")) {
         const at = std.ascii.findIgnoreCase(bytes, "#INFORMATION,") orelse return null;
-        const rest = bytes[at + "#INFORMATION,".len..];
+        const rest = bytes[at + "#INFORMATION,".len ..];
         const end = std.mem.indexOfScalar(u8, rest, ',') orelse return null;
         return std.fmt.parseInt(i32, std.mem.trim(u8, rest[0..end], " "), 10) catch null;
     }

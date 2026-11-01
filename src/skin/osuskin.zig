@@ -31,7 +31,7 @@ fn pairOf(raw: []const u8) ?Pair {
     var line = raw;
     if (std.mem.indexOf(u8, line, "//")) |at| line = line[0..at];
     const colon = std.mem.indexOfScalar(u8, line, ':') orelse return null;
-    return .{ .key = std.mem.trim(u8, line[0..colon], " \t\r"), .value = std.mem.trim(u8, line[colon + 1..], " \t\r") };
+    return .{ .key = std.mem.trim(u8, line[0..colon], " \t\r"), .value = std.mem.trim(u8, line[colon + 1 ..], " \t\r") };
 }
 
 fn get(sec: []const u8, key: []const u8) ?[]const u8 {

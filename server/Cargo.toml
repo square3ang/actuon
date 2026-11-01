@@ -7,7 +7,9 @@ license = "GPL-3.0-or-later"
 [dependencies]
 argon2 = "0.5"
 getrandom = "0.2"
-rusqlite = "0.32"
+libc = "0.2"
+postgres = "0.19.14"
+redis = { version = "1.8.1", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

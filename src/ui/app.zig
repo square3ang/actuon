@@ -100,6 +100,9 @@ pub const App = struct {
     /// Headless capture for tests: save a frame after N ms, then quit.
     shot_path: ?[:0]const u8 = null,
     shot_after_ms: u64 = 0,
+    /// Keys the capture presses first, so it can reach any screen.
+    shot_keys: std.mem.TokenIterator(u8, .scalar) = std.mem.tokenizeScalar(u8, "", ','),
+    shot_key_at: u64 = shot_keys_start_ms,
     start_ms: u64 = 0,
     exit_after_play: bool = false,
     course: ?course_mod.Run = null,
@@ -168,12 +171,12 @@ pub const App = struct {
     }
 
     pub fn sfx(a: *App, which: menu_sound.Sfx) void {
-        if (a.sfx_skin[@intFromEnum(which)]) |e| if (e.ready.load(.acquire) and e.data.len > 0) {
+        if (a.sfx_skin[@backingInt(which)]) |e| if (e.ready.load(.acquire) and e.data.len > 0) {
             a.engine.uiPlay(skin_sound.nextSlot(&a.sfx_slot), e.data, false, a.cfg.sfx_volume);
             return;
         };
         if (!a.sfx_ready.load(.acquire)) return;
-        a.engine.uiPlay(skin_sound.nextSlot(&a.sfx_slot), a.sfx_data[@intFromEnum(which)], false, a.cfg.sfx_volume);
+        a.engine.uiPlay(skin_sound.nextSlot(&a.sfx_slot), a.sfx_data[@backingInt(which)], false, a.cfg.sfx_volume);
     }
 
     /// Lua's audio calls, kept to files inside the skin.
@@ -464,7 +467,7 @@ pub const App = struct {
         a.skin_state.timers[2] = @intCast(a.decide_fade_at - a.decide_at);
     }
 
-    fn decideKey(a: *App, sc: c.SDL_Scancode) void {
+    pub fn decideKey(a: *App, sc: c.SDL_Scancode) void {
         if (a.decide_at == 0) return;
         const sk = a.decide_skin orelse return;
         if (sc == c.SDL_SCANCODE_ESCAPE) return a.decideLeave(true);
@@ -669,7 +672,11 @@ pub const App = struct {
             a.view.draw(&a.g, s, &a.cfg);
         if (a.pause.open) return pause.tick(a);
         if (s.was_paused and a.record) a.g.textRight("NOT RECORDED: PAUSED", a.g.w - 22 * a.g.h / 720, 52 * a.g.h / 720, a.g.scaled(16), gfx.amber);
-        if (s.canSkip(snap)) a.g.textCentered("ENTER: SKIP", a.g.w / 2, a.g.h * 0.5, a.g.scaled(28), gfx.white);
+        if (s.canSkip(snap)) {
+            var key_buf: [32]u8 = undefined;
+            var hint_buf: [48]u8 = undefined;
+            a.g.textCentered(std.fmt.bufPrint(&hint_buf, "{s}: SKIP", .{select.guideKey(a, a.cfg.start_select[0], "ENTER", &key_buf)}) catch "", a.g.w / 2, a.g.h * 0.5, a.g.scaled(28), gfx.white);
+        }
         if (s.done.load(.acquire)) a.finishPlay(snap, true);
     }
 
@@ -719,6 +726,7 @@ pub const App = struct {
     }
 
     fn sdlKey(a: *App, sc: u32, ts: u64, down: bool, repeat: bool) void {
+        if (select.pad(a, @intCast(sc), down, repeat)) return;
         if (a.scene == .play) {
             if (!repeat and !input.direct_keyboard.load(.acquire) and sc < input.joy_base) {
                 input.push(.{ .mono_ns = ts, .code = @intCast(sc), .down = down });
@@ -847,18 +855,24 @@ pub const App = struct {
                     const down = ev.type == c.SDL_EVENT_JOYSTICK_BUTTON_DOWN;
                     if (a.set.capture_slot != null and down and a.scene == .settings) {
                         settings.captured(a, code);
-                    } else input.push(.{ .mono_ns = ev.jbutton.timestamp, .code = code, .down = down });
+                    } else a.joyInput(code, ev.jbutton.timestamp, down);
                 },
                 c.SDL_EVENT_JOYSTICK_AXIS_MOTION => a.joyAxis(ev.jaxis.axis, ev.jaxis.value, ev.jaxis.timestamp),
                 else => {},
             }
         }
         a.joyAxisRelease();
+        select.tickPad(a, c.SDL_GetTicks());
     }
 
     // Turntables report an ever-moving axis, so a direction press is any movement and the release
     // is a short pause in movement.
     const axis_release_ns = 60 * std.time.ns_per_ms;
+
+    fn joyInput(a: *App, code: u16, ts: u64, down: bool) void {
+        input.push(.{ .mono_ns = ts, .code = code, .down = down });
+        _ = select.pad(a, code, down, false);
+    }
 
     fn joyAxis(a: *App, axis: u8, value: i16, ts: u64) void {
         if (axis >= 16) return;
@@ -876,10 +890,10 @@ pub const App = struct {
         const idx: usize = @as(usize, axis) * 2 + @intFromBool(!pos);
         const other = idx ^ 1;
         if (a.joy_axis_at[other] != 0) {
-            input.push(.{ .mono_ns = ts, .code = input.joy_axis_base + @as(u16, @intCast(other)), .down = false });
+            a.joyInput(input.joy_axis_base + @as(u16, @intCast(other)), ts, false);
             a.joy_axis_at[other] = 0;
         }
-        if (a.joy_axis_at[idx] == 0) input.push(.{ .mono_ns = ts, .code = code, .down = true });
+        if (a.joy_axis_at[idx] == 0) a.joyInput(code, ts, true);
         a.joy_axis_at[idx] = ts;
     }
 
@@ -887,7 +901,7 @@ pub const App = struct {
         const now = c.SDL_GetTicksNS();
         for (&a.joy_axis_at, 0..) |*at, i| {
             if (at.* != 0 and now -| at.* > axis_release_ns) {
-                input.push(.{ .mono_ns = now, .code = input.joy_axis_base + @as(u16, @intCast(i)), .down = false });
+                a.joyInput(input.joy_axis_base + @as(u16, @intCast(i)), now, false);
                 at.* = 0;
             }
         }
@@ -895,6 +909,16 @@ pub const App = struct {
 
     pub fn saveConfig(a: *App) void {
         config.save(a.gpa, a.cfg);
+    }
+
+    fn pressShotKey(a: *App) void {
+        const age = c.SDL_GetTicks() - a.start_ms;
+        if (age < a.shot_key_at) return;
+        const name = a.shot_keys.next() orelse return;
+        var buf: [32]u8 = undefined;
+        const z = std.fmt.bufPrintSentinel(&buf, "{s}", .{name}, 0) catch return;
+        a.click_key = c.SDL_GetScancodeFromName(z.ptr);
+        a.shot_key_at = age + shot_key_gap_ms;
     }
 
     fn shot(a: *App) void {
@@ -943,6 +967,7 @@ pub const App = struct {
                 },
             }
             a.last_scene = scene_now;
+            a.pressShotKey();
             a.applyMouse();
             a.applyCursor();
             if (a.shot_path != null and c.SDL_GetTicks() - a.start_ms >= a.shot_after_ms) a.shot();
@@ -961,6 +986,8 @@ pub const App = struct {
 };
 
 const select_fade_ms = 300;
+const shot_keys_start_ms = 2000;
+const shot_key_gap_ms = 300;
 
 /// The black over the built-in song select as it comes in.
 fn fadeInAlpha(age_ms: u64) u8 {
@@ -985,6 +1012,7 @@ pub const Options = struct {
     replay: ?[]const u8 = null,
     shot: ?[:0]const u8 = null,
     shot_after_ms: u64 = 3000,
+    shot_keys: []const u8 = "",
     decide: bool = false,
     null_audio: bool = false,
     start_us: i64 = 0,
@@ -1038,6 +1066,7 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
     if (opts.shot) |p| {
         app.shot_path = p;
         app.shot_after_ms = opts.shot_after_ms;
+        app.shot_keys = std.mem.tokenizeScalar(u8, opts.shot_keys, ',');
     }
     app.g.setVsync(cfg.vsync);
     app.g.setReflex(cfg.reflex);
@@ -1057,6 +1086,7 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
     defer skin_mod.clearTextures(gpa, &app.g);
     select.init(app);
     defer select.deinit(app);
+    defer result.dropBoard(app);
     if (opts.play_path) |p| {
         app.exit_after_play = opts.shot == null;
         var params: session_mod.Params = .{ .path = p, .autoplay = opts.autoplay, .gauge = config.gaugeType(cfg.gauge), .gas = cfg.gauge == config.gas, .start_us = opts.start_us };
@@ -1067,6 +1097,7 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
             params.gauge = r.gauge;
             params.gas = r.gas;
             params.random = r.random;
+            params.ln_mode = r.ln_mode;
             params.seed = r.seed;
         }
         if (opts.decide) app.decidePlay(params, true) else app.startPlay(params, true);

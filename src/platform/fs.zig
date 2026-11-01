@@ -65,8 +65,12 @@ pub fn list(a: std.mem.Allocator, path: []const u8) ![]Entry {
     return out.toOwnedSlice(a);
 }
 
+pub const test_data_dir = ".zig-cache/tmp/actuon-test-data";
+
 /// Per-user data directory with a trailing separator.
 pub fn dataDir(gpa: std.mem.Allocator) ![]u8 {
+    // Tests must never touch the player's settings and scores.
+    if (@import("builtin").is_test) return gpa.dupe(u8, test_data_dir ++ "/");
     const p = c.SDL_GetPrefPath("actuon", "actuon") orelse return error.NoPrefPath;
     defer c.SDL_free(p);
     return gpa.dupe(u8, std.mem.span(p));
@@ -98,7 +102,7 @@ pub fn resolveAsset(a: std.mem.Allocator, dir: []const u8, rel: []const u8, exts
         const dot = std.mem.lastIndexOfScalar(u8, e.name, '.') orelse continue;
         if (!std.ascii.eqlIgnoreCase(e.name[0..dot], stem)) continue;
         for (exts) |x| {
-            if (std.ascii.eqlIgnoreCase(e.name[dot + 1..], x)) return try std.fs.path.join(a, &.{ search, e.name });
+            if (std.ascii.eqlIgnoreCase(e.name[dot + 1 ..], x)) return try std.fs.path.join(a, &.{ search, e.name });
         }
     }
     return null;

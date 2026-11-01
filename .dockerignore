@@ -1,0 +1,9 @@
+*
+!build.zig
+!build.zig.zon
+!LICENSE
+!src
+!third_party
+!server
+server/target
+server/.env

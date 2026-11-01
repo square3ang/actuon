@@ -148,7 +148,7 @@ pub fn wildChoices(a: std.mem.Allocator, dir: []const u8, rel: []const u8) ![]co
     const star = std.mem.indexOfScalar(u8, rel, '*') orelse return &.{};
     const base_end = if (std.mem.lastIndexOfScalar(u8, rel[0..star], '/')) |i| i + 1 else 0;
     const seg_end = std.mem.indexOfScalarPos(u8, rel, star, '/') orelse rel.len;
-    const tail = rel[star + 1..seg_end];
+    const tail = rel[star + 1 .. seg_end];
     const ext = tail[0 .. std.mem.indexOfScalar(u8, tail, '|') orelse tail.len];
     const pre = rel[base_end..star];
     var out: std.ArrayList([]const u8) = .empty;
@@ -433,7 +433,7 @@ const Loader = struct {
         for (arr(r.get("slider"))) |v| {
             if (v != .object) continue;
             const o = v.object;
-            try l.protos.put(a, try idOf(a, o.get("id")), .{ .kind = .slider, .src = try l.src(o), .ref = int(o.get("type"), 0), .dir = int(o.get("angle"), 0), .range = @floatFromInt(int(o.get("range"), 0)) });
+            try l.protos.put(a, try idOf(a, o.get("id")), .{ .kind = .slider, .src = try l.src(o), .ref = int(o.get("type"), 0), .dir = int(o.get("angle"), 0), .range = @floatFromInt(int(o.get("range"), 0)), .changeable = if (o.get("changeable")) |x| x == .bool and x.bool else false });
         }
         if (r.get("gauge")) |gv| if (gv == .object) {
             var nodes: std.ArrayList(m.Src) = .empty;

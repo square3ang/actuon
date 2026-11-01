@@ -16,7 +16,7 @@ pub const std_options: std.Options = .{ .enable_segfault_handler = false };
 
 const usage =
     \\usage: actuon [chart] [--auto] [--replay FILE] [--from-ms N]
-    \\              [--null-audio] [--shot FILE.bmp] [--shot-after-ms N] [--decide]
+    \\              [--null-audio] [--shot FILE.bmp] [--shot-after-ms N] [--shot-keys F10,Down] [--decide]
     \\       actuon -P [-N<measure>] FILE    preview from an editor (-S stops)
     \\       actuon fetch-chart MD5
     \\       actuon latency [--keys SECONDS]
@@ -92,6 +92,8 @@ pub fn main(init: std.process.Init) !void {
             opts.decide = true;
         } else if (std.mem.eql(u8, a, "--shot-after-ms")) {
             opts.shot_after_ms = try std.fmt.parseInt(u64, next(args, &i) orelse return error.MissingValue, 10);
+        } else if (std.mem.eql(u8, a, "--shot-keys")) {
+            opts.shot_keys = next(args, &i) orelse return error.MissingValue;
         } else if (std.mem.eql(u8, a, "--from-ms")) {
             opts.start_us = 1000 * try std.fmt.parseInt(i64, next(args, &i) orelse return error.MissingValue, 10);
         } else if (std.mem.startsWith(u8, a, "-")) {
@@ -135,7 +137,7 @@ fn irRival(gpa: std.mem.Allocator, name: []const u8) !void {
     const a = arena.allocator();
     const cfg = config.load(a);
     const auth = try std.fmt.allocPrint(a, "Bearer {s}", .{cfg.ir_token});
-    const r = try http.request(a, .PUT, try std.fmt.allocPrint(a, "{s}/rivals/{s}", .{ cfg.ir_url, name }), "", &.{.{ .name = "Authorization", .value = auth }});
+    const r = try http.request(a, .PUT, try std.fmt.allocPrint(a, "{s}/rivals/{f}", .{ cfg.ir_url, std.fmt.alt(std.Uri.Component{ .raw = name }, .formatEscaped) }), "", &.{.{ .name = "Authorization", .value = auth }});
     std.debug.print("{d}: {s}\n", .{ r.status, r.body });
 }
 
@@ -158,6 +160,7 @@ test {
     _ = @import("db/db.zig");
     _ = @import("ui/play.zig");
     _ = @import("ui/pause.zig");
+    _ = @import("ui/skinconf.zig");
     _ = @import("ui/result.zig");
     _ = @import("ui/select.zig");
     _ = @import("ui/settings.zig");
@@ -174,7 +177,6 @@ test {
     _ = @import("ui/bga.zig");
     _ = @import("ui/editor.zig");
     _ = @import("skin/model.zig");
-    _ = @import("skin/skin.zig");
     _ = @import("skin/lr2csv.zig");
     _ = @import("skin/osuskin.zig");
     _ = @import("skin/jsonskin.zig");

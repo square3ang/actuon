@@ -26,4 +26,6 @@ typedef struct {
 
 /* 0 on success; -1 malformed replay, -2 malformed chart, -3 chart hash differs from the replay's. */
 int32_t actuon_verify(const ActuonVerifyInput *input, ActuonResult *out);
+/* 0 when the bytes parse as a chart with notes to play, otherwise -2. format as above. */
+int32_t actuon_check_chart(const uint8_t *data, size_t len, uint8_t format);
 void actuon_chart_hash(const uint8_t *data, size_t len, char sha256_hex[64], char md5_hex[32]);

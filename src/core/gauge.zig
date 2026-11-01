@@ -94,14 +94,14 @@ pub const Gauge = struct {
 };
 
 pub fn init(ty: Type, total: f64, notes: u32) Gauge {
-    const el = &elements[@intFromEnum(ty)];
+    const el = &elements[@backingInt(ty)];
     var g: Gauge = .{ .value = el.init, .el = el, .inc = el.value };
     for (&g.inc) |*v| v.* = modify(v.*, el.modifier, total, notes);
     return g;
 }
 
 pub fn clearOf(ty: Type) types.Clear {
-    return elements[@intFromEnum(ty)].clear;
+    return elements[@backingInt(ty)].clear;
 }
 
 test "groove recovers by total/notes and floors at 2" {

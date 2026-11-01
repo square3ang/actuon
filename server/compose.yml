@@ -1,0 +1,49 @@
+services:
+  ir:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://actuon:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres/actuon
+      REDIS_URL: redis://redis/
+    ports:
+      # Plain HTTP: put a TLS proxy in front before opening this to the internet.
+      - "127.0.0.1:${IR_PORT:-8730}:8730"
+    volumes:
+      - charts:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: actuon
+      POSTGRES_DB: actuon
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U actuon -d actuon"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Only login attempt counters live here, so nothing needs to survive a restart.
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  charts:
+  postgres:

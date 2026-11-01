@@ -66,8 +66,6 @@ pub fn skipPastNotes(chart: *const core.types.Chart, first: usize, t: i64) usize
     return i;
 }
 
-const LaneLook = struct { scratch: bool, even: bool };
-
 pub fn laneOrder(mode: core.types.Mode, out: *[core.types.max_lanes]u8) u8 {
     const n = mode.keys();
     switch (mode) {
@@ -120,161 +118,224 @@ pub const View = struct {
             v.timing_n += 1;
         }
 
-        const key_w: f32 = 42 * u;
-        const sc_w: f32 = 72 * u;
-        var order: [core.types.max_lanes]u8 = undefined;
-        const n = laneOrder(mode, &order);
-        const gap_w: f32 = 14 * u;
-        const two_sides = mode.players() == 2;
-        const rail: f32 = 7 * u;
-        const left: f32 = 14 * u + rail;
-        var xs: [core.types.max_lanes]f32 = undefined;
-        var ws: [core.types.max_lanes]f32 = undefined;
-        var x: f32 = left;
-        for (order[0..n], 0..) |lane, i| {
-            const sc = mode.scratchOf(lane) >= 0;
-            ws[lane] = if (sc) sc_w else key_w;
-            if (two_sides and i == n / 2) x += gap_w;
-            xs[lane] = x;
-            x += ws[lane];
-        }
-        const lanes_w = x - left;
-        const base_y = g.h * 0.765;
-        const lift_px = base_y * cfg.lift;
-        const judge_y = base_y - lift_px;
-        const top_y: f32 = 0;
-        const cover_px = (base_y - top_y) * cfg.lane_cover;
-        const lane_h = (base_y - top_y) * cfg.openLane();
-
-        // The gear: steel rails, a dark well, lit from below.
-        g.hgrad(left - rail, 0, rail, g.h, gfx.steel, gfx.rule);
-        g.hgrad(x, 0, rail, g.h, gfx.rule, gfx.steel);
-        g.vgrad(left, 0, lanes_w, base_y, gfx.well, .{ .r = 12, .g = 26, .b = 62 });
-        for (order[0..n]) |lane| {
-            if (noteColor(mode, lane).r < 200) g.vgrad(xs[lane], 0, ws[lane], base_y, gfx.white.alpha(3), gfx.white.alpha(16));
-            g.rect(xs[lane], 0, 1, base_y, gfx.white.alpha(26));
-        }
-        g.additive(true);
-        for (order[0..n]) |lane| {
-            const since = snap.time_us - snap.flash_at_us[lane];
-            // Lit exactly while pressed. Autoplay has no held state, only the moment of each hit.
-            const auto_hit = s.params.autoplay and since >= 0 and since < 60_000;
-            if (snap.held[lane] or auto_hit) {
-                const col = noteColor(mode, lane);
-                g.vgrad(xs[lane], judge_y * 0.25, ws[lane], judge_y * 0.75, col.alpha(0), col.alpha(200));
-            }
-        }
-        g.additive(false);
-
+        const l = layoutLanes(g, mode, cfg);
+        drawGear(g, &l, s, &snap);
         const vis_y = visibleY(cfg.green_ms, v.refBpm(chart, cfg.hs_fix));
-        const px_per_y = lane_h / @as(f32, @floatCast(vis_y)) * @as(f32, @floatCast(chart.speedAt(t)));
+        const px_per_y = l.lane_h / @as(f32, @floatCast(vis_y)) * @as(f32, @floatCast(chart.speedAt(t)));
         const now_y = chart.yAt(t);
-        for (chart.timelines) |tl| {
-            if (!tl.bar) continue;
-            const dy: f32 = @floatCast(tl.y - now_y);
-            if (dy < 0) continue;
-            const yy = judge_y - dy * px_per_y;
-            if (yy < top_y) break;
-            g.rect(left, yy, lanes_w, 2, gfx.white.alpha(70));
-        }
+        drawBarLines(g, &l, chart, now_y, px_per_y);
+        drawNotes(g, v, &l, chart, &snap, t, now_y, px_per_y);
+        drawCovers(g, &l, cfg);
+        drawJudgeLine(g, &l);
+        drawController(g, &l, &snap, t);
+        drawGaugeInfo(g, &l, &snap, cfg, t);
+        drawJudgePop(g, &l, &snap, t);
 
-        v.first_note = skipPastNotes(chart, v.first_note, t);
-        const nh: f32 = 11 * u;
-        for (chart.notes[v.first_note..], v.first_note..) |note, i| {
-            const dy: f32 = @floatCast(note.y - now_y);
-            const yy = judge_y - dy * px_per_y;
-            if (yy < top_y - nh and note.kind != .ln_start) {
-                // Notes are time ordered and y grows with time except under negative #SCROLL.
-                if (note.time_us > t + 60_000_000) break;
-                continue;
-            }
-            const lane = note.lane;
-            const col = noteColor(mode, lane);
-            switch (note.kind) {
-                .normal => if (v.render_state[i] == 0) drawNote(g, xs[lane], yy - nh, ws[lane], nh, col),
-                .mine => if (v.render_state[i] == 0) {
-                    g.rect(xs[lane] + 1, yy - nh * 0.7, ws[lane] - 1, nh * 0.5, gfx.danger);
-                },
-                .ln_start => {
-                    if (note.pair < 0) continue;
-                    const pair: usize = @intCast(note.pair);
-                    if (v.render_state[pair] != 0) continue;
-                    const started = v.render_state[i] != 0;
-                    const held = snap.holding[lane] == note.pair;
-                    if (started and !held and note.ln_type == .ln) continue;
-                    const end_dy: f32 = @floatCast(chart.notes[pair].y - now_y);
-                    const end_y = judge_y - end_dy * px_per_y;
-                    const y0 = if (held) judge_y else yy;
-                    if (end_y < g.h and y0 > top_y) {
-                        const glow: u8 = if (held) 150 + @as(u8, @intFromFloat(@abs(@sin(@as(f32, @floatFromInt(t)) / 60_000)) * 90)) else 110;
-                        g.rect(xs[lane] + 5 * u, end_y, ws[lane] - 10 * u, y0 - end_y, col.alpha(glow));
-                    }
-                    if (!started and !held) drawNote(g, xs[lane], yy - nh, ws[lane], nh, col);
-                    // Only CN and HCN judge the release, so only they get a note to aim the release at.
-                    if (note.ln_type != .ln) drawNote(g, xs[lane], end_y - nh, ws[lane], nh, col);
-                },
-                .ln_end => {},
-            }
-        }
-        const hidden_px = base_y * cfg.hidden;
-        if (hidden_px > 0) g.rect(left, @max(judge_y - hidden_px, cover_px), lanes_w, @min(hidden_px, judge_y - cover_px), gfx.plate);
-        if (lift_px > 0) g.rect(left, judge_y, lanes_w, lift_px, gfx.plate);
-        if (cover_px > 0) {
-            g.vgrad(left, 0, lanes_w, cover_px, gfx.plate, .{ .r = 26, .g = 38, .b = 66 });
-            g.rect(left, cover_px - 2 * u, lanes_w, 2 * u, gfx.cyan);
-        }
-
-        // Judge line and bombs.
-        g.additive(true);
-        g.vgrad(left, judge_y - 30 * u, lanes_w, 30 * u, gfx.cyan.alpha(0), gfx.cyan.alpha(90));
-        g.additive(false);
-        g.rect(left, judge_y - 2 * u, lanes_w, 4 * u, gfx.white);
-
-        // Controller: turntable and staggered keys.
-        const pad_y = base_y + 4 * u;
-        const pad_h = 92 * u;
-        g.rect(left, pad_y, lanes_w, pad_h, gfx.plate);
-        for (order[0..n]) |lane| {
-            if (mode.scratchOf(lane) >= 0) {
-                drawTurntable(g, xs[lane] + ws[lane] / 2, pad_y + pad_h / 2, @min(ws[lane], pad_h) / 2 - 3 * u, t, snap.held[lane]);
-            } else drawKey(g, xs[lane] + 3 * u, pad_y + (if (noteColor(mode, lane).r >= 200) 44 * u else 8 * u), ws[lane] - 6 * u, 40 * u, noteColor(mode, lane), snap.held[lane]);
-        }
-        if (two_sides) g.rect(xs[order[n / 2]] - gap_w, 0, gap_w, pad_y + pad_h, gfx.bg);
-        g.additive(true);
-        for (order[0..n]) |lane| drawBomb(g, &snap, lane, xs[lane] + ws[lane] / 2, judge_y, ws[lane]);
-        g.additive(false);
-
-        // Gauge along the bottom of the gear.
-        const info_y = pad_y + pad_h + 4 * u;
-        drawGauge(g, left, info_y, lanes_w, 16 * u, snap.gauge, snap.gauge_border, @intFromEnum(snap.gauge_type) >= 3, t);
-        var buf: [48]u8 = undefined;
-        const info2 = info_y + 20 * u;
-        _ = g.text(gauge_labels[@intFromEnum(snap.gauge_type)], left, info2, g.scaled(14), gfx.sky);
-        g.textRight(std.fmt.bufPrint(&buf, "{d:.1}%", .{snap.gauge}) catch "", x, info2 - 2 * u, g.scaled(20), gfx.white);
-        g.fmt(left + lanes_w * 0.36, info2 + 2 * u, g.scaled(12), gfx.dim, "GREEN {d}  C{d} L{d} H{d}", .{ cfg.green_ms * 3 / 5, @as(u32, @intFromFloat(cfg.lane_cover * 100)), @as(u32, @intFromFloat(@round(cfg.lift * 100))), @as(u32, @intFromFloat(@round(cfg.hidden * 100))) });
-
-        // Judge and combo pop over the lanes.
-        const cx = left + lanes_w / 2;
-        if (snap.last_judge != 255 and snap.time_us - snap.judge_at_us < 600_000) {
-            const age = snap.time_us - snap.judge_at_us;
-            const pop: f32 = if (age < 80_000) 1.3 - 0.3 * @as(f32, @floatFromInt(age)) / 80_000 else 1;
-            const j = snap.last_judge;
-            const jy = judge_y * 0.62;
-            // PGREAT shimmers, the way a perfect should.
-            const col = if (j == 0) (if (@mod(@divTrunc(t, 50_000), 2) == 0) gfx.white else gfx.cyan) else judge_colors[j];
-            if (snap.score.combo > 0) {
-                var cb: [16]u8 = undefined;
-                g.textPop(std.fmt.bufPrint(&cb, "{d}", .{snap.score.combo}) catch "", cx, jy - 60 * u, g.scaled(48), gfx.white, pop);
-            }
-            g.textPop(judge_names[j], cx, jy, g.scaled(32), col, pop);
-            if (j > 0 and j < 4) g.textPop(if (snap.last_fast_us > 0) "FAST" else "SLOW", cx, jy + 40 * u, g.scaled(14), if (snap.last_fast_us > 0) gfx.cyan else gfx.amber, 1);
-        }
-
-        const panel_x = x + rail + 14 * u;
+        const panel_x = l.right + l.rail + 14 * u;
         drawDeck(g, v, s, &snap, t, panel_x, g.w - 12 * u - panel_x);
         return snap;
     }
 };
+
+/// Where the lanes are on screen.
+const Lanes = struct {
+    mode: core.types.Mode,
+    order: [core.types.max_lanes]u8 = undefined,
+    n: usize,
+    xs: [core.types.max_lanes]f32 = undefined,
+    ws: [core.types.max_lanes]f32 = undefined,
+    two_sides: bool,
+    gap_w: f32,
+    rail: f32,
+    left: f32,
+    right: f32 = 0,
+    w: f32 = 0,
+    base_y: f32,
+    lift_px: f32,
+    judge_y: f32,
+    cover_px: f32,
+    lane_h: f32,
+    pad_y: f32,
+    pad_h: f32,
+};
+
+const top_y: f32 = 0;
+
+fn layoutLanes(g: *gfx.Gfx, mode: core.types.Mode, cfg: *const config.Config) Lanes {
+    const u = g.h / 720;
+    const key_w: f32 = 42 * u;
+    const sc_w: f32 = 72 * u;
+    const base_y = g.h * 0.765;
+    const lift_px = base_y * cfg.lift;
+    var l: Lanes = .{
+        .mode = mode,
+        .n = 0,
+        .two_sides = mode.players() == 2,
+        .gap_w = 14 * u,
+        .rail = 7 * u,
+        .left = 14 * u + 7 * u,
+        .base_y = base_y,
+        .lift_px = lift_px,
+        .judge_y = base_y - lift_px,
+        .cover_px = (base_y - top_y) * cfg.lane_cover,
+        .lane_h = (base_y - top_y) * cfg.openLane(),
+        .pad_y = base_y + 4 * u,
+        .pad_h = 92 * u,
+    };
+    l.n = laneOrder(mode, &l.order);
+    var x = l.left;
+    for (l.order[0..l.n], 0..) |lane, i| {
+        const sc = mode.scratchOf(lane) >= 0;
+        l.ws[lane] = if (sc) sc_w else key_w;
+        if (l.two_sides and i == l.n / 2) x += l.gap_w;
+        l.xs[lane] = x;
+        x += l.ws[lane];
+    }
+    l.right = x;
+    l.w = x - l.left;
+    return l;
+}
+
+/// The gear: steel rails, a dark well, lit from below.
+fn drawGear(g: *gfx.Gfx, l: *const Lanes, s: *Session, snap: *const session_mod.Snapshot) void {
+    g.hgrad(l.left - l.rail, 0, l.rail, g.h, gfx.steel, gfx.rule);
+    g.hgrad(l.right, 0, l.rail, g.h, gfx.rule, gfx.steel);
+    g.vgrad(l.left, 0, l.w, l.base_y, gfx.well, .{ .r = 12, .g = 26, .b = 62 });
+    for (l.order[0..l.n]) |lane| {
+        if (noteColor(l.mode, lane).r < 200) g.vgrad(l.xs[lane], 0, l.ws[lane], l.base_y, gfx.white.alpha(3), gfx.white.alpha(16));
+        g.rect(l.xs[lane], 0, 1, l.base_y, gfx.white.alpha(26));
+    }
+    g.additive(true);
+    for (l.order[0..l.n]) |lane| {
+        const since = snap.time_us - snap.flash_at_us[lane];
+        // Lit exactly while pressed. Autoplay has no held state, only the moment of each hit.
+        const auto_hit = s.params.autoplay and since >= 0 and since < 60_000;
+        if (snap.held[lane] or auto_hit) {
+            const col = noteColor(l.mode, lane);
+            g.vgrad(l.xs[lane], l.judge_y * 0.25, l.ws[lane], l.judge_y * 0.75, col.alpha(0), col.alpha(200));
+        }
+    }
+    g.additive(false);
+}
+
+fn drawBarLines(g: *gfx.Gfx, l: *const Lanes, chart: *const core.types.Chart, now_y: f64, px_per_y: f32) void {
+    for (chart.timelines) |tl| {
+        if (!tl.bar) continue;
+        const dy: f32 = @floatCast(tl.y - now_y);
+        if (dy < 0) continue;
+        const yy = l.judge_y - dy * px_per_y;
+        if (yy < top_y) break;
+        g.rect(l.left, yy, l.w, 2, gfx.white.alpha(70));
+    }
+}
+
+fn drawNotes(g: *gfx.Gfx, v: *View, l: *const Lanes, chart: *const core.types.Chart, snap: *const session_mod.Snapshot, t: i64, now_y: f64, px_per_y: f32) void {
+    const u = g.h / 720;
+    v.first_note = skipPastNotes(chart, v.first_note, t);
+    const nh: f32 = 11 * u;
+    for (chart.notes[v.first_note..], v.first_note..) |note, i| {
+        const dy: f32 = @floatCast(note.y - now_y);
+        const yy = l.judge_y - dy * px_per_y;
+        if (yy < top_y - nh and note.kind != .ln_start) {
+            // Notes are time ordered and y grows with time except under negative #SCROLL.
+            if (note.time_us > t + 60_000_000) break;
+            continue;
+        }
+        const lane = note.lane;
+        const col = noteColor(l.mode, lane);
+        switch (note.kind) {
+            .normal => if (v.render_state[i] == 0) drawNote(g, l.xs[lane], yy - nh, l.ws[lane], nh, col),
+            .mine => if (v.render_state[i] == 0) {
+                g.rect(l.xs[lane] + 1, yy - nh * 0.7, l.ws[lane] - 1, nh * 0.5, gfx.danger);
+            },
+            .ln_start => {
+                if (note.pair < 0) continue;
+                const pair: usize = @intCast(note.pair);
+                if (v.render_state[pair] != 0) continue;
+                const started = v.render_state[i] != 0;
+                const held = snap.holding[lane] == note.pair;
+                if (started and !held and note.ln_type == .ln) continue;
+                const end_dy: f32 = @floatCast(chart.notes[pair].y - now_y);
+                const end_y = l.judge_y - end_dy * px_per_y;
+                const y0 = if (held) l.judge_y else yy;
+                if (end_y < g.h and y0 > top_y) {
+                    const glow: u8 = if (held) 150 + @as(u8, @intFromFloat(@abs(@sin(@as(f32, @floatFromInt(t)) / 60_000)) * 90)) else 110;
+                    g.rect(l.xs[lane] + 5 * u, end_y, l.ws[lane] - 10 * u, y0 - end_y, col.alpha(glow));
+                }
+                if (!started and !held) drawNote(g, l.xs[lane], yy - nh, l.ws[lane], nh, col);
+                // Only CN and HCN judge the release, so only they get a note to aim the release at.
+                if (note.ln_type != .ln) drawNote(g, l.xs[lane], end_y - nh, l.ws[lane], nh, col);
+            },
+            .ln_end => {},
+        }
+    }
+}
+
+fn drawCovers(g: *gfx.Gfx, l: *const Lanes, cfg: *const config.Config) void {
+    const u = g.h / 720;
+    const hidden_px = l.base_y * cfg.hidden;
+    if (hidden_px > 0) g.rect(l.left, @max(l.judge_y - hidden_px, l.cover_px), l.w, @min(hidden_px, l.judge_y - l.cover_px), gfx.plate);
+    if (l.lift_px > 0) g.rect(l.left, l.judge_y, l.w, l.lift_px, gfx.plate);
+    if (l.cover_px > 0) {
+        g.vgrad(l.left, 0, l.w, l.cover_px, gfx.plate, .{ .r = 26, .g = 38, .b = 66 });
+        g.rect(l.left, l.cover_px - 2 * u, l.w, 2 * u, gfx.cyan);
+    }
+}
+
+fn drawJudgeLine(g: *gfx.Gfx, l: *const Lanes) void {
+    const u = g.h / 720;
+    g.additive(true);
+    g.vgrad(l.left, l.judge_y - 30 * u, l.w, 30 * u, gfx.cyan.alpha(0), gfx.cyan.alpha(90));
+    g.additive(false);
+    g.rect(l.left, l.judge_y - 2 * u, l.w, 4 * u, gfx.white);
+}
+
+/// Turntable, staggered keys, and the bombs over them.
+fn drawController(g: *gfx.Gfx, l: *const Lanes, snap: *const session_mod.Snapshot, t: i64) void {
+    const u = g.h / 720;
+    g.rect(l.left, l.pad_y, l.w, l.pad_h, gfx.plate);
+    for (l.order[0..l.n]) |lane| {
+        if (l.mode.scratchOf(lane) >= 0) {
+            drawTurntable(g, l.xs[lane] + l.ws[lane] / 2, l.pad_y + l.pad_h / 2, @min(l.ws[lane], l.pad_h) / 2 - 3 * u, t, snap.held[lane]);
+        } else drawKey(g, l.xs[lane] + 3 * u, l.pad_y + (if (noteColor(l.mode, lane).r >= 200) 44 * u else 8 * u), l.ws[lane] - 6 * u, 40 * u, noteColor(l.mode, lane), snap.held[lane]);
+    }
+    if (l.two_sides) g.rect(l.xs[l.order[l.n / 2]] - l.gap_w, 0, l.gap_w, l.pad_y + l.pad_h, gfx.bg);
+    g.additive(true);
+    for (l.order[0..l.n]) |lane| drawBomb(g, snap, lane, l.xs[lane] + l.ws[lane] / 2, l.judge_y, l.ws[lane]);
+    g.additive(false);
+}
+
+/// Gauge along the bottom of the gear.
+fn drawGaugeInfo(g: *gfx.Gfx, l: *const Lanes, snap: *const session_mod.Snapshot, cfg: *const config.Config, t: i64) void {
+    const u = g.h / 720;
+    const info_y = l.pad_y + l.pad_h + 4 * u;
+    drawGauge(g, l.left, info_y, l.w, 16 * u, snap.gauge, snap.gauge_border, @backingInt(snap.gauge_type) >= 3, t);
+    var buf: [48]u8 = undefined;
+    const info2 = info_y + 20 * u;
+    _ = g.text(gauge_labels[@backingInt(snap.gauge_type)], l.left, info2, g.scaled(14), gfx.sky);
+    g.textRight(std.fmt.bufPrint(&buf, "{d:.1}%", .{snap.gauge}) catch "", l.right, info2 - 2 * u, g.scaled(20), gfx.white);
+    g.fmt(l.left + l.w * 0.36, info2 + 2 * u, g.scaled(12), gfx.dim, "GREEN {d}  C{d} L{d} H{d}", .{ cfg.green_ms * 3 / 5, @as(u32, @intFromFloat(cfg.lane_cover * 100)), @as(u32, @intFromFloat(@round(cfg.lift * 100))), @as(u32, @intFromFloat(@round(cfg.hidden * 100))) });
+}
+
+/// Judge and combo pop over the lanes.
+fn drawJudgePop(g: *gfx.Gfx, l: *const Lanes, snap: *const session_mod.Snapshot, t: i64) void {
+    const u = g.h / 720;
+    const cx = l.left + l.w / 2;
+    if (snap.last_judge != 255 and snap.time_us - snap.judge_at_us < 600_000) {
+        const age = snap.time_us - snap.judge_at_us;
+        const pop: f32 = if (age < 80_000) 1.3 - 0.3 * @as(f32, @floatFromInt(age)) / 80_000 else 1;
+        const j = snap.last_judge;
+        const jy = l.judge_y * 0.62;
+        // PGREAT shimmers, the way a perfect should.
+        const col = if (j == 0) (if (@mod(@divTrunc(t, 50_000), 2) == 0) gfx.white else gfx.cyan) else judge_colors[j];
+        if (snap.score.combo > 0) {
+            var cb: [16]u8 = undefined;
+            g.textPop(std.fmt.bufPrint(&cb, "{d}", .{snap.score.combo}) catch "", cx, jy - 60 * u, g.scaled(48), gfx.white, pop);
+        }
+        g.textPop(judge_names[j], cx, jy, g.scaled(32), col, pop);
+        if (j > 0 and j < 4) g.textPop(if (snap.last_fast_us > 0) "FAST" else "SLOW", cx, jy + 40 * u, g.scaled(14), if (snap.last_fast_us > 0) gfx.cyan else gfx.amber, 1);
+    }
+}
 
 fn fillDensity(v: *View, chart: *const core.types.Chart) void {
     v.density_max = 1;
@@ -394,17 +455,10 @@ fn drawScoreGraph(g: *gfx.Gfx, ex: u32, passed: u32, best: u32, notes: u32, x: f
     g.rect(lx, pace, gw, 2, gfx.amber);
 }
 
-fn drawDeck(g: *gfx.Gfx, v: *View, s: *Session, snap: *const session_mod.Snapshot, t: i64, x: f32, w: f32) void {
-    if (w < 80) return;
+fn drawTitleBar(g: *gfx.Gfx, s: *Session, snap: *const session_mod.Snapshot, x: f32, w: f32, bar_h: f32, frac: f32) void {
     const chart = &s.chart;
     const u = g.h / 720;
-    const sc = &snap.score;
     var buf: [64]u8 = undefined;
-    const gap = 6 * u;
-    const frac: f32 = if (chart.last_time_us > 0) std.math.clamp(@as(f32, @floatFromInt(snap.time_us)) / @as(f32, @floatFromInt(chart.last_time_us)), 0, 1) else 0;
-
-    // Title bar.
-    const bar_h = 38 * u;
     g.panel(x, 8 * u, w, bar_h, "");
     const now_s: u64 = @intCast(@divTrunc(@max(snap.time_us, 0), 1_000_000));
     const total_s: u64 = @intCast(@divTrunc(@max(chart.last_time_us, 0), 1_000_000));
@@ -417,16 +471,12 @@ fn drawDeck(g: *gfx.Gfx, v: *View, s: *Session, snap: *const session_mod.Snapsho
     g.textRight(std.fmt.bufPrint(&lv, "LV {s}", .{if (s.params.table_level.len > 0) s.params.table_level else chart.playlevel}) catch "", x + w - 14 * u, 16 * u, g.scaled(16), gfx.sky);
     g.rect(x + 8 * u, 8 * u + bar_h - 3 * u, w - 16 * u, 2 * u, gfx.white.alpha(30));
     g.hgrad(x + 8 * u, 8 * u + bar_h - 3 * u, (w - 16 * u) * frac, 2 * u, gfx.accent, gfx.cyan);
+}
 
-    // Bottom stack: readouts, then graphs.
-    const graph_h = 112 * u;
-    const read_h = 74 * u;
-    const graph_y = g.h - 8 * u - graph_h;
-    const read_y = graph_y - gap - read_h;
-    const stage_y = 8 * u + bar_h + gap;
-    const stage_h = read_y - gap - stage_y;
-
-    // Stage: BGA, or a pulse of rings on the beat when the chart has none.
+/// BGA, or the title when the chart has none.
+fn drawStage(g: *gfx.Gfx, v: *View, s: *Session, snap: *const session_mod.Snapshot, t: i64, x: f32, w: f32, stage_y: f32, stage_h: f32) void {
+    const chart = &s.chart;
+    const u = g.h / 720;
     g.panel(x, stage_y, w, stage_h, "");
     const inner = stage_h - 8 * u;
     const by = stage_y + 4 * u;
@@ -437,8 +487,11 @@ fn drawDeck(g: *gfx.Gfx, v: *View, s: *Session, snap: *const session_mod.Snapsho
         g.textCentered(chart.title, x + w / 2, by + inner / 2 - 40 * u, g.scaled(48), gfx.white);
         g.textCentered(chart.artist, x + w / 2, by + inner / 2 + 26 * u, g.scaled(16), gfx.dim);
     }
+}
 
-    // Readouts.
+fn drawReadouts(g: *gfx.Gfx, chart: *const core.types.Chart, snap: *const session_mod.Snapshot, x: f32, w: f32, read_y: f32, read_h: f32, gap: f32) void {
+    const u = g.h / 720;
+    const sc = &snap.score;
     const cw = (w - gap * 2) / 3;
     // Double play leaves a narrow deck.
     const wide = cw >= 220 * u;
@@ -457,14 +510,11 @@ fn drawDeck(g: *gfx.Gfx, v: *View, s: *Session, snap: *const session_mod.Snapsho
     const bx3 = bx2 + cw + gap;
     g.panel(bx3, read_y, cw, read_h, "MAX COMBO");
     g.digits(bx3 + cw - 12 * u, num_y, num, 4, sc.max_combo, gfx.white);
+}
 
-    // Graphs.
-    const a_w = w * 0.26;
-    const c_w = w * 0.3;
-    const b_w = w - a_w - c_w - gap * 2;
-    drawScoreGraph(g, ex, sc.passed, v.best_ex, chart.total_notes, x, graph_y, a_w, graph_h);
-
-    const nx = x + a_w + gap;
+/// Note density over the song, and under it the recent hits around a centre line, the newest brightest.
+fn drawNotesGraph(g: *gfx.Gfx, v: *View, nx: f32, graph_y: f32, b_w: f32, graph_h: f32, frac: f32) void {
+    const u = g.h / 720;
     g.panel(nx, graph_y, b_w, graph_h, "NOTES GRAPH");
     const gx = nx + 8 * u;
     const gw = b_w - 16 * u;
@@ -479,7 +529,6 @@ fn drawDeck(g: *gfx.Gfx, v: *View, s: *Session, snap: *const session_mod.Snapsho
         g.vgrad(px, gbot - bh, @max(bw - 1, 1), bh, if (done) gfx.cyan else gfx.steel, if (done) gfx.accent else gfx.rule);
     }
     g.rect(gx + gw * frac, gtop, 2, gbot - gtop, gfx.white);
-    // Timing meter: recent hits around a centre line, the newest brightest.
     const my = gbot + 6 * u;
     const mh = 18 * u;
     const mcx = gx + gw / 2;
@@ -492,8 +541,12 @@ fn drawDeck(g: *gfx.Gfx, v: *View, s: *Session, snap: *const session_mod.Snapsho
         const a: u8 = @intCast(240 - i * 9);
         g.rect(mcx - off * gw / 2 - 1, my + 2, 2, mh - 4, (if (off > 0) gfx.cyan else gfx.amber).alpha(a));
     }
+}
 
-    const jx = nx + b_w + gap;
+fn drawJudgeCounts(g: *gfx.Gfx, snap: *const session_mod.Snapshot, jx: f32, graph_y: f32, c_w: f32, graph_h: f32) void {
+    const u = g.h / 720;
+    const sc = &snap.score;
+    var buf: [64]u8 = undefined;
     g.panel(jx, graph_y, c_w, graph_h, "JUDGE");
     var early: u32 = 0;
     var late: u32 = 0;
@@ -511,7 +564,11 @@ fn drawDeck(g: *gfx.Gfx, v: *View, s: *Session, snap: *const session_mod.Snapsho
     }
     g.fmt(jx + 10 * u, graph_y + graph_h - 16 * u, g.scaled(12), gfx.cyan, "F {d}", .{early});
     g.textRight(std.fmt.bufPrint(&buf, "S {d}", .{late}) catch "", jx + c_w - 10 * u, graph_y + graph_h - 16 * u, g.scaled(12), gfx.amber);
+}
 
+fn drawTag(g: *gfx.Gfx, s: *Session, x: f32, w: f32, stage_y: f32) void {
+    const u = g.h / 720;
+    var buf: [64]u8 = undefined;
     if (s.params.autoplay or s.params.replay != null or s.load_warnings > 0) {
         const tag = if (s.load_warnings > 0)
             std.fmt.bufPrint(&buf, "{d} SOUNDS MISSING", .{s.load_warnings}) catch ""
@@ -520,6 +577,38 @@ fn drawDeck(g: *gfx.Gfx, v: *View, s: *Session, snap: *const session_mod.Snapsho
         g.round(x + w - tw - 8 * u, stage_y + 8 * u, tw, 18 * u, 4 * u, gfx.accent);
         _ = g.text(tag, x + w - tw + 2 * u, stage_y + 9 * u, g.scaled(12), gfx.white);
     }
+}
+
+fn drawDeck(g: *gfx.Gfx, v: *View, s: *Session, snap: *const session_mod.Snapshot, t: i64, x: f32, w: f32) void {
+    if (w < 80) return;
+    const chart = &s.chart;
+    const u = g.h / 720;
+    const sc = &snap.score;
+    const gap = 6 * u;
+    const frac: f32 = if (chart.last_time_us > 0) std.math.clamp(@as(f32, @floatFromInt(snap.time_us)) / @as(f32, @floatFromInt(chart.last_time_us)), 0, 1) else 0;
+
+    const bar_h = 38 * u;
+    drawTitleBar(g, s, snap, x, w, bar_h, frac);
+
+    // Bottom stack: readouts, then graphs.
+    const graph_h = 112 * u;
+    const read_h = 74 * u;
+    const graph_y = g.h - 8 * u - graph_h;
+    const read_y = graph_y - gap - read_h;
+    const stage_y = 8 * u + bar_h + gap;
+    const stage_h = read_y - gap - stage_y;
+    drawStage(g, v, s, snap, t, x, w, stage_y, stage_h);
+    drawReadouts(g, chart, snap, x, w, read_y, read_h, gap);
+
+    // Graphs.
+    const a_w = w * 0.26;
+    const c_w = w * 0.3;
+    const b_w = w - a_w - c_w - gap * 2;
+    drawScoreGraph(g, sc.exScore(), sc.passed, v.best_ex, chart.total_notes, x, graph_y, a_w, graph_h);
+    const nx = x + a_w + gap;
+    drawNotesGraph(g, v, nx, graph_y, b_w, graph_h, frac);
+    drawJudgeCounts(g, snap, nx + b_w + gap, graph_y, c_w, graph_h);
+    drawTag(g, s, x, w, stage_y);
 }
 
 test "green number maps to visible y" {

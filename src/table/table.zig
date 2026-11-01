@@ -25,7 +25,7 @@ pub fn findMeta(html: []const u8) ?[]const u8 {
         const q = tag[i];
         if (q == '"' or q == '\'') {
             const close = std.mem.indexOfScalarPos(u8, tag, i + 1, q) orelse continue;
-            return tag[i + 1..close];
+            return tag[i + 1 .. close];
         }
         const close = std.mem.indexOfAnyPos(u8, tag, i, " /") orelse tag.len;
         return tag[i..close];
@@ -106,7 +106,7 @@ fn storeCourse(a: std.mem.Allocator, st: db_mod.Stmt, url: []const u8, v: J) !vo
     st.reset();
 }
 
-pub const FetchResult = struct { name: []const u8, songs: u32, courses: u32 };
+pub const FetchResult = struct { songs: u32, courses: u32 };
 
 /// Parses already-downloaded JSON into the DB, replacing what was stored for `url`.
 pub fn store(gpa: std.mem.Allocator, d: Db, url: []const u8, head_bytes: []const u8, data_bytes: []const u8) !FetchResult {
@@ -136,7 +136,8 @@ pub fn store(gpa: std.mem.Allocator, d: Db, url: []const u8, head_bytes: []const
 
     try d.exec("BEGIN");
     errdefer d.exec("ROLLBACK") catch {};
-    for ([_][]const u8{ "DELETE FROM table_song WHERE url=?1", "DELETE FROM course WHERE table_url=?1" }) |sql| {
+    // Courses keep their rows, because their scores point at the ids. Empty hashes mark the ones to drop.
+    for ([_][]const u8{ "DELETE FROM table_song WHERE url=?1", "UPDATE course SET hashes='' WHERE table_url=?1" }) |sql| {
         const del = try d.prepare(sql);
         defer del.deinit();
         del.bindText(1, url);
@@ -176,7 +177,7 @@ pub fn store(gpa: std.mem.Allocator, d: Db, url: []const u8, head_bytes: []const
     }
     var courses: u32 = 0;
     if (head.object.get("course")) |cv| if (cv == .array) {
-        const cs = try d.prepare("INSERT OR REPLACE INTO course(table_url,name,hashes,constraints) VALUES(?1,?2,?3,?4)");
+        const cs = try d.prepare("INSERT INTO course(table_url,name,hashes,constraints) VALUES(?1,?2,?3,?4) ON CONFLICT(table_url,name) DO UPDATE SET hashes=excluded.hashes, constraints=excluded.constraints");
         defer cs.deinit();
         for (cv.array.items) |item| {
             // Both a flat list and a list of groups exist in the wild.
@@ -191,8 +192,14 @@ pub fn store(gpa: std.mem.Allocator, d: Db, url: []const u8, head_bytes: []const
             }
         }
     };
+    const gone = try d.prepare("DELETE FROM course WHERE table_url=?1 AND hashes=''");
+    defer gone.deinit();
+    gone.bindText(1, url);
+    _ = try gone.step();
+    // A later course can reuse a freed id, and must not inherit this score.
+    try d.exec("DELETE FROM course_score WHERE course_id NOT IN (SELECT id FROM course)");
     try d.exec("COMMIT");
-    return .{ .name = "", .songs = songs, .courses = courses };
+    return .{ .songs = songs, .courses = courses };
 }
 
 pub fn fetch(gpa: std.mem.Allocator, d: Db, url: []const u8) !FetchResult {
@@ -263,4 +270,34 @@ test "meta tag and level order" {
     const lim = parseConstraints("grade,no_good,");
     try std.testing.expectEqual(@as(u8, 0), lim.random);
     try std.testing.expect(lim.no_good and !lim.no_great);
+}
+
+test "a table refresh keeps course scores on their courses" {
+    const gpa = std.testing.allocator;
+    const d = try Db.open(":memory:", gpa, false);
+    defer d.close();
+    try db_mod.initSchema(d);
+    const head =
+        \\{"name":"A","course":[{"name":"one","md5":["a"]},{"name":"two","md5":["b"]},{"name":"old","md5":["c"]}]}
+    ;
+    const reordered =
+        \\{"name":"A","course":[{"name":"new","md5":["d"]},{"name":"two","md5":["e"]},{"name":"one","md5":["a"]}]}
+    ;
+    _ = try store(gpa, d, "A", head, "[]");
+    _ = try store(gpa, d, "B", "{\"name\":\"B\",\"course\":[{\"name\":\"b1\",\"md5\":[\"x\"]}]}", "[]");
+    try d.exec("INSERT INTO course_score(course_id,clear,ex,date) SELECT id,5,length(name),0 FROM course WHERE table_url='A'");
+    _ = try store(gpa, d, "A", reordered, "[]");
+    const q = try d.prepare("SELECT c.name,c.hashes,s.ex FROM course c LEFT JOIN course_score s ON s.course_id=c.id WHERE c.table_url='A' ORDER BY c.name");
+    defer q.deinit();
+    for ([_]struct { []const u8, []const u8, i64 }{ .{ "new", "m:d", 0 }, .{ "one", "m:a", 3 }, .{ "two", "m:e", 3 } }) |want| {
+        try std.testing.expect(try q.step());
+        try std.testing.expectEqualStrings(want[0], q.text(0));
+        try std.testing.expectEqualStrings(want[1], q.text(1));
+        try std.testing.expectEqual(want[2], q.int(2));
+    }
+    try std.testing.expect(!try q.step());
+    const left = try d.prepare("SELECT COUNT(*) FROM course_score");
+    defer left.deinit();
+    try std.testing.expect(try left.step());
+    try std.testing.expectEqual(@as(i64, 2), left.int(0));
 }

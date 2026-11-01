@@ -66,9 +66,9 @@ fn resolvePath(a: std.mem.Allocator, root: []const u8, raw: []const u8) ?[]const
     // shortcut: wildcard picks the first match or the #CUSTOMFILE default; a chooser UI can come with skin settings
     var rel: []const u8 = norm;
     if (std.ascii.findIgnoreCase(rel, "theme/")) |i| {
-        rel = rel[i + "theme/".len..];
+        rel = rel[i + "theme/".len ..];
         // drop the theme's own folder name: `root` already is that folder
-        if (std.mem.indexOfScalar(u8, rel, '/')) |sl| rel = rel[sl + 1..];
+        if (std.mem.indexOfScalar(u8, rel, '/')) |sl| rel = rel[sl + 1 ..];
     }
     if (fs.climbs(rel) or std.fs.path.isAbsolute(rel)) return null;
     return walk(a, root, rel);
@@ -82,7 +82,7 @@ pub fn walk(a: std.mem.Allocator, root: []const u8, rel: []const u8) ?[]const u8
         var found: ?[]const u8 = null;
         if (std.mem.indexOfScalar(u8, seg, '*')) |star| {
             const pre = seg[0..star];
-            const suf = seg[star + 1..];
+            const suf = seg[star + 1 ..];
             var best: ?[]const u8 = null;
             for (entries) |e| {
                 if (e.name.len < pre.len + suf.len) continue;

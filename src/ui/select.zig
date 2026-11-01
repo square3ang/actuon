@@ -15,6 +15,9 @@ const db_mod = @import("../db/db.zig");
 const skin_scene = @import("../skin/scene.zig");
 const session_mod = @import("../game/session.zig");
 const preview_mod = @import("../audio/preview.zig");
+const testing = @import("testing.zig");
+const settings = @import("settings.zig");
+const input = @import("../input/input.zig");
 const App = app_mod.App;
 
 pub const Row = struct {
@@ -82,12 +85,31 @@ pub const State = struct {
     /// Set to fetch one table instead of every configured one.
     table_only: ?[]const u8 = null,
     stats: db_mod.ScanStats = .{},
+    start_held: bool = false,
+    select_held: bool = false,
+    /// The 5 key: beatoraja's way to the detail panel from a keyboard.
+    detail_held: bool = false,
+    exit_since_ms: u64 = 0,
+    /// Index into `mode_filters`.
+    mode_filter: u8 = 0,
+    /// Up to `max_replays` newest are offered per chart, as beatoraja's slots.
+    replay_slot: u8 = 0,
+    replay_count_for: [64]u8 = undefined,
+    replay_count: ?u8 = null,
+    /// Holds the replay being played back.
+    replay_arena: ?std.heap.ArenaAllocator = null,
+    /// The panel the skin's timers last saw.
+    panel_seen: u8 = 0,
+    /// A scratch held in beatoraja song select: its direction, and when it next moves the cursor.
+    pad_scroll: i8 = 0,
+    pad_scroll_at_ms: u64 = 0,
 };
 
 const random_names = [_][]const u8{ "OFF", "MIRROR", "RANDOM", "R-RANDOM", "S-RANDOM" };
 const gauge_names = [_][]const u8{ "ASSIST EASY", "EASY", "NORMAL", "HARD", "EX HARD", "HAZARD", "GAS" };
 const hs_names = [_][]const u8{ "START", "MAX", "MAIN", "OFF" };
-const sort_names = [_][]const u8{ "TITLE", "LEVEL", "CLEAR", "EX" };
+// In beatoraja's order: its skins show the sort by this index.
+const sort_names = [_][]const u8{ "TITLE", "ARTIST", "BPM", "LENGTH", "LEVEL", "CLEAR", "EX", "MISS" };
 const scan_interval_ms = 30_000;
 
 pub fn init(a: *App) void {
@@ -97,6 +119,7 @@ pub fn init(a: *App) void {
 
 pub fn deinit(a: *App) void {
     const s = &a.sel;
+    if (s.replay_arena) |*r| r.deinit();
     if (s.scan_thread) |t| c.SDL_WaitThread(t, null);
     if (s.table_thread) |t| c.SDL_WaitThread(t, null);
     if (s.jacket_job) |j| j.destroy();
@@ -171,123 +194,236 @@ pub fn reload(a: *App) void {
         std.log.err("list failed: {t}", .{e});
         break :blk &.{};
     };
+    keepFilteredMode(s);
+    s.replay_count = null;
     if (s.cursor >= s.rows.len) s.cursor = if (s.rows.len == 0) 0 else s.rows.len - 1;
+}
+
+/// beatoraja's play mode filter, in its order. Its skins number them differently.
+/// shortcut: folder and level counts still include hidden charts, count per mode if it misleads.
+const mode_filters = [_]struct { mode: ?core.types.Mode, skin_index: i64, name: []const u8 }{
+    .{ .mode = null, .skin_index = 0, .name = "ALL" },
+    .{ .mode = .beat7, .skin_index = 2, .name = "7K" },
+    .{ .mode = .beat14, .skin_index = 4, .name = "14K" },
+    .{ .mode = .popn9, .skin_index = 5, .name = "9K" },
+    .{ .mode = .beat5, .skin_index = 1, .name = "5K" },
+    .{ .mode = .beat10, .skin_index = 3, .name = "10K" },
+};
+
+fn keepFilteredMode(s: *State) void {
+    const want = mode_filters[s.mode_filter].mode orelse return;
+    var kept: usize = 0;
+    for (s.rows) |row| {
+        if (row.song) |song| if (song.mode != @backingInt(want)) continue;
+        s.rows[kept] = row;
+        kept += 1;
+    }
+    s.rows = s.rows[0..kept];
 }
 
 fn orderBy(sort: u8) []const u8 {
     return switch (sort) {
-        1 => " ORDER BY CAST(s.level AS INTEGER), s.title",
-        2 => " ORDER BY COALESCE(c.clear,0) DESC, s.title",
-        3 => " ORDER BY COALESCE(c.ex,0) DESC, s.title",
+        1 => " ORDER BY s.artist, s.title",
+        2 => " ORDER BY s.max_bpm, s.title",
+        3 => " ORDER BY s.length_ms, s.title",
+        4 => " ORDER BY CAST(s.level AS INTEGER), s.title",
+        5 => " ORDER BY COALESCE(c.clear,0) DESC, s.title",
+        6 => " ORDER BY COALESCE(c.ex,0) DESC, s.title",
+        // Charts never played have no miss count: they go last.
+        7 => " ORDER BY COALESCE(c.min_bp,-1)<0, c.min_bp, s.title",
         else => " ORDER BY s.title, s.difficulty",
     };
+}
+
+/// shortcut: SQLite's LIKE folds ASCII case only, so accented Latin and Cyrillic stay case-sensitive; ICU if it matters.
+fn searchSql(al: std.mem.Allocator, words: usize, sort: u8) ![]const u8 {
+    var sql: std.ArrayList(u8) = .empty;
+    try sql.appendSlice(al, db_mod.song_select);
+    for (1..words + 1) |i| {
+        try sql.print(al, "{s} (", .{if (i == 1) " WHERE" else " AND"});
+        for ([_][]const u8{ "title", "subtitle", "artist", "subartist", "genre" }, 0..) |col, j| {
+            try sql.print(al, "{s}s.{s} LIKE ?{d} ESCAPE '\\'", .{ if (j > 0) " OR " else "", col, i });
+        }
+        try sql.append(al, ')');
+    }
+    if (sort == 0) {
+        try sql.print(al, " ORDER BY s.title LIKE ?{d} ESCAPE '\\' DESC, s.title, s.difficulty", .{words + 1});
+    } else try sql.appendSlice(al, orderBy(sort));
+    try sql.appendSlice(al, " LIMIT 2000");
+    return sql.items;
+}
+
+fn likePattern(al: std.mem.Allocator, word: []const u8, anywhere: bool) ![]const u8 {
+    var pat: std.ArrayList(u8) = .empty;
+    if (anywhere) try pat.append(al, '%');
+    for (word) |ch| {
+        if (ch == '%' or ch == '_' or ch == '\\') try pat.append(al, '\\');
+        try pat.append(al, ch);
+    }
+    try pat.append(al, '%');
+    return pat.items;
+}
+
+test "search patterns escape LIKE's wildcards" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const al = arena.allocator();
+    try std.testing.expectEqualStrings("%100\\%\\_a%", try likePattern(al, "100%_a", true));
+    try std.testing.expectEqualStrings("abc%", try likePattern(al, "abc", false));
+}
+
+test "search matches every word, in any order, title openings first" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const al = arena.allocator();
+    const d = try db_mod.Db.open(":memory:", std.testing.allocator, false);
+    defer d.close();
+    try d.exec(db_mod.schema);
+    try d.exec("INSERT INTO song(path,folder,sha256,md5,title,artist,subtitle,subartist,genre) VALUES" ++
+        "('1','f','a','a','Blue Sky','Rin','','','Pop')," ++
+        "('2','f','b','b','A Sky','Rin','','','Pop')," ++
+        "('3','f','c','c','Sky Tower','Mio','','','Pop')");
+    const st = try d.prepare(try searchSql(al, 2, 0));
+    defer st.deinit();
+    st.bindText(1, try likePattern(al, "rin", true));
+    st.bindText(2, try likePattern(al, "sky", true));
+    st.bindText(3, try likePattern(al, "rin sky", false));
+    try std.testing.expect(try st.step());
+    try std.testing.expectEqualStrings("A Sky", (try db_mod.readSong(al, st)).title);
+    try std.testing.expect(try st.step());
+    try std.testing.expectEqualStrings("Blue Sky", (try db_mod.readSong(al, st)).title);
+    try std.testing.expect(!try st.step());
+
+    const one = try d.prepare(try searchSql(al, 1, 0));
+    defer one.deinit();
+    one.bindText(1, try likePattern(al, "sky", true));
+    one.bindText(2, try likePattern(al, "sky", false));
+    try std.testing.expect(try one.step());
+    try std.testing.expectEqualStrings("Sky Tower", (try db_mod.readSong(al, one)).title);
+}
+
+fn searchRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row), words: *std.mem.TokenIterator(u8, .any)) !void {
+    const s = &a.sel;
+    var count: usize = 0;
+    while (words.next() != null) count += 1;
+    words.reset();
+    const st = try a.db.prepare(try searchSql(al, count, s.sort));
+    defer st.deinit();
+    var at: c_int = 1;
+    while (words.next()) |word| : (at += 1) st.bindText(at, try likePattern(al, word, true));
+    // ?N: the whole query opening a title ranks first.
+    if (s.sort == 0) st.bindText(at, try likePattern(al, std.mem.trim(u8, s.search, " \t"), false));
+    while (try st.step()) {
+        const song = try db_mod.readSong(al, st);
+        try rows.append(al, .{ .label = song.title, .song = song });
+    }
+}
+
+fn rootRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
+    try rows.append(al, .{ .label = "Library", .kind = .group });
+    const st = try a.db.prepare("SELECT url,name,symbol FROM bms_table ORDER BY name");
+    defer st.deinit();
+    while (try st.step()) {
+        try rows.append(al, .{ .label = try al.dupe(u8, st.text(1)), .kind = .table, .target = try al.dupe(u8, st.text(0)) });
+    }
+    try rows.append(al, .{ .label = "Courses", .kind = .group, .id = 1 });
+}
+
+fn libraryRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
+    const st = try a.db.prepare("SELECT folder, MIN(title), COUNT(*) FROM song GROUP BY folder ORDER BY MIN(title)");
+    defer st.deinit();
+    while (try st.step()) {
+        try rows.append(al, .{
+            .label = try std.fmt.allocPrint(al, "{s}  ({d})", .{ st.text(1), st.int(2) }),
+            .kind = .folder,
+            .target = try al.dupe(u8, st.text(0)),
+        });
+    }
+}
+
+fn folderRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
+    const s = &a.sel;
+    const sql = try std.fmt.allocPrint(al, "{s} WHERE s.folder=?1{s}", .{ db_mod.song_select, orderBy(s.sort) });
+    const st = try a.db.prepare(sql);
+    defer st.deinit();
+    st.bindText(1, s.folder);
+    while (try st.step()) {
+        const song = try db_mod.readSong(al, st);
+        try rows.append(al, .{ .label = song.title, .song = song });
+    }
+}
+
+fn tableRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
+    const s = &a.sel;
+    const st = try a.db.prepare("SELECT level, COUNT(*) FROM table_song WHERE url=?1 GROUP BY level ORDER BY MIN(ord)");
+    defer st.deinit();
+    st.bindText(1, s.table_url);
+    while (try st.step()) {
+        try rows.append(al, .{
+            .label = try std.fmt.allocPrint(al, "Level {s}  ({d})", .{ st.text(0), st.int(1) }),
+            .kind = .level,
+            .target = try al.dupe(u8, st.text(0)),
+        });
+    }
+}
+
+fn levelRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
+    const s = &a.sel;
+    const st = try a.db.prepare("SELECT md5,sha256,title,artist,zip_url FROM table_song WHERE url=?1 AND level=?2 ORDER BY ord");
+    defer st.deinit();
+    st.bindText(1, s.table_url);
+    st.bindText(2, s.level);
+    const sym = try a.db.prepare("SELECT COALESCE(symbol,'') FROM bms_table WHERE url=?1");
+    defer sym.deinit();
+    sym.bindText(1, s.table_url);
+    // Inside a table, show that table's level even when another table lists the chart too.
+    const level_label = try std.fmt.allocPrint(al, "{s}{s}", .{ if (try sym.step()) sym.text(0) else "", s.level });
+    const look = try a.db.prepare(db_mod.song_select ++ " WHERE (s.md5=?1 AND ?1<>'') OR (s.sha256=?2 AND ?2<>'') LIMIT 1");
+    defer look.deinit();
+    while (try st.step()) {
+        look.bindText(1, st.text(0));
+        look.bindText(2, st.text(1));
+        defer look.reset();
+        if (try look.step()) {
+            var song = try db_mod.readSong(al, look);
+            song.table_level = level_label;
+            try rows.append(al, .{ .label = song.title, .song = song });
+        } else {
+            try rows.append(al, .{
+                .label = try std.fmt.allocPrint(al, "{s}", .{st.text(2)}),
+                .kind = .missing,
+                .target = try al.dupe(u8, st.text(0)),
+                .extra = try al.dupe(u8, st.text(4)),
+            });
+        }
+    }
+}
+
+fn courseRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
+    const st = try a.db.prepare("SELECT c.id,c.name,t.name,COALESCE(s.clear,0) FROM course c LEFT JOIN bms_table t ON t.url=c.table_url LEFT JOIN course_score s ON s.course_id=c.id ORDER BY t.name,c.id");
+    defer st.deinit();
+    while (try st.step()) {
+        try rows.append(al, .{
+            .label = try std.fmt.allocPrint(al, "{s}: {s}", .{ st.text(2), st.text(1) }),
+            .kind = .course,
+            .id = st.int(0),
+        });
+    }
 }
 
 fn buildRows(a: *App, al: std.mem.Allocator) ![]Row {
     const s = &a.sel;
     var rows: std.ArrayList(Row) = .empty;
-    if (s.search.len > 0) {
-        const sql = try std.fmt.allocPrint(al, "{s} WHERE s.title LIKE ?1 ESCAPE '\\' OR s.artist LIKE ?1 ESCAPE '\\' OR s.genre LIKE ?1 ESCAPE '\\'{s} LIMIT 2000", .{ db_mod.song_select, orderBy(s.sort) });
-        const st = try a.db.prepare(sql);
-        defer st.deinit();
-        var pat: std.ArrayList(u8) = .empty;
-        try pat.append(al, '%');
-        for (s.search) |ch| {
-            if (ch == '%' or ch == '_' or ch == '\\') try pat.append(al, '\\');
-            try pat.append(al, ch);
-        }
-        try pat.append(al, '%');
-        st.bindText(1, pat.items);
-        while (try st.step()) {
-            const song = try db_mod.readSong(al, st);
-            try rows.append(al, .{ .label = song.title, .song = song });
-        }
-        return rows.toOwnedSlice(al);
-    }
-    switch (s.view) {
-        .root => {
-            try rows.append(al, .{ .label = "Library", .kind = .group });
-            const st = try a.db.prepare("SELECT url,name,symbol FROM bms_table ORDER BY name");
-            defer st.deinit();
-            while (try st.step()) {
-                try rows.append(al, .{ .label = try al.dupe(u8, st.text(1)), .kind = .table, .target = try al.dupe(u8, st.text(0)) });
-            }
-            try rows.append(al, .{ .label = "Courses", .kind = .group, .id = 1 });
-        },
-        .library => {
-            const st = try a.db.prepare("SELECT folder, MIN(title), COUNT(*) FROM song GROUP BY folder ORDER BY MIN(title)");
-            defer st.deinit();
-            while (try st.step()) {
-                try rows.append(al, .{
-                    .label = try std.fmt.allocPrint(al, "{s}  ({d})", .{ st.text(1), st.int(2) }),
-                    .kind = .folder,
-                    .target = try al.dupe(u8, st.text(0)),
-                });
-            }
-        },
-        .folder => {
-            const sql = try std.fmt.allocPrint(al, "{s} WHERE s.folder=?1{s}", .{ db_mod.song_select, orderBy(s.sort) });
-            const st = try a.db.prepare(sql);
-            defer st.deinit();
-            st.bindText(1, s.folder);
-            while (try st.step()) {
-                const song = try db_mod.readSong(al, st);
-                try rows.append(al, .{ .label = song.title, .song = song });
-            }
-        },
-        .table => {
-            const st = try a.db.prepare("SELECT level, COUNT(*) FROM table_song WHERE url=?1 GROUP BY level ORDER BY MIN(ord)");
-            defer st.deinit();
-            st.bindText(1, s.table_url);
-            while (try st.step()) {
-                try rows.append(al, .{
-                    .label = try std.fmt.allocPrint(al, "Level {s}  ({d})", .{ st.text(0), st.int(1) }),
-                    .kind = .level,
-                    .target = try al.dupe(u8, st.text(0)),
-                });
-            }
-        },
-        .level => {
-            const st = try a.db.prepare("SELECT md5,sha256,title,artist,zip_url FROM table_song WHERE url=?1 AND level=?2 ORDER BY ord");
-            defer st.deinit();
-            st.bindText(1, s.table_url);
-            st.bindText(2, s.level);
-            const sym = try a.db.prepare("SELECT COALESCE(symbol,'') FROM bms_table WHERE url=?1");
-            defer sym.deinit();
-            sym.bindText(1, s.table_url);
-            // Inside a table, show that table's level even when another table lists the chart too.
-            const level_label = try std.fmt.allocPrint(al, "{s}{s}", .{ if (try sym.step()) sym.text(0) else "", s.level });
-            const look = try a.db.prepare(db_mod.song_select ++ " WHERE (s.md5=?1 AND ?1<>'') OR (s.sha256=?2 AND ?2<>'') LIMIT 1");
-            defer look.deinit();
-            while (try st.step()) {
-                look.bindText(1, st.text(0));
-                look.bindText(2, st.text(1));
-                defer look.reset();
-                if (try look.step()) {
-                    var song = try db_mod.readSong(al, look);
-                    song.table_level = level_label;
-                    try rows.append(al, .{ .label = song.title, .song = song });
-                } else {
-                    try rows.append(al, .{
-                        .label = try std.fmt.allocPrint(al, "{s}", .{st.text(2)}),
-                        .kind = .missing,
-                        .target = try al.dupe(u8, st.text(0)),
-                        .extra = try al.dupe(u8, st.text(4)),
-                    });
-                }
-            }
-        },
-        .courses => {
-            const st = try a.db.prepare("SELECT c.id,c.name,t.name,COALESCE(s.clear,0) FROM course c LEFT JOIN bms_table t ON t.url=c.table_url LEFT JOIN course_score s ON s.course_id=c.id ORDER BY t.name,c.id");
-            defer st.deinit();
-            while (try st.step()) {
-                try rows.append(al, .{
-                    .label = try std.fmt.allocPrint(al, "{s}: {s}", .{ st.text(2), st.text(1) }),
-                    .kind = .course,
-                    .id = st.int(0),
-                });
-            }
-        },
+    var words = std.mem.tokenizeAny(u8, s.search, " \t\u{3000}");
+    if (words.peek() != null) {
+        try searchRows(a, al, &rows, &words);
+    } else switch (s.view) {
+        .root => try rootRows(a, al, &rows),
+        .library => try libraryRows(a, al, &rows),
+        .folder => try folderRows(a, al, &rows),
+        .table => try tableRows(a, al, &rows),
+        .level => try levelRows(a, al, &rows),
+        .courses => try courseRows(a, al, &rows),
     }
     return rows.toOwnedSlice(al);
 }
@@ -594,31 +730,10 @@ fn updatePreview(a: *App) void {
     a.preview.tick(if (s.preview_len > 0) s.preview_buf[0..s.preview_len] else null, now);
 }
 
-pub fn draw(a: *App) void {
-    tickScan(a);
-    updatePreview(a);
-    tickDownload(a);
+fn drawHeader(a: *App) void {
     const g = &a.g;
     const s = &a.sel;
-    if (s.searching) {
-        if (!std.mem.eql(u8, s.search, a.text.items)) {
-            const al = a.gpa;
-            if (s.search.len > 0) al.free(s.search);
-            s.search = if (a.text.items.len == 0) "" else al.dupe(u8, a.text.items) catch "";
-            s.cursor = 0;
-            reload(a);
-        }
-    }
-    a.syncSelectSkin();
-    if (a.select_skin != null) return drawSkinned(a);
     const u = g.h / 720;
-    updateJacket(a);
-    g.backdrop();
-    if (s.jacket != null or s.jacket_old != null) {
-        drawJacketLayers(a, true, null);
-    }
-
-    // Header.
     if (s.logo == null) s.logo = gfx.loadTexture(g, "logo", @embedFile("logo"));
     if (s.logo) |t| g.sprite(t, null, .{ .x = 26 * u, .y = 12 * u, .w = 32 * u * t.w / t.h, .h = 32 * u }, .{});
     if (s.searching) {
@@ -634,11 +749,14 @@ pub fn draw(a: *App) void {
             g.rect(10 * u, 46 * u, (g.w - 20 * u) * frac, 2 * u, gfx.accent);
         }
     }
+}
 
-    // Wheel: rows lean away from the selected one.
-    const wheel_x = g.w * 0.46;
+/// Rows lean away from the selected one.
+fn drawWheel(a: *App, wheel_x: f32, dock_y: f32) void {
+    const g = &a.g;
+    const s = &a.sel;
+    const u = g.h / 720;
     const top = 54 * u;
-    const dock_y = g.h - 74 * u;
     const mid = (top + dock_y) / 2;
     const row_h = 54 * u;
     const scroll_now = c.SDL_GetTicksNS();
@@ -687,10 +805,15 @@ pub fn draw(a: *App) void {
     }
     g.unclip();
     if (s.rows.len == 0) {
-        g.textCentered(if (a.cfg.roots.len == 0) "No library folders yet. Press F10 to add one." else "Nothing here.", g.w * 0.72, mid - 10 * u, g.scaled(16), gfx.dim);
+        g.textCentered(if (a.cfg.roots.len == 0) (if (a.cfg.beatoraja_select) "No library folders yet. Press 6 to add one." else "No library folders yet. Press F10 to add one.") else if (s.search.len > 0) "No charts match." else "Nothing here.", g.w * 0.72, mid - 10 * u, g.scaled(16), gfx.dim);
     }
+}
 
-    // Left: jacket and chart data.
+/// The jacket and data of the selected row.
+fn drawChartInfo(a: *App, wheel_x: f32, dock_y: f32) void {
+    const g = &a.g;
+    const s = &a.sel;
+    const u = g.h / 720;
     const lx = 14 * u;
     const lw = wheel_x - 22 * u;
     const jack_w = @min(lw, 370 * u);
@@ -740,11 +863,18 @@ pub fn draw(a: *App) void {
         } else {
             g.textClip(s.rows[s.cursor].label, lx, iy, lw, g.scaled(32), gfx.white);
             iy += 44 * u;
-            _ = g.text(if (s.rows[s.cursor].kind == .missing) "Enter: download this chart" else "Enter: open", lx, iy, g.scaled(14), gfx.sky);
+            var hint_key: [32]u8 = undefined;
+            const open_key = guideKey(a, a.cfg.p1[0], "Enter", &hint_key);
+            g.fmt(lx, iy, g.scaled(14), gfx.sky, "{s}: {s}", .{ open_key, if (s.rows[s.cursor].kind == .missing) "download this chart" else "open" });
         }
     }
+}
 
-    // Dock: tabs with their keys.
+/// Option tabs with their keys, then the remaining commands.
+fn drawDock(a: *App, dock_y: f32) void {
+    const g = &a.g;
+    const s = &a.sel;
+    const u = g.h / 720;
     const tab = struct {
         fn f(aa: *App, ox: f32, oy: f32, w: f32, sc: u32, key_name: []const u8, label: []const u8, value: []const u8) void {
             const gg = &aa.g;
@@ -758,7 +888,9 @@ pub fn draw(a: *App) void {
             gg.textClip(value, ox + 46 * uu, oy + 20 * uu, w - 56 * uu, gg.scaled(16), gfx.white);
         }
     }.f;
-    const tw = (g.w - 28 * u - 24 * u) / 5;
+    const on = a.cfg.beatoraja_select;
+    const tabs: f32 = 8;
+    const tw = (g.w - 28 * u - 6 * u * (tabs - 1)) / tabs;
     const tab_x = struct {
         fn f(uu: f32, width: f32, i: f32) f32 {
             return 14 * uu + (width + 6 * uu) * i;
@@ -768,18 +900,49 @@ pub fn draw(a: *App) void {
     tab(a, tab_x(u, tw, 0), dock_y, tw, c.SDL_SCANCODE_F1, "F1", "RANDOM", random_names[@min(a.cfg.random, 4)]);
     tab(a, tab_x(u, tw, 1), dock_y, tw, c.SDL_SCANCODE_F2, "F2", "GAUGE", gauge_names[@min(a.cfg.gauge, config.gas)]);
     tab(a, tab_x(u, tw, 2), dock_y, tw, c.SDL_SCANCODE_F3, "F3", "HS FIX / GREEN", std.fmt.bufPrint(&dock_buf, "{s}  {d}", .{ hs_names[@min(a.cfg.hs_fix, 3)], a.cfg.green_ms * 3 / 5 }) catch "");
-    tab(a, tab_x(u, tw, 3), dock_y, tw, c.SDL_SCANCODE_F4, "F4", "SORT", sort_names[s.sort]);
-    tab(a, tab_x(u, tw, 4), dock_y, tw, c.SDL_SCANCODE_F5, "F5", "AUTOPLAY", if (s.autoplay) "ON" else "OFF");
+    tab(a, tab_x(u, tw, 3), dock_y, tw, c.SDL_SCANCODE_F4, if (on) "2" else "F4", "SORT", sort_names[s.sort]);
+    tab(a, tab_x(u, tw, 4), dock_y, tw, c.SDL_SCANCODE_1, "1", "KEY MODE", mode_filters[s.mode_filter].name);
+    tab(a, tab_x(u, tw, 5), dock_y, tw, c.SDL_SCANCODE_3, "3", "LN MODE", ([_][]const u8{ "LN", "CN", "HCN" })[@min(a.cfg.ln_mode, 2)]);
+    var replay_buf: [16]u8 = undefined;
+    const replays = if (selectedSong(s)) |song| replaysOf(a, song.sha256) else 0;
+    tab(a, tab_x(u, tw, 6), dock_y, tw, c.SDL_SCANCODE_4, "4", "REPLAY", if (replays == 0) "NONE" else std.fmt.bufPrint(&replay_buf, "{d} / {d}", .{ s.replay_slot + 1, replays }) catch "");
+    tab(a, tab_x(u, tw, tabs - 1), dock_y, tw, c.SDL_SCANCODE_F5, "F5", "AUTOPLAY", if (s.autoplay) "ON" else "OFF");
 
     // The remaining commands, as a row of text buttons.
-    const cmds = [_]struct { sc: u32, label: []const u8 }{
+    const Cmd = struct { sc: u32, label: []const u8 };
+    const keyboard_cmds = [_]Cmd{
         .{ .sc = c.SDL_SCANCODE_F6, .label = "F6 Search" },
         .{ .sc = c.SDL_SCANCODE_F7, .label = "F7 Rescan" },
         .{ .sc = c.SDL_SCANCODE_F8, .label = "F8 Tables" },
         .{ .sc = c.SDL_SCANCODE_F9, .label = "F9 IR" },
         .{ .sc = c.SDL_SCANCODE_F10, .label = "F10 Settings" },
+        .{ .sc = c.SDL_SCANCODE_R, .label = "R Replay" },
+        .{ .sc = c.SDL_SCANCODE_8, .label = "8 Folder" },
         .{ .sc = c.SDL_SCANCODE_ESCAPE, .label = "Esc Back" },
     };
+    var name_buf: [4][32]u8 = undefined;
+    const cfg = &a.cfg;
+    const start = settings.keyName(cfg.start_select[0], &name_buf[0]);
+    const scratch_a = settings.keyName(cfg.p1[7], &name_buf[1]);
+    const scratch_b = settings.keyName(cfg.p1[8], &name_buf[2]);
+    const select_key = settings.keyName(cfg.start_select[1], &name_buf[3]);
+    var key_buf: [4][32]u8 = undefined;
+    var label_buf: [7][80]u8 = undefined;
+    // Without a key of its own to click, sc 0 does nothing.
+    const beatoraja_cmds = [_]Cmd{
+        .{ .sc = c.SDL_SCANCODE_RETURN, .label = std.fmt.bufPrint(&label_buf[0], "{s} Open", .{settings.keyName(cfg.p1[0], &key_buf[0])}) catch "" },
+        .{ .sc = 0, .label = std.fmt.bufPrint(&label_buf[1], "{s} Auto", .{settings.keyName(cfg.p1[4], &key_buf[1])}) catch "" },
+        .{ .sc = 0, .label = std.fmt.bufPrint(&label_buf[6], "{s} Replay", .{settings.keyName(cfg.p1[6], &key_buf[3])}) catch "" },
+        .{ .sc = c.SDL_SCANCODE_ESCAPE, .label = std.fmt.bufPrint(&label_buf[2], "{s} Back", .{settings.keyName(cfg.p1[1], &key_buf[2])}) catch "" },
+        .{ .sc = 0, .label = std.fmt.bufPrint(&label_buf[3], "{s}, {s} Scroll", .{ scratch_a, scratch_b }) catch "" },
+        .{ .sc = 0, .label = std.fmt.bufPrint(&label_buf[4], "Hold {s} Options", .{start}) catch "" },
+        .{ .sc = 0, .label = std.fmt.bufPrint(&label_buf[5], "Hold {s}+{s} or 5 Detail", .{ start, select_key }) catch "" },
+        .{ .sc = c.SDL_SCANCODE_0, .label = "0 Search" },
+        .{ .sc = c.SDL_SCANCODE_7, .label = "7 IR" },
+        .{ .sc = c.SDL_SCANCODE_8, .label = "8 Folder" },
+        .{ .sc = c.SDL_SCANCODE_6, .label = "6 Key config" },
+    };
+    const cmds: []const Cmd = if (cfg.beatoraja_select) &beatoraja_cmds else &keyboard_cmds;
     const cmd_size = g.scaled(12);
     var cmd_w: f32 = 0;
     for (cmds) |cmd| cmd_w += g.measure(cmd.label, cmd_size) + 24 * u;
@@ -788,13 +951,74 @@ pub fn draw(a: *App) void {
     for (cmds) |cmd| {
         const bw = g.measure(cmd.label, cmd_size) + 24 * u;
         const hover = g.hit(cmd_x, cmd_y, bw, 24 * u);
-        if (g.clickIn(cmd_x, cmd_y, bw, 24 * u)) a.click_key = cmd.sc;
+        if (g.clickIn(cmd_x, cmd_y, bw, 24 * u) and cmd.sc != 0) a.click_key = cmd.sc;
         if (hover) g.round(cmd_x, cmd_y, bw, 24 * u, 6 * u, gfx.rule);
         g.textCentered(cmd.label, cmd_x + bw / 2, cmd_y + 4 * u, cmd_size, if (hover) gfx.white else gfx.dim);
         cmd_x += bw;
     }
+}
 
+pub fn draw(a: *App) void {
+    tickScan(a);
+    updatePreview(a);
+    tickDownload(a);
+    const g = &a.g;
+    const s = &a.sel;
+    if (s.searching) {
+        if (!std.mem.eql(u8, s.search, a.text.items)) {
+            const al = a.gpa;
+            if (s.search.len > 0) al.free(s.search);
+            s.search = if (a.text.items.len == 0) "" else al.dupe(u8, a.text.items) catch "";
+            s.cursor = 0;
+            reload(a);
+        }
+    }
+    a.syncSelectSkin();
+    if (a.select_skin != null) return drawSkinned(a);
+    const u = g.h / 720;
+    updateJacket(a);
+    g.backdrop();
+    if (s.jacket != null or s.jacket_old != null) {
+        drawJacketLayers(a, true, null);
+    }
+
+    drawHeader(a);
+    const wheel_x = g.w * 0.46;
+    const dock_y = g.h - 74 * u;
+    drawWheel(a, wheel_x, dock_y);
+    drawChartInfo(a, wheel_x, dock_y);
+    drawDock(a, dock_y);
+    drawPanel(a);
     drawQuery(a);
+}
+
+/// Skins draw their own panels; this is the built-in look's.
+fn drawPanel(a: *App) void {
+    const panel = panelOf(&a.sel);
+    if (panel == 0) return;
+    const g = &a.g;
+    const u = g.h / 720;
+    var buf: [3][96]u8 = undefined;
+    var names: [3][32]u8 = undefined;
+    const cfg = &a.cfg;
+    const lines: [3][]const u8 = switch (panel) {
+        1 => .{
+            std.fmt.bufPrint(&buf[0], "{s}, {s}  RANDOM  {s}", .{ settings.keyName(cfg.p1[0], &names[0]), settings.keyName(cfg.p1[1], &names[1]), random_names[@min(cfg.random, 4)] }) catch "",
+            std.fmt.bufPrint(&buf[1], "{s}  GAUGE  {s}", .{ settings.keyName(cfg.p1[2], &names[2]), gauge_names[@min(cfg.gauge, config.gas)] }) catch "",
+            std.fmt.bufPrint(&buf[2], "{s}  HS FIX  {s}", .{ settings.keyName(cfg.p1[4], &names[2]), hs_names[@min(cfg.hs_fix, 3)] }) catch "",
+        },
+        2 => .{ "Nothing to set here yet", "", "" },
+        else => .{
+            std.fmt.bufPrint(&buf[0], "{s}  GAS  {s}", .{ settings.keyName(cfg.p1[1], &names[0]), if (cfg.gauge == config.gas) "ON" else "OFF" }) catch "",
+            std.fmt.bufPrint(&buf[1], "{s}, {s}  DURATION  {d} ms", .{ settings.keyName(cfg.p1[3], &names[0]), settings.keyName(cfg.p1[5], &names[1]), cfg.green_ms }) catch "",
+            std.fmt.bufPrint(&buf[2], "{s}, {s}  JUDGE OFFSET  {d} ms", .{ settings.keyName(cfg.p1[4], &names[0]), settings.keyName(cfg.p1[6], &names[1]), cfg.judge_offset_ms }) catch "",
+        },
+    };
+    const w = 420 * u;
+    const x = (g.w - w) / 2;
+    const y = g.h * 0.32;
+    g.panel(x, y, w, 118 * u, "");
+    for (lines, 0..) |line, i| _ = g.text(line, x + 20 * u, y + 16 * u + 30 * u * @as(f32, @floatFromInt(i)), g.scaled(16), gfx.white);
 }
 
 fn barOf(row: Row) skin_scene.Bar {
@@ -868,6 +1092,24 @@ fn fillSkinState(a: *App) void {
         st.select.?.played = sg.played;
     }
     st.stagefile = s.jacket;
+    const cfg = &a.cfg;
+    st.select.?.panel = panelOf(s);
+    st.select.?.gauge_index = @min(cfg.gauge, 4);
+    st.select.?.random_index = cfg.random;
+    // beatoraja lists off first and adds min BPM last.
+    st.select.?.hsfix_index = if (cfg.hs_fix >= 3) 0 else cfg.hs_fix + 1;
+    // GAS starts from the gauge picked and falls: beatoraja's "select to under".
+    st.select.?.autoshift_index = if (cfg.gauge == config.gas) 4 else 0;
+    st.select.?.mode_index = mode_filters[s.mode_filter].skin_index;
+    st.select.?.sort_index = s.sort;
+    st.select.?.ln_index = @min(cfg.ln_mode, 2);
+    st.select.?.replays = if (song) |sg| replaysOf(a, sg.sha256) else 0;
+    st.select.?.replay_slot = s.replay_slot;
+    st.green_ms = cfg.green_ms;
+    st.cover = cfg.lane_cover;
+    st.lift = cfg.lift;
+    st.hidden = cfg.hidden;
+    st.judge_offset_ms = cfg.judge_offset_ms;
 }
 
 /// The skin draws everything but what it has no place for: search, status and the IR ranking.
@@ -883,12 +1125,25 @@ fn drawSkinned(a: *App) void {
         a.select_state.timers[1] = 0;
         a.select_state.timers[11] = 0;
         a.select_row = s.cursor;
+        s.panel_seen = 0;
     }
     a.select_seen = now;
     const shown: i64 = @intCast(now - a.select_at);
     if (s.cursor != a.select_row) {
         a.select_row = s.cursor;
         a.select_state.timers[11] = shown;
+    }
+    const panel = panelOf(s);
+    if (panel != s.panel_seen) {
+        if (s.panel_seen != 0) {
+            a.select_state.timers[@as(usize, 20) + s.panel_seen] = -1;
+            a.select_state.timers[@as(usize, 30) + s.panel_seen] = shown;
+        }
+        if (panel != 0) {
+            a.select_state.timers[@as(usize, 20) + panel] = shown;
+            a.select_state.timers[@as(usize, 30) + panel] = -1;
+        }
+        s.panel_seen = panel;
     }
     const scroll_now = c.SDL_GetTicksNS();
     s.scroll = scrollStep(s.scroll, @floatFromInt(s.cursor), @as(f32, @floatFromInt(scroll_now -| s.scroll_at_ns)) / std.time.ns_per_s);
@@ -913,7 +1168,7 @@ fn drawSkinned(a: *App) void {
         g.panel(10 * u, 8 * u, g.w - 20 * u, 40 * u, "");
         g.textClip(s.status, 26 * u, 19 * u, g.w - 52 * u, g.scaled(14), gfx.sky);
     }
-    if (s.rows.len == 0) g.textCentered(if (a.cfg.roots.len == 0) "No library folders yet. Press F10 to add one." else "Nothing here.", g.w * 0.72, g.h * 0.48, g.scaled(16), gfx.white);
+    if (s.rows.len == 0) g.textCentered(if (a.cfg.roots.len == 0) (if (a.cfg.beatoraja_select) "No library folders yet. Press 6 to add one." else "No library folders yet. Press F10 to add one.") else if (s.search.len > 0) "No charts match." else "Nothing here.", g.w * 0.72, g.h * 0.48, g.scaled(16), gfx.white);
     drawQuery(a);
 }
 
@@ -1086,7 +1341,74 @@ fn tableName(a: *App, song: db_mod.Song) usize {
     return n;
 }
 
+const max_replays = 4;
+
+fn selectedSong(s: *const State) ?db_mod.Song {
+    return if (s.cursor < s.rows.len) s.rows[s.cursor].song else null;
+}
+
+/// Cached: this runs every frame, and replays only arrive through a play, after which rows reload.
+fn replaysOf(a: *App, sha256: []const u8) u8 {
+    const s = &a.sel;
+    if (s.replay_count) |n| if (std.mem.eql(u8, &s.replay_count_for, sha256)) return n;
+    const n = countReplays(a, sha256) catch |e| blk: {
+        std.log.err("replay count failed: {t}", .{e});
+        break :blk 0;
+    };
+    if (sha256.len == s.replay_count_for.len) {
+        @memcpy(&s.replay_count_for, sha256);
+        s.replay_count = n;
+    }
+    return n;
+}
+
+fn countReplays(a: *App, sha256: []const u8) !u8 {
+    const st = try a.db.prepare("SELECT COUNT(*) FROM (SELECT 1 FROM replay WHERE sha256=?1 LIMIT " ++ std.fmt.comptimePrint("{d}", .{max_replays}) ++ ")");
+    defer st.deinit();
+    st.bindText(1, sha256);
+    return if (try st.step()) @intCast(st.int(0)) else 0;
+}
+
+/// Decodes a stored replay, newest first. Its slices live until the next one is loaded.
+fn loadReplay(a: *App, sha256: []const u8, slot: u8) !core.replay.Replay {
+    const s = &a.sel;
+    if (s.replay_arena) |*old| old.deinit();
+    s.replay_arena = .init(a.gpa);
+    const st = try a.db.prepare("SELECT data FROM replay WHERE sha256=?1 ORDER BY date DESC, id DESC LIMIT 1 OFFSET ?2");
+    defer st.deinit();
+    st.bindText(1, sha256);
+    st.bindInt(2, slot);
+    if (!try st.step()) return error.NoReplay;
+    return core.replay.decode(s.replay_arena.?.allocator(), st.blob(0));
+}
+
+fn nextReplay(a: *App) void {
+    const s = &a.sel;
+    const song = selectedSong(s) orelse return;
+    s.replay_slot = @intCast((@min(s.replay_slot, max_replays - 1) + 1) % @max(replaysOf(a, song.sha256), 1));
+    a.sfx(.adjust);
+}
+
+fn playReplay(a: *App, song: db_mod.Song) void {
+    const s = &a.sel;
+    if (a.load_thread != null) return;
+    if (s.replay_slot >= replaysOf(a, song.sha256)) {
+        s.status = "No replay in this slot";
+        return;
+    }
+    const r = loadReplay(a, song.sha256, s.replay_slot) catch |e| {
+        std.log.err("replay load failed: {t}", .{e});
+        s.status = "Could not read this replay";
+        return;
+    };
+    startSongWith(a, song, r);
+}
+
 fn startSong(a: *App, song: db_mod.Song) void {
+    startSongWith(a, song, null);
+}
+
+fn startSongWith(a: *App, song: db_mod.Song, replay: ?core.replay.Replay) void {
     const seed = c.SDL_GetTicksNS();
     // The loader thread may still be reading the buffer, and a path this long can't be opened anyway.
     if (a.load_thread != null or song.path.len > a.play_path_buf.len) return;
@@ -1094,17 +1416,29 @@ fn startSong(a: *App, song: db_mod.Song) void {
     const level_n = @min(song.table_level.len, a.play_level_buf.len);
     @memcpy(a.play_level_buf[0..level_n], song.table_level[0..level_n]);
     const table_n = tableName(a, song);
-    a.decidePlay(.{
+    var params: session_mod.Params = .{
         .path = a.play_path_buf[0..song.path.len],
         .table_level = a.play_level_buf[0..level_n],
         .table_name = a.play_table_buf[0..table_n],
         .gauge = config.gaugeType(a.cfg.gauge),
         .gas = a.cfg.gauge == config.gas,
-        .random = @enumFromInt(@min(a.cfg.random, 4)),
+        .random = @fromBackingInt(@intCast(@min(a.cfg.random, 4))),
         .seed = seed,
         .autoplay = a.sel.autoplay,
         .judge_offset_us = @as(i64, a.cfg.judge_offset_ms) * 1000,
-    }, true);
+        .ln_mode = std.enums.fromInt(core.options.LnMode, a.cfg.ln_mode) orelse .ln,
+    };
+    if (replay) |r| {
+        params.replay = r;
+        params.gauge = r.gauge;
+        params.gas = r.gas;
+        params.random = r.random;
+        params.seed = r.seed;
+        params.ln_mode = r.ln_mode;
+        params.autoplay = false;
+        params.judge_offset_us = 0;
+    }
+    a.decidePlay(params, true);
 }
 
 fn closeQuery(a: *App) void {
@@ -1155,57 +1489,300 @@ fn openRanking(a: *App) void {
     s.query_title = "Table standings";
 }
 
-pub fn key(a: *App, sc: u32) void {
+fn keyQuery(a: *App, sc: u32) void {
     const s = &a.sel;
-    if (s.query != null) {
-        if (sc == c.SDL_SCANCODE_F9) {
-            closeQuery(a);
-            const url_ok = s.cursor < s.rows.len and s.rows[s.cursor].song != null and a.cfg.ir_token.len > 0;
-            if (url_ok and !std.mem.eql(u8, s.query_title, "Rivals")) {
-                var buf: [1024]u8 = undefined;
-                const url = std.fmt.bufPrint(&buf, "{s}/scores/{s}/rivals", .{ a.cfg.ir_url, s.rows[s.cursor].song.?.sha256 }) catch return;
-                s.query = ir.startQuery(a.gpa, url, a.cfg.ir_token, null);
-                s.query_title = "Rivals";
-            }
-        } else if (sc == c.SDL_SCANCODE_ESCAPE) closeQuery(a);
-        return;
-    }
-    if (s.searching) {
-        switch (sc) {
-            c.SDL_SCANCODE_ESCAPE => {
-                s.searching = false;
-                a.stopText();
-                a.text.clearRetainingCapacity();
-                if (s.search.len > 0) a.gpa.free(s.search);
-                s.search = "";
-                reload(a);
-                return;
-            },
-            c.SDL_SCANCODE_BACKSPACE => {
-                while (a.text.items.len > 0) {
-                    const ch = a.text.pop().?;
-                    if (ch & 0xC0 != 0x80) break;
-                }
-                return;
-            },
-            c.SDL_SCANCODE_RETURN => {
-                s.searching = false;
-                a.stopText();
-                return;
-            },
-            c.SDL_SCANCODE_UP, c.SDL_SCANCODE_DOWN => {},
-            else => return,
+    if (sc == c.SDL_SCANCODE_F9) {
+        closeQuery(a);
+        const url_ok = s.cursor < s.rows.len and s.rows[s.cursor].song != null and a.cfg.ir_token.len > 0;
+        if (url_ok and !std.mem.eql(u8, s.query_title, "Rivals")) {
+            var buf: [1024]u8 = undefined;
+            const url = std.fmt.bufPrint(&buf, "{s}/scores/{s}/rivals", .{ a.cfg.ir_url, s.rows[s.cursor].song.?.sha256 }) catch return;
+            s.query = ir.startQuery(a.gpa, url, a.cfg.ir_token, null);
+            s.query_title = "Rivals";
         }
+    } else if (sc == c.SDL_SCANCODE_ESCAPE) closeQuery(a);
+}
+
+/// True when the search box took the key.
+fn keySearching(a: *App, sc: u32) bool {
+    const s = &a.sel;
+    switch (sc) {
+        c.SDL_SCANCODE_ESCAPE => {
+            s.searching = false;
+            a.stopText();
+            a.text.clearRetainingCapacity();
+            if (s.search.len > 0) a.gpa.free(s.search);
+            s.search = "";
+            reload(a);
+            return true;
+        },
+        c.SDL_SCANCODE_BACKSPACE => {
+            while (a.text.items.len > 0) {
+                const ch = a.text.pop().?;
+                if (ch & 0xC0 != 0x80) break;
+            }
+            return true;
+        },
+        c.SDL_SCANCODE_RETURN => {
+            s.searching = false;
+            a.stopText();
+            return true;
+        },
+        c.SDL_SCANCODE_UP, c.SDL_SCANCODE_DOWN => return false,
+        else => return true,
     }
+}
+
+fn keySound(a: *App, sc: u32) void {
+    const s = &a.sel;
     switch (sc) {
         c.SDL_SCANCODE_UP, c.SDL_SCANCODE_DOWN, c.SDL_SCANCODE_PAGEUP, c.SDL_SCANCODE_PAGEDOWN => a.sfx(.move),
         c.SDL_SCANCODE_F1, c.SDL_SCANCODE_F2, c.SDL_SCANCODE_F3, c.SDL_SCANCODE_F4, c.SDL_SCANCODE_F5 => a.sfx(.adjust),
         c.SDL_SCANCODE_F6, c.SDL_SCANCODE_F7, c.SDL_SCANCODE_F8, c.SDL_SCANCODE_F9 => a.sfx(.confirm),
-        c.SDL_SCANCODE_F10 => a.sfxOr(a.sfx_option_open, .confirm),
+        c.SDL_SCANCODE_F10, c.SDL_SCANCODE_6 => a.sfxOr(a.sfx_option_open, .confirm),
+        c.SDL_SCANCODE_1, c.SDL_SCANCODE_3 => a.sfx(.adjust),
+        c.SDL_SCANCODE_8 => if (selectedSong(s) != null) a.sfx(.confirm),
         c.SDL_SCANCODE_ESCAPE => a.sfx(.back),
         c.SDL_SCANCODE_RETURN => if (s.cursor < s.rows.len and s.rows[s.cursor].song == null and s.rows[s.cursor].kind != .course) a.sfx(.confirm),
         else => {},
     }
+}
+
+fn openRow(a: *App) void {
+    const s = &a.sel;
+    if (s.cursor >= s.rows.len) return;
+    const row = s.rows[s.cursor];
+    if (row.song) |song| return startSong(a, song);
+    switch (row.kind) {
+        .folder => setFolder(a, row.target),
+        .group => go(a, if (row.id == 1) .courses else .library),
+        .table => {
+            const n = @min(row.target.len, s.table_buf.len);
+            @memcpy(s.table_buf[0..n], row.target[0..n]);
+            s.table_url = s.table_buf[0..n];
+            go(a, .table);
+        },
+        .level => {
+            const n = @min(row.target.len, s.level_buf.len);
+            @memcpy(s.level_buf[0..n], row.target[0..n]);
+            s.level = s.level_buf[0..n];
+            go(a, .level);
+        },
+        .course => course_mod.start(a, row.id),
+        .missing => startDownload(a, row),
+        .song => {},
+    }
+}
+
+fn goBack(a: *App) void {
+    const s = &a.sel;
+    if (s.search.len > 0) {
+        a.gpa.free(s.search);
+        s.search = "";
+        reload(a);
+    } else switch (s.view) {
+        .root => a.running = false,
+        .library, .courses, .table => back(a, .root),
+        .folder => back(a, .library),
+        .level => back(a, .table),
+    }
+}
+
+/// The key an on-screen guide names: the bound one under beatoraja controls.
+pub fn guideKey(a: *const App, code: u16, keyboard: []const u8, buf: []u8) []const u8 {
+    return if (a.cfg.beatoraja_select) settings.keyName(code, buf) else keyboard;
+}
+
+fn panelOf(s: *const State) u8 {
+    if (s.detail_held or (s.start_held and s.select_held)) return 3;
+    if (s.select_held) return 2;
+    return @intFromBool(s.start_held);
+}
+
+/// Index in `p1`: 7 keys, scratch A, scratch B. Layout from beatoraja's MusicSelectKeyProperty.BEAT_7K.
+fn padBrowse(a: *App, at: usize) void {
+    const s = &a.sel;
+    const on_song = s.cursor < s.rows.len and s.rows[s.cursor].song != null;
+    switch (at) {
+        0, 2, 4, 6 => {
+            // On a chart beatoraja's key 3 is practice, which Actuon lacks.
+            if (on_song and at == 2) return;
+            if (on_song and at == 6) return playReplay(a, s.rows[s.cursor].song.?);
+            const was_auto = s.autoplay;
+            if (on_song and at == 4) s.autoplay = true;
+            key(a, c.SDL_SCANCODE_RETURN);
+            s.autoplay = was_auto;
+        },
+        5 => nextReplay(a),
+        // Unlike Esc, closing never leaves the game.
+        1, 3 => if (s.view != .root or s.search.len > 0) key(a, c.SDL_SCANCODE_ESCAPE),
+        7, 8 => {
+            s.pad_scroll = if (at == 7) -1 else 1;
+            s.pad_scroll_at_ms = c.SDL_GetTicks() + pad_scroll_first_ms;
+            key(a, if (at == 7) c.SDL_SCANCODE_UP else c.SDL_SCANCODE_DOWN);
+        },
+        else => {},
+    }
+}
+
+fn padOption(a: *App, panel: u8, at: usize) void {
+    const cfg = &a.cfg;
+    const gauges = config.gas + 1;
+    switch (panel) {
+        1 => switch (at) {
+            0 => cfg.random = (cfg.random + 1) % 5,
+            1 => cfg.random = (cfg.random + 4) % 5,
+            2 => cfg.gauge = (cfg.gauge + 1) % gauges,
+            4 => cfg.hs_fix = (cfg.hs_fix + 1) % 4,
+            else => return,
+        },
+        3 => switch (at) {
+            1 => cfg.gauge = if (cfg.gauge == config.gas) 4 else config.gas,
+            3 => cfg.green_ms = @max(cfg.green_ms, 75) - 25,
+            5 => cfg.green_ms += 25,
+            4 => cfg.judge_offset_ms -= 1,
+            6 => cfg.judge_offset_ms += 1,
+            else => return,
+        },
+        else => return,
+    }
+    a.sfx(.adjust);
+}
+
+fn padSelect(a: *App, at: usize, panel: u8, down: bool, repeat: bool) void {
+    if (!down) {
+        if (at >= 7) a.sel.pad_scroll = 0;
+    } else if (!repeat) {
+        if (panel == 0) padBrowse(a, at) else padOption(a, panel, at);
+    }
+}
+
+/// Start + keys change hi-speed, Select + keys the green number by one, as in beatoraja's
+/// ControlInputProcessor. Never uses the input up: the same key still plays its note.
+/// shortcut: double-pressing Start does not toggle the lane cover, add it with a cover on/off setting.
+fn padPlay(a: *App, at: ?usize, down: bool, repeat: bool) void {
+    const s = &a.sel;
+    if (at) |i| if (i >= 7 and !down) {
+        s.pad_scroll = 0;
+    };
+    if (!down or repeat or a.pause.open or s.start_held == s.select_held) return;
+    const i = at orelse return;
+    const cfg = &a.cfg;
+    if (i >= 7) {
+        s.pad_scroll = if (i == 7) 1 else -1;
+        s.pad_scroll_at_ms = 0;
+    } else if (s.start_held) {
+        if (i % 2 == 0) cfg.green_ms += 25 else cfg.green_ms = @max(cfg.green_ms, 75) - 25;
+    } else {
+        if (i % 2 == 0) cfg.green_ms = @max(cfg.green_ms, 2) - 1 else cfg.green_ms += 1;
+    }
+}
+
+/// beatoraja controls. True when the input was used, so it is not also a menu key.
+/// Start and Select are tracked on every screen: their release may come after a screen has gone.
+/// shortcut: reads only the 1P 7 key layout, add the others if a controller needs them here.
+pub fn pad(a: *App, code: u16, down: bool, repeat: bool) bool {
+    if (!a.cfg.beatoraja_select) return false;
+    const s = &a.sel;
+    const was = panelOf(s);
+    const is_start = code == a.cfg.start_select[0];
+    const is_select = code == a.cfg.start_select[1];
+    const at = std.mem.indexOfScalar(u16, &a.cfg.p1, code);
+    // Typing a search uses the same keys.
+    if (is_start) s.start_held = down and !s.searching;
+    if (is_select) s.select_held = down and !s.searching;
+    if (code == c.SDL_SCANCODE_5 and at == null and !is_start and !is_select) s.detail_held = down and a.scene == .select and !s.searching;
+    const panel = panelOf(s);
+    if (panel != was) s.pad_scroll = 0;
+    if (s.query != null or s.searching) {
+        s.pad_scroll = 0;
+        return false;
+    }
+    const bound = at != null or is_start or is_select;
+    switch (a.scene) {
+        .select => {
+            if (panel != was) {
+                if (was == 0) a.sfxOr(a.sfx_option_open, .confirm) else if (panel == 0) a.sfxOr(a.sfx_option_close, .back);
+            }
+            if (is_start or is_select) return true;
+            padSelect(a, at orelse return false, panel, down, repeat);
+            return true;
+        },
+        .result => {
+            // Keys still being mashed from the end of the chart do not skip the result.
+            if (bound and down and !repeat and c.SDL_GetTicks() -| a.res.shown_at >= result_input_ms) result.key(a, c.SDL_SCANCODE_RETURN);
+            return bound;
+        },
+        .loading => {
+            if (bound and down and !repeat) a.decideKey(c.SDL_SCANCODE_RETURN);
+            return bound;
+        },
+        .play => {
+            if (a.session) |play| {
+                const snap = play.snapshot();
+                if ((is_start or is_select) and down and !repeat and !a.pause.open and play.canSkip(snap)) {
+                    a.finishPlay(snap, true);
+                    return false;
+                }
+            }
+            padPlay(a, at, down, repeat);
+            return false;
+        },
+        else => return false,
+    }
+}
+
+const result_input_ms = 500;
+// beatoraja's default exitPressDuration.
+const play_exit_hold_ms = 1000;
+
+/// What a held input keeps doing: scrolling in song select; in play, moving the cover or the green
+/// number with a scratch, and quitting on Start + Select.
+pub fn tickPad(a: *App, now_ms: u64) void {
+    if (!a.cfg.beatoraja_select) return;
+    const s = &a.sel;
+    switch (a.scene) {
+        .select => tickPadScroll(a, now_ms),
+        .play => {
+            if (a.pause.open) return;
+            if (s.start_held and s.select_held) {
+                if (s.exit_since_ms == 0) s.exit_since_ms = now_ms;
+                if (now_ms - s.exit_since_ms >= play_exit_hold_ms) {
+                    s.exit_since_ms = 0;
+                    s.pad_scroll = 0;
+                    if (a.session) |play| a.finishPlay(play.snapshot(), false);
+                }
+                return;
+            }
+            s.exit_since_ms = 0;
+            if (s.pad_scroll == 0 or now_ms < s.pad_scroll_at_ms) return;
+            s.pad_scroll_at_ms = now_ms + pad_scroll_next_ms;
+            if (s.start_held) {
+                a.cfg.setCover(a.cfg.lane_cover + 0.005 * @as(f32, @floatFromInt(s.pad_scroll)));
+            } else if (s.pad_scroll > 0) {
+                a.cfg.green_ms += 1;
+            } else a.cfg.green_ms = @max(a.cfg.green_ms, 2) - 1;
+        },
+        else => {},
+    }
+}
+
+// beatoraja's default scroll durations.
+const pad_scroll_first_ms = 300;
+const pad_scroll_next_ms = 50;
+
+fn tickPadScroll(a: *App, now_ms: u64) void {
+    const s = &a.sel;
+    if (s.pad_scroll == 0 or now_ms < s.pad_scroll_at_ms) return;
+    s.pad_scroll_at_ms = now_ms + pad_scroll_next_ms;
+    key(a, if (s.pad_scroll < 0) c.SDL_SCANCODE_UP else c.SDL_SCANCODE_DOWN);
+}
+
+pub fn key(a: *App, sc: u32) void {
+    const s = &a.sel;
+    if (s.query != null) return keyQuery(a, sc);
+    if (s.searching and keySearching(a, sc)) return;
+    keySound(a, sc);
     switch (sc) {
         c.SDL_SCANCODE_UP => if (s.cursor > 0) {
             s.cursor -= 1;
@@ -1215,47 +1792,13 @@ pub fn key(a: *App, sc: u32) void {
         c.SDL_SCANCODE_DOWN => s.cursor = if (s.cursor + 1 < s.rows.len) s.cursor + 1 else 0,
         c.SDL_SCANCODE_PAGEUP => s.cursor -|= 15,
         c.SDL_SCANCODE_PAGEDOWN => s.cursor = @min(s.cursor + 15, s.rows.len -| 1),
-        c.SDL_SCANCODE_RETURN => {
-            if (s.cursor >= s.rows.len) return;
-            const row = s.rows[s.cursor];
-            if (row.song) |song| return startSong(a, song);
-            switch (row.kind) {
-                .folder => setFolder(a, row.target),
-                .group => go(a, if (row.id == 1) .courses else .library),
-                .table => {
-                    const n = @min(row.target.len, s.table_buf.len);
-                    @memcpy(s.table_buf[0..n], row.target[0..n]);
-                    s.table_url = s.table_buf[0..n];
-                    go(a, .table);
-                },
-                .level => {
-                    const n = @min(row.target.len, s.level_buf.len);
-                    @memcpy(s.level_buf[0..n], row.target[0..n]);
-                    s.level = s.level_buf[0..n];
-                    go(a, .level);
-                },
-                .course => course_mod.start(a, row.id),
-                .missing => startDownload(a, row),
-                .song => {},
-            }
-        },
-        c.SDL_SCANCODE_ESCAPE => {
-            if (s.search.len > 0) {
-                a.gpa.free(s.search);
-                s.search = "";
-                reload(a);
-            } else switch (s.view) {
-                .root => a.running = false,
-                .library, .courses, .table => back(a, .root),
-                .folder => back(a, .library),
-                .level => back(a, .table),
-            }
-        },
+        c.SDL_SCANCODE_RETURN => openRow(a),
+        c.SDL_SCANCODE_ESCAPE => goBack(a),
         c.SDL_SCANCODE_F1 => a.cfg.random = (a.cfg.random + 1) % 5,
         c.SDL_SCANCODE_F2 => a.cfg.gauge = (a.cfg.gauge + 1) % (config.gas + 1),
         c.SDL_SCANCODE_F3 => a.cfg.hs_fix = (a.cfg.hs_fix + 1) % 4,
         c.SDL_SCANCODE_F4 => {
-            s.sort = (s.sort + 1) % 4;
+            s.sort = @intCast((s.sort + 1) % sort_names.len);
             reload(a);
         },
         c.SDL_SCANCODE_F5 => s.autoplay = !s.autoplay,
@@ -1267,6 +1810,22 @@ pub fn key(a: *App, sc: u32) void {
         c.SDL_SCANCODE_F8 => startTableFetch(a, null),
         c.SDL_SCANCODE_F9 => openRanking(a),
         c.SDL_SCANCODE_F10 => a.scene = .settings,
+        // beatoraja's keyboard controls, which need no setting: nothing else uses these keys here.
+        c.SDL_SCANCODE_LEFT => if (s.view != .root or s.search.len > 0) key(a, c.SDL_SCANCODE_ESCAPE),
+        c.SDL_SCANCODE_RIGHT => key(a, c.SDL_SCANCODE_RETURN),
+        c.SDL_SCANCODE_1 => {
+            s.mode_filter = @intCast((s.mode_filter + 1) % mode_filters.len);
+            s.cursor = 0;
+            reload(a);
+        },
+        c.SDL_SCANCODE_2 => key(a, c.SDL_SCANCODE_F4),
+        c.SDL_SCANCODE_3 => a.cfg.ln_mode = (@min(a.cfg.ln_mode, 2) + 1) % 3,
+        c.SDL_SCANCODE_4 => nextReplay(a),
+        c.SDL_SCANCODE_6 => settings.openControls(a),
+        c.SDL_SCANCODE_7 => key(a, c.SDL_SCANCODE_F9),
+        c.SDL_SCANCODE_8 => if (selectedSong(s)) |song| setFolder(a, song.folder),
+        c.SDL_SCANCODE_0 => key(a, c.SDL_SCANCODE_F6),
+        c.SDL_SCANCODE_R => if (selectedSong(s)) |song| playReplay(a, song),
         else => {},
     }
 }
@@ -1286,4 +1845,410 @@ test "shrinking keeps a whole number of steps and the pixels it samples" {
     try std.testing.expectEqual([2]c_int{ 2, 1 }, shrink(&px, 4, 2, 2));
     try std.testing.expectEqualSlices(u8, &.{ 0, 1, 2, 3, 8, 9, 10, 11 }, px[0..8]);
     try std.testing.expectEqual([2]c_int{ 4, 2 }, shrink(&px, 4, 2, 4));
+}
+
+fn expectRows(a: *App, want: []const []const u8) !void {
+    try std.testing.expectEqual(want.len, a.sel.rows.len);
+    for (want, a.sel.rows) |label, row| try std.testing.expectEqualStrings(label, row.label);
+}
+
+test "the cursor wraps at the ends and pages stop at them" {
+    const a = try testing.open();
+    defer testing.close(a);
+    key(a, c.SDL_SCANCODE_UP);
+    try std.testing.expectEqual(a.sel.rows.len - 1, a.sel.cursor);
+    key(a, c.SDL_SCANCODE_DOWN);
+    try std.testing.expectEqual(@as(usize, 0), a.sel.cursor);
+    key(a, c.SDL_SCANCODE_PAGEDOWN);
+    try std.testing.expectEqual(a.sel.rows.len - 1, a.sel.cursor);
+    key(a, c.SDL_SCANCODE_PAGEUP);
+    try std.testing.expectEqual(@as(usize, 0), a.sel.cursor);
+}
+
+test "enter walks into folders and escape comes back to the row it opened" {
+    const a = try testing.open();
+    defer testing.close(a);
+    try expectRows(a, &.{ "Library", "Table", "Courses" });
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expectEqual(.library, a.sel.view);
+    try expectRows(a, &.{ "Alpha  (3)", "Delta  (1)" });
+    key(a, c.SDL_SCANCODE_DOWN);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expectEqual(.folder, a.sel.view);
+    try expectRows(a, &.{"Delta"});
+    key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expectEqual(.library, a.sel.view);
+    try std.testing.expectEqual(@as(usize, 1), a.sel.cursor);
+    key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expectEqual(.root, a.sel.view);
+    try std.testing.expectEqual(@as(usize, 0), a.sel.cursor);
+    try std.testing.expect(a.running);
+    key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expect(!a.running);
+}
+
+test "a table opens by level and lists charts the library lacks" {
+    const a = try testing.open();
+    defer testing.close(a);
+    key(a, c.SDL_SCANCODE_DOWN);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expectEqual(.table, a.sel.view);
+    try expectRows(a, &.{"Level 3  (2)"});
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expectEqual(.level, a.sel.view);
+    try expectRows(a, &.{ "Alpha", "Lost" });
+    try std.testing.expectEqualStrings("*3", a.sel.rows[0].song.?.shownLevel());
+    try std.testing.expectEqual(.missing, a.sel.rows[1].kind);
+    key(a, c.SDL_SCANCODE_DOWN);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expectEqualStrings("Add a library folder first", a.sel.status);
+    key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expectEqual(.table, a.sel.view);
+    key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expectEqual(.root, a.sel.view);
+    try std.testing.expectEqual(@as(usize, 1), a.sel.cursor);
+}
+
+test "the courses row lists courses by table" {
+    const a = try testing.open();
+    defer testing.close(a);
+    key(a, c.SDL_SCANCODE_UP);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expectEqual(.courses, a.sel.view);
+    try expectRows(a, &.{"Table: Dan"});
+    key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expectEqual(@as(usize, 2), a.sel.cursor);
+}
+
+test "function keys cycle the options and wrap" {
+    const a = try testing.open();
+    defer testing.close(a);
+    for (0..5) |_| key(a, c.SDL_SCANCODE_F1);
+    try std.testing.expectEqual(@as(u8, 0), a.cfg.random);
+    key(a, c.SDL_SCANCODE_F1);
+    try std.testing.expectEqual(@as(u8, 1), a.cfg.random);
+    a.cfg.gauge = config.gas;
+    key(a, c.SDL_SCANCODE_F2);
+    try std.testing.expectEqual(@as(u8, 0), a.cfg.gauge);
+    a.cfg.hs_fix = 3;
+    key(a, c.SDL_SCANCODE_F3);
+    try std.testing.expectEqual(@as(u8, 0), a.cfg.hs_fix);
+    key(a, c.SDL_SCANCODE_F5);
+    try std.testing.expect(a.sel.autoplay);
+    key(a, c.SDL_SCANCODE_F10);
+    try std.testing.expectEqual(.settings, a.scene);
+}
+
+test "beatoraja select does nothing until it is turned on" {
+    const a = try testing.open();
+    defer testing.close(a);
+    try std.testing.expect(!pad(a, a.cfg.p1[2], true, false));
+    try std.testing.expect(!pad(a, a.cfg.start_select[0], true, false));
+    try std.testing.expectEqual(.root, a.sel.view);
+    try std.testing.expect(!a.sel.start_held);
+}
+
+test "beatoraja select opens with odd keys, closes with even ones, and stays in the game" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.cfg.beatoraja_select = true;
+    a.scene = .select;
+    try std.testing.expect(pad(a, a.cfg.p1[1], true, false));
+    try std.testing.expect(a.running);
+    try std.testing.expect(pad(a, a.cfg.p1[2], true, false));
+    try std.testing.expectEqual(.library, a.sel.view);
+    _ = pad(a, a.cfg.p1[2], true, true);
+    try std.testing.expectEqual(.library, a.sel.view);
+    _ = pad(a, a.cfg.p1[1], true, false);
+    try std.testing.expectEqual(.root, a.sel.view);
+    try std.testing.expect(!pad(a, c.SDL_SCANCODE_RIGHT, true, false));
+    try std.testing.expect(!pad(a, c.SDL_SCANCODE_3, true, false));
+}
+
+test "a held scratch scrolls until it is let go" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.cfg.beatoraja_select = true;
+    a.scene = .select;
+    _ = pad(a, a.cfg.p1[8], true, false);
+    try std.testing.expectEqual(@as(usize, 1), a.sel.cursor);
+    a.sel.pad_scroll_at_ms = 100;
+    tickPadScroll(a, 99);
+    try std.testing.expectEqual(@as(usize, 1), a.sel.cursor);
+    tickPadScroll(a, 100);
+    try std.testing.expectEqual(@as(usize, 2), a.sel.cursor);
+    _ = pad(a, a.cfg.p1[8], false, false);
+    tickPadScroll(a, 1000);
+    try std.testing.expectEqual(@as(usize, 2), a.sel.cursor);
+}
+
+test "start and select pick the panel, whose keys change options instead of moving" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.cfg.beatoraja_select = true;
+    a.scene = .select;
+    const start = a.cfg.start_select[0];
+    const sel = a.cfg.start_select[1];
+    _ = pad(a, start, true, false);
+    try std.testing.expectEqual(@as(u8, 1), panelOf(&a.sel));
+    _ = pad(a, a.cfg.p1[1], true, false);
+    try std.testing.expectEqual(@as(u8, 4), a.cfg.random);
+    _ = pad(a, a.cfg.p1[0], true, false);
+    try std.testing.expectEqual(@as(u8, 0), a.cfg.random);
+    try std.testing.expectEqual(.root, a.sel.view);
+    _ = pad(a, sel, true, false);
+    try std.testing.expectEqual(@as(u8, 3), panelOf(&a.sel));
+    _ = pad(a, a.cfg.p1[1], true, false);
+    try std.testing.expectEqual(@as(u8, 4), a.cfg.gauge);
+    _ = pad(a, a.cfg.p1[6], true, false);
+    try std.testing.expectEqual(@as(i32, 1), a.cfg.judge_offset_ms);
+    _ = pad(a, start, false, false);
+    try std.testing.expectEqual(@as(u8, 2), panelOf(&a.sel));
+    a.scene = .result;
+    _ = pad(a, sel, false, false);
+    try std.testing.expectEqual(@as(u8, 0), panelOf(&a.sel));
+}
+
+test "the number keys and arrows work without beatoraja controls" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.scene = .select;
+    key(a, c.SDL_SCANCODE_R);
+    try std.testing.expectEqualStrings("", a.sel.status);
+    key(a, c.SDL_SCANCODE_RIGHT);
+    key(a, c.SDL_SCANCODE_RIGHT);
+    key(a, c.SDL_SCANCODE_R);
+    try std.testing.expectEqualStrings("No replay in this slot", a.sel.status);
+    key(a, c.SDL_SCANCODE_LEFT);
+    key(a, c.SDL_SCANCODE_LEFT);
+    try std.testing.expectEqual(.root, a.sel.view);
+    key(a, c.SDL_SCANCODE_LEFT);
+    try std.testing.expect(a.running);
+    key(a, c.SDL_SCANCODE_3);
+    try std.testing.expectEqual(@as(u8, 1), a.cfg.ln_mode);
+    a.cfg.ln_mode = 0;
+    key(a, c.SDL_SCANCODE_RIGHT);
+    try std.testing.expectEqual(.library, a.sel.view);
+    key(a, c.SDL_SCANCODE_LEFT);
+    try std.testing.expectEqual(.root, a.sel.view);
+    try std.testing.expect(a.running);
+    key(a, c.SDL_SCANCODE_2);
+    try std.testing.expectEqual(@as(u8, 1), a.sel.sort);
+    key(a, c.SDL_SCANCODE_6);
+    try std.testing.expectEqual(.settings, a.scene);
+    try std.testing.expect(a.set.inside);
+}
+
+test "any bound input leaves the result, but not one held from the chart's end" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.cfg.beatoraja_select = true;
+    a.scene = .result;
+    a.res.shown_at = c.SDL_GetTicks() + result_input_ms;
+    try std.testing.expect(pad(a, a.cfg.p1[3], true, false));
+    try std.testing.expectEqual(.result, a.scene);
+    a.res.shown_at = c.SDL_GetTicks() -| result_input_ms;
+    if (c.SDL_GetTicks() >= result_input_ms) {
+        try std.testing.expect(pad(a, a.cfg.p1[3], true, false));
+        try std.testing.expectEqual(.select, a.scene);
+    }
+}
+
+test "start and select with a key change the green number during play, without using up the key" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.cfg.beatoraja_select = true;
+    a.scene = .play;
+    const green = a.cfg.green_ms;
+    try std.testing.expect(!pad(a, a.cfg.p1[0], true, false));
+    try std.testing.expectEqual(green, a.cfg.green_ms);
+    _ = pad(a, a.cfg.start_select[0], true, false);
+    try std.testing.expect(!pad(a, a.cfg.p1[0], true, false));
+    try std.testing.expectEqual(green + 25, a.cfg.green_ms);
+    _ = pad(a, a.cfg.p1[1], true, false);
+    try std.testing.expectEqual(green, a.cfg.green_ms);
+    _ = pad(a, a.cfg.p1[7], true, false);
+    tickPad(a, 100);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.005), a.cfg.lane_cover, 0.0001);
+    _ = pad(a, a.cfg.p1[7], false, false);
+    tickPad(a, 1000);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.005), a.cfg.lane_cover, 0.0001);
+    _ = pad(a, a.cfg.start_select[0], false, false);
+    _ = pad(a, a.cfg.start_select[1], true, false);
+    _ = pad(a, a.cfg.p1[1], true, false);
+    try std.testing.expectEqual(green + 1, a.cfg.green_ms);
+}
+
+test "guides name the bound key only under beatoraja controls" {
+    const a = try testing.open();
+    defer testing.close(a);
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("Enter", guideKey(a, a.cfg.p1[0], "Enter", &buf));
+    a.cfg.beatoraja_select = true;
+    a.cfg.p1[0] = input.joy_base + 3;
+    try std.testing.expectEqualStrings("Pad 3", guideKey(a, a.cfg.p1[0], "Enter", &buf));
+}
+
+test "the 1 key filters by play mode and 8 lists the chart's folder" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.cfg.beatoraja_select = true;
+    a.scene = .select;
+    try a.db.exec("UPDATE song SET mode=" ++ std.fmt.comptimePrint("{d}", .{@backingInt(core.types.Mode.beat14)}) ++ " WHERE title='Beta'");
+    try a.db.exec("UPDATE song SET mode=" ++ std.fmt.comptimePrint("{d}", .{@backingInt(core.types.Mode.beat7)}) ++ " WHERE title<>'Beta'");
+    _ = pad(a, a.cfg.p1[0], true, false);
+    _ = pad(a, a.cfg.p1[0], true, false);
+    try expectRows(a, &.{ "Alpha", "Beta", "Gamma" });
+    key(a, c.SDL_SCANCODE_1);
+    try expectRows(a, &.{ "Alpha", "Gamma" });
+    key(a, c.SDL_SCANCODE_1);
+    try expectRows(a, &.{"Beta"});
+    for (2..mode_filters.len) |_| key(a, c.SDL_SCANCODE_1);
+    try expectRows(a, &.{ "Alpha", "Beta", "Gamma" });
+    a.sel.folder = "";
+    a.sel.view = .root;
+    reload(a);
+    key(a, c.SDL_SCANCODE_F6);
+    try a.text.appendSlice(a.gpa, "Delta");
+    a.sel.search = try a.gpa.dupe(u8, "Delta");
+    reload(a);
+    key(a, c.SDL_SCANCODE_RETURN);
+    key(a, c.SDL_SCANCODE_8);
+    try std.testing.expectEqual(.folder, a.sel.view);
+    try std.testing.expectEqualStrings("/b", a.sel.folder);
+}
+
+test "replays load newest first, and a broken one is refused" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.cfg.beatoraja_select = true;
+    a.scene = .select;
+    const gpa = a.gpa;
+    for ([_]u64{ 11, 22 }, [_]i64{ 1, 2 }) |seed, date| {
+        const bytes = try core.replay.encode(gpa, .{ .seed = seed });
+        defer gpa.free(bytes);
+        const ins = try a.db.prepare("INSERT INTO replay(sha256,date,data) VALUES('sha1',?1,?2)");
+        defer ins.deinit();
+        ins.bindInt(1, date);
+        ins.bindBlob(2, bytes);
+        _ = try ins.step();
+    }
+    try std.testing.expectEqual(@as(u8, 2), replaysOf(a, "sha1"));
+    try std.testing.expectEqual(@as(u64, 22), (try loadReplay(a, "sha1", 0)).seed);
+    try std.testing.expectEqual(@as(u64, 11), (try loadReplay(a, "sha1", 1)).seed);
+    try std.testing.expectError(error.NoReplay, loadReplay(a, "sha1", 2));
+    try a.db.exec("INSERT INTO replay(sha256,date,data) VALUES('sha2',1,x'00')");
+    try std.testing.expectError(error.BadMagic, loadReplay(a, "sha2", 0));
+}
+
+test "the 3 and 4 keys step the LN mode and the replay slot" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.cfg.beatoraja_select = true;
+    a.scene = .select;
+    for ([_]u8{ 1, 2, 0 }) |want| {
+        key(a, c.SDL_SCANCODE_3);
+        try std.testing.expectEqual(want, a.cfg.ln_mode);
+    }
+    try a.db.exec("INSERT INTO replay(sha256,date,data) VALUES('sha1',1,x'00'),('sha1',2,x'00')");
+    _ = pad(a, a.cfg.p1[0], true, false);
+    _ = pad(a, a.cfg.p1[0], true, false);
+    for ([_]u8{ 1, 0 }) |want| {
+        key(a, c.SDL_SCANCODE_4);
+        try std.testing.expectEqual(want, a.sel.replay_slot);
+    }
+}
+
+test "the 5 key holds the detail panel under beatoraja controls" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.scene = .select;
+    _ = pad(a, c.SDL_SCANCODE_5, true, false);
+    try std.testing.expectEqual(@as(u8, 0), panelOf(&a.sel));
+    a.cfg.beatoraja_select = true;
+    _ = pad(a, c.SDL_SCANCODE_5, true, false);
+    try std.testing.expectEqual(@as(u8, 3), panelOf(&a.sel));
+    _ = pad(a, c.SDL_SCANCODE_5, false, false);
+    try std.testing.expectEqual(@as(u8, 0), panelOf(&a.sel));
+}
+
+test "typing a search does not open a panel" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.cfg.beatoraja_select = true;
+    a.scene = .select;
+    key(a, c.SDL_SCANCODE_F6);
+    try std.testing.expect(!pad(a, a.cfg.start_select[0], true, false));
+    try std.testing.expectEqual(@as(u8, 0), panelOf(&a.sel));
+}
+
+test "the sort key reorders the open folder" {
+    const a = try testing.open();
+    defer testing.close(a);
+    key(a, c.SDL_SCANCODE_RETURN);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try expectRows(a, &.{ "Alpha", "Beta", "Gamma" });
+    try a.db.exec("UPDATE song SET artist='z',max_bpm=300,length_ms=1 WHERE title='Alpha'");
+    try a.db.exec("UPDATE song SET artist='y',max_bpm=100,length_ms=3 WHERE title='Beta'");
+    try a.db.exec("UPDATE song SET artist='x',max_bpm=200,length_ms=2 WHERE title='Gamma'");
+    try a.db.exec("INSERT INTO score(sha256,min_bp) VALUES('sha2',9),('sha3',4)");
+    const orders = [_][3][]const u8{
+        .{ "Gamma", "Beta", "Alpha" }, // artist
+        .{ "Beta", "Gamma", "Alpha" }, // BPM
+        .{ "Alpha", "Gamma", "Beta" }, // length
+        .{ "Alpha", "Gamma", "Beta" }, // level
+    };
+    for (orders) |order| {
+        key(a, c.SDL_SCANCODE_F4);
+        try expectRows(a, &order);
+    }
+    key(a, c.SDL_SCANCODE_F4); // clear
+    key(a, c.SDL_SCANCODE_F4); // EX
+    key(a, c.SDL_SCANCODE_F4); // miss count: unplayed last
+    try expectRows(a, &.{ "Gamma", "Beta", "Alpha" });
+    key(a, c.SDL_SCANCODE_F4);
+    try std.testing.expectEqual(@as(u8, 0), a.sel.sort);
+}
+
+test "typing a search takes the keys until it ends" {
+    const a = try testing.open();
+    defer testing.close(a);
+    key(a, c.SDL_SCANCODE_F6);
+    try std.testing.expect(a.sel.searching);
+    try a.text.appendSlice(a.gpa, "a\u{D55C}");
+    key(a, c.SDL_SCANCODE_BACKSPACE);
+    try std.testing.expectEqualStrings("a", a.text.items);
+    key(a, c.SDL_SCANCODE_F1);
+    try std.testing.expectEqual(@as(u8, 0), a.cfg.random);
+    key(a, c.SDL_SCANCODE_DOWN);
+    try std.testing.expectEqual(@as(usize, 1), a.sel.cursor);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expect(!a.sel.searching);
+    try std.testing.expect(!a.text_active);
+}
+
+test "escape drops a search before it leaves the view" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.sel.search = try a.gpa.dupe(u8, "elt");
+    reload(a);
+    try expectRows(a, &.{"Delta"});
+    key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expect(a.running);
+    try expectRows(a, &.{ "Library", "Table", "Courses" });
+    key(a, c.SDL_SCANCODE_F6);
+    a.gpa.free(a.sel.search);
+    a.sel.search = try a.gpa.dupe(u8, "elt");
+    reload(a);
+    key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expect(!a.sel.searching);
+    try expectRows(a, &.{ "Library", "Table", "Courses" });
+}
+
+test "the IR key asks for a server first" {
+    const a = try testing.open();
+    defer testing.close(a);
+    key(a, c.SDL_SCANCODE_F9);
+    try std.testing.expectEqualStrings("Set an IR server in settings first", a.sel.status);
+    try std.testing.expect(a.sel.query == null);
 }

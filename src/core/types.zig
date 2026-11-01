@@ -52,6 +52,8 @@ pub const Note = struct {
     lane: u8,
     kind: NoteKind,
     ln_type: LnType = .ln,
+    /// The chart leaves this LN's type open, so the player's LN mode decides it.
+    ln_open: bool = false,
     damage: f32 = 0,
     wav_start_us: i64 = 0,
     wav_dur_us: i64 = 0,
@@ -118,16 +120,23 @@ pub const Chart = struct {
         c.arena.deinit();
     }
 
-    /// Scroll position for a chart time (render only).
-    pub fn yAt(c: *const Chart, t: i64) f64 {
+    /// The last timeline at or before `t`, else the first. There must be at least one.
+    fn timelineAt(c: *const Chart, t: i64) usize {
         const tl = c.timelines;
-        if (tl.len == 0) return 0;
         var lo: usize = 0;
         var hi: usize = tl.len;
         while (hi - lo > 1) {
             const mid = (lo + hi) / 2;
             if (tl[mid].time_us <= t) lo = mid else hi = mid;
         }
+        return lo;
+    }
+
+    /// Scroll position for a chart time (render only).
+    pub fn yAt(c: *const Chart, t: i64) f64 {
+        const tl = c.timelines;
+        if (tl.len == 0) return 0;
+        const lo = c.timelineAt(t);
         const a = tl[lo];
         if (t < a.time_us) return a.y;
         const moving = t - a.time_us - a.stop_us;
@@ -140,12 +149,7 @@ pub const Chart = struct {
     pub fn speedAt(c: *const Chart, t: i64) f64 {
         const tl = c.timelines;
         if (tl.len == 0) return 1;
-        var lo: usize = 0;
-        var hi: usize = tl.len;
-        while (hi - lo > 1) {
-            const mid = (lo + hi) / 2;
-            if (tl[mid].time_us <= t) lo = mid else hi = mid;
-        }
+        const lo = c.timelineAt(t);
         const a = tl[lo];
         const start = a.time_us + a.stop_us;
         if (lo + 1 >= tl.len or t <= start) return a.speed;
@@ -158,12 +162,7 @@ pub const Chart = struct {
     pub fn bpmAt(c: *const Chart, t: i64) f64 {
         const tl = c.timelines;
         if (tl.len == 0 or tl[0].time_us > t) return c.bpm;
-        var lo: usize = 0;
-        var hi: usize = tl.len;
-        while (hi - lo > 1) {
-            const mid = (lo + hi) / 2;
-            if (tl[mid].time_us <= t) lo = mid else hi = mid;
-        }
+        const lo = c.timelineAt(t);
         return tl[lo].bpm;
     }
 };

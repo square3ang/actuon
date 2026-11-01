@@ -245,6 +245,24 @@ const prelude =
     \\end }
     \\package.loaded.io = io
     \\for _, k in ipairs({ "execute", "exit", "getenv", "remove", "rename", "setlocale", "tmpname" }) do os[k] = nil end
+    \\-- No native code and no bytecode, which can corrupt memory: skins load Lua text only.
+    \\package.loadlib, string.dump = nil, nil
+    \\local raw_load, raw_loadfile = load, loadfile
+    \\function load(chunk, name, _, ...) return raw_load(chunk, name, "t", ...) end
+    \\function loadfile(path, _, ...) return raw_loadfile(path, "t", ...) end
+    \\function dofile(path)
+    \\  local f, e = raw_loadfile(path, "t")
+    \\  if not f then error(e, 0) end
+    \\  return f()
+    \\end
+    \\package.searchers[4], package.searchers[3] = nil, nil
+    \\package.searchers[2] = function(name)
+    \\  local path, e = package.searchpath(name, package.path)
+    \\  if not path then return e end
+    \\  local f, le = raw_loadfile(path, "t")
+    \\  if not f then error(le, 0) end
+    \\  return f, path
+    \\end
     \\local T = {}
     \\function T.now_timer(id) local t = main_state.timer(id); if t == main_state.TIMER_OFF then return 0 end return main_state.time() - t end
     \\function T.is_timer_on(id) return main_state.timer(id) ~= main_state.TIMER_OFF end
@@ -293,7 +311,7 @@ fn newState(a: std.mem.Allocator, dir: []const u8) !*c.lua_State {
 
 fn runFile(l: *c.lua_State, a: std.mem.Allocator, path: []const u8) !J {
     const pz = try a.dupeSentinel(u8, path, 0);
-    if (c.luaL_loadfilex(l, pz.ptr, null) != c.LUA_OK or c.lua_pcallk(l, 0, 1, 0, 0, null) != c.LUA_OK) {
+    if (c.luaL_loadfilex(l, pz.ptr, "t") != c.LUA_OK or c.lua_pcallk(l, 0, 1, 0, 0, null) != c.LUA_OK) {
         std.log.err("skin lua: {s}", .{c.lua_tolstring(l, -1, null)});
         return error.Lua;
     }
@@ -394,4 +412,22 @@ pub fn callNum(skin: *m.Skin, r: i32) f64 {
     defer c.lua_settop(l, 0);
     if (c.lua_pcallk(l, 0, 1, 0, 0, null) != c.LUA_OK) return 0;
     return c.lua_tonumberx(l, -1, null);
+}
+
+test "skins cannot reach native code or bytecode" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const l = try newState(arena.allocator(), ".");
+    defer c.lua_close(l);
+    const script =
+        \\assert(package.loadlib == nil and string.dump == nil)
+        \\assert(package.searchers[3] == nil and package.searchers[4] == nil)
+        \\assert(load("\27Lua") == nil)
+        \\assert(load("return 7")() == 7)
+        \\assert(load("return x", "c", "t", { x = 8 })() == 8)
+        \\package.cpath = "./?.so"
+        \\assert(not pcall(require, "no_such_module"))
+    ;
+    try std.testing.expectEqual(c.LUA_OK, c.luaL_loadstring(l, script));
+    try std.testing.expectEqual(c.LUA_OK, c.lua_pcallk(l, 0, 0, 0, 0, null));
 }

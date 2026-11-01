@@ -36,6 +36,11 @@ pub const Stmt = struct {
     pub fn float(st: Stmt, i: c_int) f64 {
         return c.sqlite3_column_double(st.s, i);
     }
+    pub fn blob(st: Stmt, i: c_int) []const u8 {
+        const p = c.sqlite3_column_blob(st.s, i) orelse return "";
+        return @as([*]const u8, @ptrCast(p))[0..@intCast(c.sqlite3_column_bytes(st.s, i))];
+    }
+
     pub fn text(st: Stmt, i: c_int) []const u8 {
         const p = c.sqlite3_column_text(st.s, i);
         if (p == null) return "";
@@ -85,7 +90,7 @@ pub const Db = struct {
     }
 };
 
-const schema =
+pub const schema =
     \\PRAGMA journal_mode=WAL;
     \\PRAGMA synchronous=NORMAL;
     \\CREATE TABLE IF NOT EXISTS song(
@@ -105,7 +110,7 @@ const schema =
     \\CREATE TABLE IF NOT EXISTS replay(id INTEGER PRIMARY KEY, sha256 TEXT, date INTEGER, ex INTEGER, clear INTEGER, data BLOB);
     \\CREATE INDEX IF NOT EXISTS replay_sha ON replay(sha256);
     \\CREATE TABLE IF NOT EXISTS dir(path TEXT PRIMARY KEY, mtime INTEGER);
-    \\CREATE TABLE IF NOT EXISTS bms_table(url TEXT PRIMARY KEY, name TEXT, symbol TEXT, head_json TEXT, data_json TEXT, fetched INTEGER);
+    \\CREATE TABLE IF NOT EXISTS bms_table(url TEXT PRIMARY KEY, name TEXT, symbol TEXT, fetched INTEGER);
     \\CREATE TABLE IF NOT EXISTS table_song(url TEXT, level TEXT, ord INTEGER, md5 TEXT, sha256 TEXT, title TEXT, artist TEXT, zip_url TEXT, name_diff TEXT);
     \\CREATE INDEX IF NOT EXISTS table_song_url ON table_song(url, ord);
     \\CREATE INDEX IF NOT EXISTS table_song_md5 ON table_song(md5);
@@ -173,7 +178,7 @@ fn scanWorker(ud: ?*anyopaque) callconv(.c) c_int {
 }
 
 /// Parses on every core; the inserts stay on this thread, which owns the connection.
-fn insertBatch(gpa: std.mem.Allocator, ins: anytype, jobs: []ScanJob, stats: *ScanStats, progress: ?*std.atomic.Value(u32)) !void {
+fn insertBatch(gpa: std.mem.Allocator, d: Db, ins: anytype, jobs: []ScanJob, stats: *ScanStats, progress: ?*std.atomic.Value(u32)) !void {
     var work: ScanWork = .{ .gpa = gpa, .jobs = jobs, .progress = progress };
     var threads: [31]?*c.SDL_Thread = @splat(null);
     const extra: usize = @intCast(std.math.clamp(c.SDL_GetNumLogicalCPUCores() - 1, 0, threads.len));
@@ -184,6 +189,9 @@ fn insertBatch(gpa: std.mem.Allocator, ins: anytype, jobs: []ScanJob, stats: *Sc
         if (job.chart) |*chart| chart.deinit();
         gpa.free(job.bytes);
     };
+    // Held only for the inserts: a score saved during a long scan must not wait for the scan.
+    try d.exec("BEGIN IMMEDIATE");
+    errdefer d.exec("ROLLBACK") catch {};
     for (jobs) |*job| {
         const chart = &(job.chart orelse {
             stats.failed += 1;
@@ -200,7 +208,7 @@ fn insertBatch(gpa: std.mem.Allocator, ins: anytype, jobs: []ScanJob, stats: *Sc
         ins.bindText(9, chart.genre);
         ins.bindText(10, chart.playlevel);
         ins.bindInt(11, chart.difficulty);
-        ins.bindInt(12, @intFromEnum(chart.mode));
+        ins.bindInt(12, @backingInt(chart.mode));
         ins.bindInt(13, chart.total_notes);
         ins.bindFloat(14, chart.total);
         ins.bindInt(15, chart.judgerank);
@@ -219,6 +227,7 @@ fn insertBatch(gpa: std.mem.Allocator, ins: anytype, jobs: []ScanJob, stats: *Sc
         ins.reset();
         stats.parsed += 1;
     }
+    try d.exec("COMMIT");
 }
 
 /// Incremental: a chart is only re-parsed if its mtime or size changed.
@@ -227,8 +236,6 @@ pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: 
     var stats: ScanStats = .{};
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    try d.exec("BEGIN");
-    errdefer d.exec("ROLLBACK") catch {};
 
     const known = try d.prepare("SELECT mtime, size FROM song WHERE path=?1");
     defer known.deinit();
@@ -264,12 +271,14 @@ pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: 
             if (same) continue;
             try batch.append(arena.allocator(), .{ .path = full, .folder = dir, .mtime = st.mtime, .size = st.size });
             if (batch.items.len == scan_batch) {
-                try insertBatch(gpa, ins, batch.items, &stats, progress);
+                try insertBatch(gpa, d, ins, batch.items, &stats, progress);
                 batch.clearRetainingCapacity();
             }
         }
     }
-    try insertBatch(gpa, ins, batch.items, &stats, progress);
+    try insertBatch(gpa, d, ins, batch.items, &stats, progress);
+    try d.exec("BEGIN IMMEDIATE");
+    errdefer d.exec("ROLLBACK") catch {};
     // Drop rows only under the scanned roots: an unplugged library must not vanish because
     // its root is gone, so an unreachable root keeps its rows.
     for (roots) |r| {
@@ -570,4 +579,24 @@ test "scan parses in parallel, stores every chart and skips them next time" {
     try std.testing.expect(try count.step());
     try std.testing.expectEqual(@as(i64, first.parsed), count.int(0));
     try std.testing.expectEqual(@as(u32, 0), (try scan(gpa, d, &roots, null)).parsed);
+}
+
+test "a scan leaves the database free for other writers between batches" {
+    const gpa = std.testing.allocator;
+    fs.io = std.testing.io;
+    const path = "actuon_test_scan.db";
+    fs.remove(path);
+    defer {
+        fs.remove(path);
+        fs.remove(path ++ "-wal");
+        fs.remove(path ++ "-shm");
+    }
+    const d = try Db.open(path, gpa, false);
+    defer d.close();
+    try initSchema(d);
+    const roots = [_][]const u8{"tests/charts"};
+    _ = try scan(gpa, d, &roots, null);
+    const other = try Db.open(path, gpa, false);
+    defer other.close();
+    try recordScore(other, .{ .sha256 = "a", .clear = 1, .ex = 1, .counts = @splat(0), .max_combo = 1, .miss = 0, .date = 1 });
 }

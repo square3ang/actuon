@@ -9,6 +9,7 @@ const session_mod = @import("../game/session.zig");
 const config = @import("../game/config.zig");
 const play = @import("../ui/play.zig");
 const bga_mod = @import("../ui/bga.zig");
+const ir = @import("../net/ir.zig");
 const Snapshot = session_mod.Snapshot;
 const Session = session_mod.Session;
 
@@ -53,6 +54,19 @@ pub const SelectInfo = struct {
     has_ln: bool = false,
     directory: []const u8 = "",
     search: []const u8 = "",
+    /// Which option panel is open: 0 none, 1 play, 2 assist, 3 detail.
+    panel: u8 = 0,
+    /// In beatoraja's image order, for the skin's option buttons.
+    gauge_index: i64 = 0,
+    random_index: i64 = 0,
+    hsfix_index: i64 = 0,
+    autoshift_index: i64 = 0,
+    mode_index: i64 = 0,
+    sort_index: i64 = 0,
+    ln_index: i64 = 0,
+    /// Saved replays of the selected chart, and the slot picked among them.
+    replays: u8 = 0,
+    replay_slot: u8 = 0,
 };
 
 pub const State = struct {
@@ -109,6 +123,8 @@ pub const State = struct {
     /// Judged notes per graph bin and judge, folded from the snapshot's hits.
     graph_judged: [graph_bins][6]u16 = @splat(@splat(0)),
     hits_seen: u32 = 0,
+    /// This play's upload and ranking, owned by the result screen.
+    ir_board: ?*ir.Board = null,
 
     pub fn fromSession(st: *State, s: *const Session, cfg: *const config.Config) void {
         st.fromChart(&s.chart, s.params, cfg);
@@ -266,6 +282,16 @@ pub const State = struct {
             2 => return se.kind == .song or se.kind == .missing,
             3 => return se.kind == .grade,
             5 => return se.kind == .song or se.kind == .grade,
+            20...23 => return se.panel == id - 20,
+            196 => return se.replays < 1,
+            197 => return se.replays >= 1,
+            1196 => return se.replays < 2,
+            1197 => return se.replays >= 2,
+            1199 => return se.replays < 3,
+            1200 => return se.replays >= 3,
+            1202 => return se.replays < 4,
+            1203 => return se.replays >= 4,
+            1205...1208 => return se.replay_slot == id - 1205,
             50 => return true,
             51 => return false,
             100 => return se.clear == 0,
@@ -283,12 +309,18 @@ pub const State = struct {
         };
         return switch (id) {
             5 => true,
+            50 => st.ir_board == null,
+            51 => st.ir_board != null,
+            601, 606, 607 => if (st.ir_board) |b| !b.ready() else false,
+            602 => if (st.ir_board) |b| b.ready() else false,
+            603 => if (st.ir_board) |b| b.ready() and b.total == 0 else false,
+            604 => if (st.ir_board) |b| b.state.load(.acquire) == ir.Board.failed else false,
             m.combo_on => sc.combo > 0,
             m.key_held...m.key_held + 19 => st.timers[@intCast(100 + id - m.key_held)] >= 0,
             32 => !st.autoplay,
             33 => st.autoplay,
-            42 => @intFromEnum(sn.gauge_type) < 3,
-            43 => @intFromEnum(sn.gauge_type) >= 3,
+            42 => @backingInt(sn.gauge_type) < 3,
+            43 => @backingInt(sn.gauge_type) >= 3,
             80 => !st.loaded,
             81 => st.loaded,
             190 => st.stagefile == null,
@@ -303,8 +335,8 @@ pub const State = struct {
             271 => st.cover > 0,
             272 => st.lift > 0,
             273 => st.hidden > 0,
-            90 => st.show_clear and @intFromEnum(st.clear) >= @intFromEnum(core.types.Clear.easy),
-            91 => st.show_clear and @intFromEnum(st.clear) < @intFromEnum(core.types.Clear.easy),
+            90 => st.show_clear and @backingInt(st.clear) >= @backingInt(core.types.Clear.easy),
+            91 => st.show_clear and @backingInt(st.clear) < @backingInt(core.types.Clear.easy),
             160 => st.mode == .beat7,
             161 => st.mode == .beat5,
             162 => st.mode == .beat14,
@@ -375,6 +407,13 @@ pub const State = struct {
         if (st.select) |se| {
             const secs = @divTrunc(st.length_us, 1_000_000);
             switch (id) {
+                m.button_index + 11 => return se.mode_index,
+                m.button_index + 308 => return se.ln_index,
+                m.button_index + 12 => return se.sort_index,
+                m.button_index + 40 => return se.gauge_index,
+                m.button_index + 42 => return se.random_index,
+                m.button_index + 55 => return se.hsfix_index,
+                m.button_index + 78 => return se.autoshift_index,
                 71 => return se.ex,
                 76 => return if (se.miss >= 0) se.miss else null,
                 77 => return se.played,
@@ -399,7 +438,7 @@ pub const State = struct {
             83, 113 => judged(sc, 3),
             84, 114 => judged(sc, 4),
             410...421 => sc.counts[@intCast(@divTrunc(id - 410, 2))][@intCast(@mod(id - 410, 2))],
-            m.gauge_type => @intFromEnum(sn.gauge_type),
+            m.gauge_type => @backingInt(sn.gauge_type),
             m.acc_whole, m.acc_frac => blk: {
                 // osu! starts at 100%.
                 const seen: i64 = st.judgedNotes();
@@ -447,10 +486,10 @@ pub const State = struct {
             14 => @intFromFloat(st.cover * 1000),
             314 => @intFromFloat(st.lift * 1000),
             315 => @intFromFloat(st.hidden * 1000),
-            370 => @intFromEnum(st.clear),
+            370 => @backingInt(st.clear),
             371 => st.best_clear,
             400 => st.judgerank,
-            else => null,
+            else => if (st.ir_board) |b| b.number(id) else null,
         };
     }
 
@@ -459,8 +498,9 @@ pub const State = struct {
         const sn = &st.snap;
         return switch (id) {
             m.gauge_value => sn.gauge / 100,
-            m.gauge_border => if (@intFromEnum(sn.gauge_type) >= 3) 0 else sn.gauge_border / 100,
+            m.gauge_border => if (@backingInt(sn.gauge_type) >= 3) 0 else sn.gauge_border / 100,
             4 => st.cover,
+            8 => if (st.ir_board) |b| b.position() else 0,
             6, 101 => if (st.length_us > 0) @as(f32, @floatFromInt(@max(sn.time_us, 0))) / @as(f32, @floatFromInt(st.length_us)) else 0,
             102 => st.load_frac,
             110, 147 => st.scoreRate(),
@@ -472,10 +512,18 @@ pub const State = struct {
             113 => st.bestRate(),
             114 => st.judgedShare(),
             115 => 1,
-            140...144 => if (st.total_notes > 0) @as(f32, @floatFromInt(sn.score.count(@enumFromInt(id - 140)))) / @as(f32, @floatFromInt(st.total_notes)) else 0,
+            140...144 => if (st.total_notes > 0) @as(f32, @floatFromInt(sn.score.count(@fromBackingInt(@intCast(id - 140))))) / @as(f32, @floatFromInt(st.total_notes)) else 0,
             145 => if (st.total_notes > 0) @as(f32, @floatFromInt(sn.score.max_combo)) / @as(f32, @floatFromInt(st.total_notes)) else 0,
             else => 0,
         };
+    }
+
+    /// True when the slider took the value, so the mouse press is used up.
+    fn setFloat(ud: *anyopaque, id: i32, value: f32) bool {
+        const b = fromUd(ud).ir_board orelse return false;
+        if (id != 8) return false;
+        b.setPosition(value);
+        return true;
     }
 
     fn str(ud: *anyopaque, id: i32) []const u8 {
@@ -495,6 +543,8 @@ pub const State = struct {
             1001 => st.table_name,
             1002 => st.table_level,
             1003 => st.table_full,
+            120...129 => if (st.ir_board) |b| b.name(id) else "",
+            1020 => if (st.ir_board != null) "Actuon IR" else "",
             else => "",
         };
     }
@@ -521,6 +571,7 @@ pub const State = struct {
             .num = num,
             .float = float,
             .str = str,
+            .set_float = setFloat,
             .lua_call_bool = if (skin.lua != null) skin_mod.lua_call_bool else null,
             .lua_call_num = if (skin.lua != null) skin_mod.lua_call_num else null,
             .lua_call_str = if (skin.lua != null) skin_mod.lua_call_str else null,
@@ -799,7 +850,7 @@ fn drawBars(r: *const m.Renderer, list_obj: *const m.SongList, bars: BarList) ?u
             k.y += (to.y - k.y) * frac;
         };
         const set = place.src.set;
-        const src = if (set.len > 0) &set[@min(@intFromEnum(b.kind), set.len - 1)] else &place.src;
+        const src = if (set.len > 0) &set[@min(@backingInt(b.kind), set.len - 1)] else &place.src;
         r.blit(src, r.frameOf(src), k, place.blend, place.center, null);
         if (r.g.clickIn(k.x * r.sx, k.y * r.sy, k.w * r.sx, k.h * r.sy)) clicked = row;
         const child = struct {
@@ -890,6 +941,24 @@ test "hits fold into the bin of their note, once each" {
     st.foldHits(&snap);
     try std.testing.expectEqual(@as(u16, 1), st.graph_judged[st.binOf(1_000_000)][2]);
     try std.testing.expectEqual(@as(u16, 0), st.graph_judged[st.binOf(9_000_000)][4]);
+}
+
+test "song select tells the skin its panel and options" {
+    var st: State = .{ .select = .{ .panel = 2, .random_index = 3, .autoshift_index = 4 } };
+    try std.testing.expect(State.opt(&st, 22));
+    st.select.?.replays = 2;
+    st.select.?.replay_slot = 1;
+    try std.testing.expect(State.opt(&st, 1197));
+    try std.testing.expect(State.opt(&st, 1199));
+    try std.testing.expect(State.opt(&st, 1206));
+    try std.testing.expect(!State.opt(&st, 20));
+    try std.testing.expect(!State.opt(&st, 21));
+    try std.testing.expectEqual(@as(?i64, 3), State.num(&st, m.button_index + 42));
+    try std.testing.expectEqual(@as(?i64, 4), State.num(&st, m.button_index + 78));
+    st.select.?.sort_index = 5;
+    st.select.?.mode_index = 2;
+    try std.testing.expectEqual(@as(?i64, 5), State.num(&st, m.button_index + 12));
+    try std.testing.expectEqual(@as(?i64, 2), State.num(&st, m.button_index + 11));
 }
 
 test "rank index follows ninths" {

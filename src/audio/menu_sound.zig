@@ -323,9 +323,9 @@ const chord_beats = 8;
 
 // Lead over the second half, in beats; zero is a rest. Every note is a tone of the chord under it.
 const lead = [_]f32{
-    76, 0, 72, 0, 0, 69, 0, 72,
+    76, 0, 72, 0,  0, 69, 0, 72,
     72, 0, 0,  69, 0, 65, 0, 0,
-    79, 0, 76, 0, 0, 72, 0, 76,
+    79, 0, 76, 0,  0, 72, 0, 76,
     74, 0, 0,  71, 0, 67, 0, 0,
 };
 

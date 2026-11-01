@@ -35,7 +35,7 @@ pub const Score = struct {
     passed: u32 = 0,
 
     pub fn count(s: *const Score, j: types.Judge) u32 {
-        const c = s.counts[@intFromEnum(j)];
+        const c = s.counts[@backingInt(j)];
         return c[0] + c[1];
     }
     pub fn exScore(s: *const Score) u32 {
@@ -129,7 +129,7 @@ pub const Sim = struct {
             s.judge_start = @min(s.judge_start, w[0]);
             s.judge_end = @max(s.judge_end, w[1]);
         }
-        for (0..gauge_mod.count) |i| s.gauges[i] = gauge_mod.init(@enumFromInt(i), chart.total, chart.total_notes);
+        for (0..gauge_mod.count) |i| s.gauges[i] = gauge_mod.init(@fromBackingInt(@intCast(i)), chart.total, chart.total_notes);
         var counts: [types.max_lanes]u32 = @splat(0);
         for (chart.notes) |n| counts[n.lane] += 1;
         errdefer for (s.lane_notes) |l| gpa.free(l);
@@ -150,7 +150,7 @@ pub const Sim = struct {
     }
 
     pub fn gauge(s: *const Sim) *const gauge_mod.Gauge {
-        return &s.gauges[@intFromEnum(s.gauge_type)];
+        return &s.gauges[@backingInt(s.gauge_type)];
     }
 
     pub fn drain(s: *Sim, out: []Out) usize {
@@ -184,16 +184,16 @@ pub const Sim = struct {
     /// The best gauge at or below the top that would clear now, else the best one still alive.
     fn shiftGauge(s: *Sim, top: gauge_mod.Type) void {
         var alive: ?usize = null;
-        var i: usize = @intFromEnum(top) + 1;
+        var i: usize = @backingInt(top) + 1;
         while (i > 0) {
             i -= 1;
             if (s.gauges[i].qualified()) {
-                s.gauge_type = @enumFromInt(i);
+                s.gauge_type = @fromBackingInt(@intCast(i));
                 return;
             }
             if (alive == null and s.gauges[i].value > 0) alive = i;
         }
-        if (alive) |a| s.gauge_type = @enumFromInt(a);
+        if (alive) |a| s.gauge_type = @fromBackingInt(@intCast(a));
     }
 
     fn checkFailed(s: *Sim) void {
@@ -492,11 +492,7 @@ pub const Sim = struct {
                 ls.ln_end_judge = j;
             } else {
                 s.judgeNote(lane, ls.processing, j, dm, true, false);
-                s.sound(ls.processing);
-                ls.processing = -1;
-                ls.release_time = no_time;
-                ls.ln_end_judge = -1;
-                s.emit(.{ .kind = .hold_end, .lane = lane });
+                s.endHold(lane);
             }
         } else {
             if (sc >= 0) {
@@ -510,13 +506,19 @@ pub const Sim = struct {
                 ls.ln_end_judge = 3;
             } else {
                 s.judgeNote(lane, proc.pair, @min(j, 3), dm, true, false);
-                s.sound(ls.processing);
-                ls.processing = -1;
-                ls.release_time = no_time;
-                ls.ln_end_judge = -1;
-                s.emit(.{ .kind = .hold_end, .lane = lane });
+                s.endHold(lane);
             }
         }
+    }
+
+    /// Lets go of the long note a lane is holding, once its end has been judged.
+    fn endHold(s: *Sim, lane: u8) void {
+        const ls = &s.lanes[lane];
+        s.sound(ls.processing);
+        ls.processing = -1;
+        ls.release_time = no_time;
+        ls.ln_end_judge = -1;
+        s.emit(.{ .kind = .hold_end, .lane = lane });
     }
 
     fn moveMark(s: *Sim, lane: u8) void {
@@ -538,27 +540,15 @@ pub const Sim = struct {
                     if (ls.release_time != no_time and ls.release_time <= t) {
                         s.emit(.{ .kind = .stop_sound, .lane = lane, .wav = s.notes[@intCast(proc.pair)].wav });
                         s.judgeNote(lane, proc.pair, @intCast(ls.ln_end_judge), proc.time_us - ls.release_time, true, false);
-                        s.sound(ls.processing);
-                        ls.processing = -1;
-                        ls.release_time = no_time;
-                        ls.ln_end_judge = -1;
-                        s.emit(.{ .kind = .hold_end, .lane = lane });
+                        s.endHold(lane);
                     } else if (proc.time_us < t) {
                         s.judgeNote(lane, proc.pair, ls.ln_start_judge, ls.ln_start_dur, true, false);
-                        s.sound(ls.processing);
-                        ls.processing = -1;
-                        ls.release_time = no_time;
-                        ls.ln_end_judge = -1;
-                        s.emit(.{ .kind = .hold_end, .lane = lane });
+                        s.endHold(lane);
                     }
                 } else if (ls.release_time != no_time and ls.release_time <= t) {
                     if (ls.ln_end_judge >= 3) s.emit(.{ .kind = .stop_sound, .lane = lane, .wav = s.notes[@intCast(proc.pair)].wav });
                     s.judgeNote(lane, ls.processing, @intCast(ls.ln_end_judge), proc.time_us - ls.release_time, true, false);
-                    s.sound(ls.processing);
-                    ls.processing = -1;
-                    ls.release_time = no_time;
-                    ls.ln_end_judge = -1;
-                    s.emit(.{ .kind = .hold_end, .lane = lane });
+                    s.endHold(lane);
                 }
             }
 
@@ -647,16 +637,16 @@ test "gauge auto shift falls through dead gauges and picks the best clearing one
     defer s.destroy();
     s.checkFailed();
     try testing.expectEqual(gauge_mod.Type.exhard, s.gauge_type);
-    s.gauges[@intFromEnum(gauge_mod.Type.exhard)].value = 0;
+    s.gauges[@backingInt(gauge_mod.Type.exhard)].value = 0;
     s.checkFailed();
     try testing.expectEqual(gauge_mod.Type.hard, s.gauge_type);
-    s.gauges[@intFromEnum(gauge_mod.Type.hard)].value = 0;
+    s.gauges[@backingInt(gauge_mod.Type.hard)].value = 0;
     s.checkFailed();
     try testing.expectEqual(gauge_mod.Type.normal, s.gauge_type); // nothing clears yet: best alive
-    s.gauges[@intFromEnum(gauge_mod.Type.assist_easy)].value = 70;
+    s.gauges[@backingInt(gauge_mod.Type.assist_easy)].value = 70;
     s.checkFailed();
     try testing.expectEqual(gauge_mod.Type.assist_easy, s.gauge_type);
-    s.gauges[@intFromEnum(gauge_mod.Type.normal)].value = 85;
+    s.gauges[@backingInt(gauge_mod.Type.normal)].value = 85;
     s.checkFailed();
     try testing.expectEqual(gauge_mod.Type.normal, s.gauge_type); // recovers upward
     try testing.expect(!s.failed);

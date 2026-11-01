@@ -225,7 +225,7 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
         var start_time: i64 = 0;
         for (sc.notes, 0..) |n, i| {
             var next: ?JNote = null;
-            for (sc.notes[i + 1..]) |m| if (m.y > n.y) {
+            for (sc.notes[i + 1 ..]) |m| if (m.y > n.y) {
                 next = m;
                 break;
             };
@@ -265,10 +265,11 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
                                     3 => .hcn,
                                     else => lnmode,
                                 };
+                                const ln_open = n.t == 0 and info.ln_type == 0;
                                 try occupied.put(a, occKey(lane, n.y), {});
                                 try occupied.put(a, occKey(lane, n.y + n.l), {});
-                                try placed.append(a, .{ .y = n.y, .lane = lane, .note = .{ .time_us = tl.micro, .y = 0, .wav = id, .lane = lane, .kind = .ln_start, .ln_type = ty, .wav_start_us = start_time, .wav_dur_us = dur } });
-                                try placed.append(a, .{ .y = n.y + n.l, .lane = lane, .note = .{ .time_us = end.micro, .y = 0, .wav = -2, .lane = lane, .kind = .ln_end, .ln_type = ty } });
+                                try placed.append(a, .{ .y = n.y, .lane = lane, .note = .{ .time_us = tl.micro, .y = 0, .wav = id, .lane = lane, .kind = .ln_start, .ln_type = ty, .ln_open = ln_open, .wav_start_us = start_time, .wav_dur_us = dur } });
+                                try placed.append(a, .{ .y = n.y + n.l, .lane = lane, .note = .{ .time_us = end.micro, .y = 0, .wav = -2, .lane = lane, .kind = .ln_end, .ln_type = ty, .ln_open = ln_open } });
                                 try spans[lane].append(a, .{ .start = n.y, .end = n.y + n.l });
                                 chart.has_ln = true;
                             }

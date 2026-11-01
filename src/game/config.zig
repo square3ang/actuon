@@ -58,6 +58,8 @@ pub const Config = struct {
     /// Index into the gauge types up to hazard; `gas` means auto shift from EX HARD.
     gauge: u8 = gas,
     random: u8 = 0,
+    /// What LNs the chart leaves open become: 0 LN, 1 CN, 2 HCN.
+    ln_mode: u8 = 0,
     /// 0 start BPM, 1 max BPM, 2 main BPM (mode of the chart), 3 off (classic HS).
     hs_fix: u8 = 2,
     /// Green number: milliseconds a note is visible at the reference BPM.
@@ -92,6 +94,10 @@ pub const Config = struct {
     keys14: ?[18]u16 = null,
     keys4: [4]u16 = .{ 7, 9, 13, 14 },
     keys6: [6]u16 = .{ 22, 7, 9, 13, 14, 15 },
+    /// Song select takes the 7 key inputs as beatoraja does, with option panels on Start and Select.
+    beatoraja_select: bool = false,
+    /// beatoraja's defaults, Q and W.
+    start_select: [2]u16 = .{ 20, 26 },
 
     /// What a slot shows, empty for the built-in look.
     pub fn skinFor(cfg: *const Config, slot: SkinSlot) []const u8 {
@@ -130,7 +136,7 @@ fn sideOf5(side: [9]u16) [7]u16 {
 pub const gas: u8 = 6;
 
 pub fn gaugeType(setting: u8) core.gauge.Type {
-    return if (setting == gas) .exhard else @enumFromInt(@min(setting, 5));
+    return if (setting == gas) .exhard else @fromBackingInt(@intCast(@min(setting, 5)));
 }
 
 pub fn path(gpa: std.mem.Allocator) ![]u8 {
@@ -225,7 +231,7 @@ pub fn bindings(cfg: *const Config, mode: core.types.Mode) [input.code_count]?Bi
     }
     const per_side: usize = if (mode == .beat5 or mode == .beat10) 5 else 7;
     for (0..mode.players()) |side| {
-        const inputs = keys[side * (per_side + 2)..];
+        const inputs = keys[side * (per_side + 2) ..];
         const first = side * (per_side + 1);
         for (0..per_side) |i| put(&t, inputs[i], @intCast(first + i), 0);
         put(&t, inputs[per_side], @intCast(first + per_side), 0);

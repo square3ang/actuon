@@ -11,12 +11,15 @@ pub const version: u8 = 1;
 pub const max_events = 4_000_000;
 /// Set on the gauge byte: old replays stay valid, and a verifier without GAS rejects the file.
 const gas_bit: u8 = 0x80;
+/// The LN mode sits above the random option: old replays read as plain LN.
+const ln_mode_shift = 6;
 
 pub const Replay = struct {
     sha256: [64]u8 = @splat('0'),
     gauge: gauge.Type = .normal,
     gas: bool = false,
     random: options.Random = .off,
+    ln_mode: options.LnMode = .ln,
     seed: u64 = 0,
     /// Resolved #RANDOM/#SWITCH values the chart was played with.
     bms_random: []const i32 = &.{},
@@ -35,8 +38,8 @@ pub fn encode(gpa: std.mem.Allocator, r: Replay) ![]u8 {
     try w.appendSlice(gpa, magic);
     try w.append(gpa, version);
     try w.appendSlice(gpa, &r.sha256);
-    try w.append(gpa, @intFromEnum(r.gauge) | gas_bit * @as(u8, @intFromBool(r.gas)));
-    try w.append(gpa, @intFromEnum(r.random));
+    try w.append(gpa, @backingInt(r.gauge) | gas_bit * @as(u8, @intFromBool(r.gas)));
+    try w.append(gpa, @backingInt(r.random) | @backingInt(r.ln_mode) << ln_mode_shift);
     try putVar(&w, gpa, r.seed);
     try putVar(&w, gpa, r.bms_random.len);
     for (r.bms_random) |v| try putVar(&w, gpa, @as(u32, @bitCast(v)));
@@ -83,7 +86,9 @@ pub fn decode(a: std.mem.Allocator, bytes: []const u8) !Replay {
     const gauge_byte = try r.byte();
     out.gas = gauge_byte & gas_bit != 0;
     out.gauge = std.enums.fromInt(gauge.Type, gauge_byte & ~gas_bit) orelse return error.BadField;
-    out.random = std.enums.fromInt(options.Random, try r.byte()) orelse return error.BadField;
+    const random_byte = try r.byte();
+    out.random = std.enums.fromInt(options.Random, random_byte & (1 << ln_mode_shift) - 1) orelse return error.BadField;
+    out.ln_mode = std.enums.fromInt(options.LnMode, random_byte >> ln_mode_shift) orelse return error.BadField;
     out.seed = try r.vari();
     const nr = try r.vari();
     if (nr > 4096) return error.BadField;
@@ -94,11 +99,12 @@ pub fn decode(a: std.mem.Allocator, bytes: []const u8) !Replay {
     if (ne > max_events or ne > bytes.len) return error.BadField;
     const ev = try a.alloc(sim_mod.Event, @intCast(ne));
     var t: i64 = 0;
-    for (ev) |*e| {
+    for (ev, 0..) |*e, i| {
         const z = try r.vari();
         const delta: i64 = @bitCast((z >> 1) ^ (0 -% (z & 1)));
         // events must be ordered: the sim's contract, and the verifier's defence against time travel
-        if (delta < 0 or delta > 3_600_000_000) return error.BadField;
+        // Only the first may start below zero: a key pressed during the lead-in has a negative song time.
+        if ((delta < 0 and i > 0) or delta < -3_600_000_000 or delta > 3_600_000_000) return error.BadField;
         t += delta;
         const f = try r.byte();
         e.* = .{ .time_us = t, .lane = f & 0x3F, .key = (f >> 6) & 1, .down = f & 0x80 != 0 };
@@ -121,6 +127,7 @@ pub const Result = extern struct {
 
 /// Re-runs a play. `chart` must have been parsed with `r.bms_random`; it is modified by options.
 pub fn resimulate(gpa: std.mem.Allocator, chart: *types.Chart, r: Replay) !Result {
+    _ = options.applyLnMode(chart, r.ln_mode);
     options.apply(chart, r.random, r.seed);
     const s = try sim_mod.Sim.create(gpa, chart, .{ .gauge = r.gauge, .gas = r.gas });
     defer s.destroy();
@@ -132,8 +139,8 @@ pub fn resimulate(gpa: std.mem.Allocator, chart: *types.Chart, r: Replay) !Resul
 pub fn summarize(s: *const sim_mod.Sim, total: u32) Result {
     var res: Result = .{
         .ok = true,
-        .clear = @intFromEnum(s.clear(true)),
-        .gauge_type = @intFromEnum(s.gauge_type),
+        .clear = @backingInt(s.clear(true)),
+        .gauge_type = @backingInt(s.gauge_type),
         .ex_score = s.score.exScore(),
         .max_combo = s.score.max_combo,
         .miss = s.score.missCount(),
@@ -179,4 +186,42 @@ test "round trip and resimulate" {
     try std.testing.expectEqual(@as(u32, 3 * 2 + 1), res.ex_score); // 0,7,14 ms PG; 21 ms at NORMAL=GR
     // truncated and hostile inputs are rejected, not crashed on
     try std.testing.expectError(error.Truncated, decode(arena.allocator(), bytes[0 .. bytes.len - 1]));
+}
+
+test "the LN mode survives the round trip and a bad one is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try encode(a, .{ .random = .mirror, .ln_mode = .hcn });
+    const back = try decode(a, bytes);
+    try std.testing.expectEqual(options.LnMode.hcn, back.ln_mode);
+    try std.testing.expectEqual(options.Random.mirror, back.random);
+    // version, hash and gauge come before the random byte
+    bytes[4 + 1 + 64 + 1] |= 3 << ln_mode_shift;
+    try std.testing.expectError(error.BadField, decode(a, bytes));
+}
+
+test "a key pressed before the song starts survives the round trip" {
+    const parser = @import("../bms/parser.zig");
+    const gpa = std.testing.allocator;
+    var c = try parser.parse(gpa, "#BPM 120\n#TOTAL 300\n#WAV01 a.wav\n#00111:01\n", .{});
+    defer c.deinit();
+    const evs = [_]sim_mod.Event{
+        .{ .time_us = -1_500_000, .lane = 0, .down = true },
+        .{ .time_us = -1_400_000, .lane = 0, .down = false },
+        .{ .time_us = c.notes[0].time_us, .lane = c.notes[0].lane, .down = true },
+    };
+    const bytes = try encode(gpa, .{ .sha256 = c.sha256, .events = &evs });
+    defer gpa.free(bytes);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const r = try decode(arena.allocator(), bytes);
+    try std.testing.expectEqual(@as(i64, -1_500_000), r.events[0].time_us);
+    try std.testing.expectEqual(c.notes[0].time_us, r.events[2].time_us);
+    try std.testing.expectEqual(@as(u32, 2), (try resimulate(gpa, &c, r)).ex_score);
+    // Later events still cannot go back in time.
+    const back = [_]sim_mod.Event{ .{ .time_us = 5, .lane = 0, .down = true }, .{ .time_us = 4, .lane = 0, .down = false } };
+    const bad = try encode(gpa, .{ .events = &back });
+    defer gpa.free(bad);
+    try std.testing.expectError(error.BadField, decode(arena.allocator(), bad));
 }
