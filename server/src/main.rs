@@ -220,16 +220,39 @@ fn register(req: &mut Request, db: &Connection, ctx: &Ctx) -> ApiResult {
         .map_err(|_| ApiError::new(500, "internal error"))?
         .to_string();
     let token = new_token()?;
-    match db.execute(
+    db.execute(
         "INSERT INTO user(name,pass,token) VALUES(?1,?2,?3)",
         params![c.name, pass, token_hash(&token)],
-    ) {
-        Ok(_) => Ok(json!({"token": token})),
-        Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == ErrorCode::ConstraintViolation => {
-            Err(ApiError::new(409, "name taken"))
+    )
+    .map_err(name_conflict)?;
+    Ok(json!({"token": token}))
+}
+
+fn name_conflict(e: rusqlite::Error) -> ApiError {
+    match e {
+        rusqlite::Error::SqliteFailure(f, _) if f.code == ErrorCode::ConstraintViolation => {
+            ApiError::new(409, "name taken")
         }
-        Err(e) => Err(e.into()),
+        e => e.into(),
     }
+}
+
+#[derive(Deserialize)]
+struct NewName {
+    name: String,
+}
+
+/// Everything else points at the id, so scores and rivals follow. The login name changes with it.
+fn rename(req: &mut Request, db: &Connection) -> ApiResult {
+    let user = auth(req, db)?;
+    let q: NewName = serde_json::from_slice(&read_body(req, MAX_JSON)?)
+        .map_err(|_| ApiError::new(400, "bad json"))?;
+    if !valid_name(&q.name) {
+        return Err(ApiError::new(400, "name must be 1-32 characters"));
+    }
+    db.execute("UPDATE user SET name=?1 WHERE id=?2", params![q.name, user])
+        .map_err(name_conflict)?;
+    Ok(json!({"name": q.name}))
 }
 
 fn throttle(ctx: &Ctx, key: &str, window_secs: u64, limit: u32) -> Result<(), ApiError> {
@@ -643,6 +666,7 @@ fn route(req: &mut Request, db: &Connection, ctx: &Ctx) -> ApiResult {
         }
         (Method::Get, ["me", "scores"]) => my_scores(req, db),
         (Method::Post, ["me", "claims"]) => add_claims(req, db),
+        (Method::Post, ["me", "name"]) => rename(req, db),
         (Method::Get, ["rivals"]) => rivals(req, db),
         (Method::Put, ["rivals", name]) => add_rival(req, db, &percent_decode(name)?),
         (Method::Delete, ["rivals", name]) => remove_rival(req, db, &percent_decode(name)?),

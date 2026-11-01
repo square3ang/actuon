@@ -34,6 +34,9 @@ To install or update it on a Linux host over SSH, fill in `server/.env` from `se
 installs Podman and podman-compose with dnf, starts the server and runs one backup to prove the bucket works. The host must
 be RHEL-like, such as Rocky Linux.
 
+Behind Cloudflare's proxy, run `server/cloudflare_firewall.sh` as root on a firewalld host so only Cloudflare can reach ports
+80 and 443. Run it again when Cloudflare's address list changes. Set Cloudflare's SSL mode to Full (strict).
+
 ## Backups
 
 The `backup` service sends the database and charts to any S3-compatible storage, such as Cloudflare R2, every 6 hours.
@@ -60,8 +63,11 @@ Scores saved since the last backup are lost, but players can send them again wit
 
 ## Client
 
-Client: set `ir_url` in `config.json`, then run `actuon ir-register URL NAME` with the password on stdin. Use
-`actuon ir-rival NAME` to add a rival. A server that lacks a chart asks the client to upload it, so it holds copies of
+Client: the IR server is `https://ir.actuon.app` unless changed in Settings > Online, where Create IR account and Sign in to
+IR also are, with Change IR name. A name is also what you sign in with, and it is public in rankings. Changing it keeps your
+scores and rivals, and the old name stops working. Nothing goes to the server before you sign in, except when you open a ranking. The password goes to the
+server and only the token it returns is saved. From a terminal, `actuon ir-register URL NAME` and `actuon ir-login URL NAME`
+do the same with the password on stdin. Use `actuon ir-rival NAME` to add a rival. A server that lacks a chart asks the client to upload it, so it holds copies of
 the charts played on it. Check that you are allowed to host them.
 
 Settings > Online has IR sync. Upload sends every saved replay that beats your best verified EX or clear on the server.

@@ -7,6 +7,7 @@ const download = @import("net/download.zig");
 const table = @import("table/table.zig");
 const db = @import("db/db.zig");
 const http = @import("platform/http.zig");
+const ir = @import("net/ir.zig");
 const config = @import("game/config.zig");
 const c = @import("c");
 const crash = @import("platform/crash.zig");
@@ -114,17 +115,14 @@ fn irAccount(gpa: std.mem.Allocator, io: std.Io, cmd: []const u8, url: []const u
     var rd = std.Io.File.stdin().reader(io, &buf);
     const line = rd.interface.takeDelimiterExclusive('\n') catch return error.NoPassword;
     const password = std.mem.trimEnd(u8, line, "\r");
-    const body = try std.json.Stringify.valueAlloc(a, .{ .name = name, .password = password }, .{});
-    const path = if (std.mem.eql(u8, cmd, "ir-register")) "register" else "login";
-    const r = try http.request(a, .POST, try std.fmt.allocPrint(a, "{s}/{s}", .{ url, path }), body, &.{});
-    if (r.status != 200) {
+    const r = try ir.requestToken(a, url, name, password, std.mem.eql(u8, cmd, "ir-register"));
+    const token = r.token orelse {
         std.debug.print("server said {d}: {s}\n", .{ r.status, r.body });
         return error.Refused;
-    }
-    const v = try std.json.parseFromSliceLeaky(struct { token: []const u8 }, a, r.body, .{ .ignore_unknown_fields = true });
+    };
     var cfg = config.load(a);
     cfg.ir_url = url;
-    cfg.ir_token = v.token;
+    cfg.ir_token = token;
     config.save(gpa, cfg);
     std.debug.print("logged in as {s}; token saved\n", .{name});
 }

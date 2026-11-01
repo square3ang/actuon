@@ -107,6 +107,17 @@ try:
     assert call("GET", f"/scores/{sha}")[1]["rank"] == 0, "no token, no rank"
     assert call("GET", f"/scores/{sha}", None, "bad token")[0] == 200
     assert call("POST", "/table-ranking", {"sha256": ["../x"]})[0] == 400
+    assert call("POST", "/me/name", {"name": "alicia"})[0] == 401
+    assert call("POST", "/me/name", {"name": ""}, alice)[0] == 400
+    assert call("POST", "/me/name", {"name": "x" * 33}, alice)[0] == 400
+    assert call("POST", "/me/name", {"name": "bob"}, alice)[0] == 409
+    assert call("POST", "/me/name", {"name": "alice"}, alice)[0] == 200, "keeping your own name is no conflict"
+    assert call("POST", "/me/name", {"name": "alicia"}, alice)[0] == 200
+    rows = call("GET", f"/scores/{sha}")[1]["scores"]
+    assert ("alicia", best) in [(s["name"], s["ex"]) for s in rows] and "alice" not in [s["name"] for s in rows], "scores follow the new name"
+    assert call("GET", "/rivals", None, bob)[1]["rivals"] == ["alicia"], "rivals follow the new name"
+    assert call("POST", "/login", {"name": "alice", "password": "correct horse"})[0] == 401, "the old name no longer logs in"
+    assert call("POST", "/login", {"name": "alicia", "password": "correct horse"})[0] == 200
     guess = {"name": "nobody", "password": "wrong password"}
     assert [call("POST", "/login", guess)[0] for _ in range(11)] == [401] * 10 + [429], "attempts are counted"
     print(f"IR e2e OK: ex {best} of max {notes * 2}")

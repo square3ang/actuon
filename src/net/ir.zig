@@ -505,6 +505,108 @@ pub fn startSync(gpa: std.mem.Allocator, base: []const u8, token: []const u8, up
     return s;
 }
 
+pub const AccountReply = struct { status: u16, body: []const u8, token: ?[]const u8 };
+
+/// Asks the server for a token. Anything but a 200 comes back as a status for the caller to explain.
+pub fn requestToken(a: std.mem.Allocator, base: []const u8, name: []const u8, password: []const u8, register: bool) !AccountReply {
+    const body = try std.json.Stringify.valueAlloc(a, .{ .name = name, .password = password }, .{});
+    const url = try std.fmt.allocPrint(a, "{s}/{s}", .{ base, if (register) "register" else "login" });
+    const r = try http.request(a, .POST, url, body, &.{});
+    if (r.status != 200) return .{ .status = r.status, .body = r.body, .token = null };
+    const v = try std.json.parseFromSliceLeaky(struct { token: []const u8 }, a, r.body, .{ .ignore_unknown_fields = true });
+    return .{ .status = r.status, .body = r.body, .token = v.token };
+}
+
+pub const AccountAction = enum { register, login, rename };
+
+pub fn accountRefusal(status: u16, action: AccountAction) []const u8 {
+    return switch (status) {
+        400 => if (action == .rename) "Name must be 1-32 characters" else "Name must be 1-32 characters and password at least 8",
+        401 => if (action == .rename) "Sign in again first" else "Wrong name or password",
+        409 => "That name is taken",
+        429 => "Too many attempts, try again later",
+        else => "The IR server refused",
+    };
+}
+
+fn requestRename(a: std.mem.Allocator, base: []const u8, name: []const u8, token: []const u8) !u16 {
+    const body = try std.json.Stringify.valueAlloc(a, .{ .name = name }, .{});
+    const url = try std.fmt.allocPrint(a, "{s}/me/name", .{base});
+    return (try http.request(a, .POST, url, body, try bearer(a, token))).status;
+}
+
+/// One sign-up, sign-in or rename on a background thread, so a slow server cannot stall the menu.
+pub const Account = struct {
+    gpa: std.mem.Allocator,
+    base: []u8,
+    name: []u8,
+    /// The password, or for a rename the token.
+    secret: []u8,
+    action: AccountAction,
+    done: std.atomic.Value(bool) = .init(false),
+    /// Read these only after done.
+    token: ?[]u8 = null,
+    status: u16 = 0,
+    err: ?anyerror = null,
+    thread: ?*c.SDL_Thread = null,
+
+    pub fn destroy(s: *Account) void {
+        if (s.thread) |t| c.SDL_WaitThread(t, null);
+        const gpa = s.gpa;
+        gpa.free(s.base);
+        gpa.free(s.name);
+        gpa.free(s.secret);
+        if (s.token) |t| gpa.free(t);
+        gpa.destroy(s);
+    }
+};
+
+fn accountThread(ud: ?*anyopaque) callconv(.c) c_int {
+    const s: *Account = @ptrCast(@alignCast(ud));
+    defer s.done.store(true, .release);
+    var arena = std.heap.ArenaAllocator.init(s.gpa);
+    defer arena.deinit();
+    runAccount(s, arena.allocator()) catch |e| {
+        std.log.warn("IR account: {t}", .{e});
+        s.err = e;
+    };
+    return 0;
+}
+
+fn runAccount(s: *Account, a: std.mem.Allocator) !void {
+    if (s.action == .rename) {
+        s.status = try requestRename(a, s.base, s.name, s.secret);
+        return;
+    }
+    const r = try requestToken(a, s.base, s.name, s.secret, s.action == .register);
+    s.status = r.status;
+    if (r.token) |t| s.token = try s.gpa.dupe(u8, t);
+}
+
+pub fn startAccount(gpa: std.mem.Allocator, base: []const u8, name: []const u8, secret: []const u8, action: AccountAction) ?*Account {
+    const s = gpa.create(Account) catch return null;
+    s.* = .{
+        .gpa = gpa,
+        .base = gpa.dupe(u8, base) catch return null,
+        .name = gpa.dupe(u8, name) catch return null,
+        .secret = gpa.dupe(u8, secret) catch return null,
+        .action = action,
+    };
+    s.thread = c.SDL_CreateThread(accountThread, "ir-account", s);
+    if (s.thread == null) {
+        s.err = error.NoThread;
+        s.done.store(true, .release);
+    }
+    return s;
+}
+
+test "every refusal explains itself" {
+    try std.testing.expectEqualStrings("That name is taken", accountRefusal(409, .register));
+    try std.testing.expectEqualStrings("Wrong name or password", accountRefusal(401, .login));
+    try std.testing.expectEqualStrings("Sign in again first", accountRefusal(401, .rename));
+    try std.testing.expectEqualStrings("The IR server refused", accountRefusal(500, .rename));
+}
+
 test "sync uploads only what the server lacks, once per improvement" {
     const a = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(a);

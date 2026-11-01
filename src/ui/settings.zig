@@ -69,7 +69,9 @@ const Item = enum {
     import_beatoraja,
     import_lr2,
     ir_url,
-    ir_token,
+    ir_signup,
+    ir_signin,
+    ir_rename,
     ir_upload,
     ir_download,
     download_url,
@@ -92,7 +94,7 @@ const Item = enum {
             .fullscreen, .vsync, .reflex, .bga_upscale, .skin, .skin_slots => .display,
             .green, .lift, .hidden, .judge_offset, .visual_offset => .timing,
             .import_beatoraja, .import_lr2 => .scores,
-            .ir_url, .ir_token, .ir_upload, .ir_download, .download_url => .online,
+            .ir_url, .ir_signup, .ir_signin, .ir_rename, .ir_upload, .ir_download, .download_url => .online,
             .input_poll, .bind_4k, .bind_5k, .bind_6k, .bind_7k, .bind_10k, .bind_14k, .bind_9k, .beatoraja_select, .bind_start => .controls,
         };
     }
@@ -126,7 +128,9 @@ const Item = enum {
             .import_beatoraja => "Import beatoraja scores",
             .import_lr2 => "Import LR2 scores",
             .ir_url => "IR server",
-            .ir_token => "IR token",
+            .ir_signup => "Create IR account",
+            .ir_signin => "Sign in to IR",
+            .ir_rename => "Change IR name",
             .ir_upload => "Upload my scores to IR",
             .ir_download => "Download my scores from IR",
             .download_url => "Download URL",
@@ -172,7 +176,9 @@ const Item = enum {
             .import_beatoraja => "Choose score.db. Note: judging differs from beatoraja, so lr2oraja scores are recommended.",
             .import_lr2 => "Choose the LR2 score database.",
             .ir_url => "Base address of the internet ranking server.",
-            .ir_token => "Sign-in token for that server. It is never shown here.",
+            .ir_signup => "Makes an account on that server and signs in. Asks for a name, then a password.",
+            .ir_signin => "Signs in to an account you already have on that server.",
+            .ir_rename => "Changes the name shown in rankings. You then sign in with the new name. Scores stay.",
             .ir_upload => "Sends saved replays the server does not have yet. Scores without a replay, like imported ones, rank as unverified.",
             .ir_download => "Merges your scores on the server into this library. Better local scores stay.",
             .download_url => "Where missing charts come from: an archive or a lookup service. {md5} becomes the chart's hash.",
@@ -210,6 +216,9 @@ pub const State = struct {
     drop_for: Item = .skin,
     drop_values: []const []const u8 = &.{},
     sync: ?*ir.Sync = null,
+    account: ?*ir.Account = null,
+    /// Set once the name is typed: the row then takes the password.
+    account_name: ?[]const u8 = null,
 };
 
 const items = std.enums.values(Item);
@@ -288,7 +297,7 @@ fn pollPicker(a: *App) void {
 
 fn startSync(a: *App, upload: bool) void {
     if (a.set.sync != null) return;
-    if (a.cfg.ir_url.len == 0 or a.cfg.ir_token.len == 0) return say(a, "Set an IR server and token first", .{});
+    if (a.cfg.ir_url.len == 0 or a.cfg.ir_token.len == 0) return say(a, "Sign in to an IR server first", .{});
     a.set.sync = ir.startSync(a.gpa, a.cfg.ir_url, a.cfg.ir_token, upload);
     if (a.set.sync == null) say(a, "Could not start IR sync", .{});
 }
@@ -310,6 +319,39 @@ fn pollSync(a: *App) void {
     }
     s.destroy();
     a.set.sync = null;
+}
+
+fn startAccount(a: *App, it: Item) void {
+    if (a.set.account != null) return;
+    if (!isWebUrl(a.cfg.ir_url)) return say(a, "Set an IR server first", .{});
+    if (it == .ir_rename and a.cfg.ir_token.len == 0) return say(a, "Sign in to an IR server first", .{});
+    startEditing(a, it);
+}
+
+fn sendAccount(a: *App, name: []const u8, register: bool) void {
+    a.set.account = ir.startAccount(a.gpa, a.cfg.ir_url, name, a.text.items, if (register) .register else .login);
+    a.text.clearRetainingCapacity();
+    if (a.set.account == null) say(a, "Could not reach the IR server", .{});
+}
+
+fn pollAccount(a: *App) void {
+    const s = a.set.account orelse return;
+    if (!s.done.load(.acquire)) return say(a, "Talking to the IR server...", .{});
+    if (s.err) |e| {
+        say(a, "Could not reach the IR server: {t}", .{e});
+    } else if (s.token) |token| {
+        if (a.arena.allocator().dupe(u8, token)) |kept| {
+            a.cfg.ir_token = kept;
+            a.saveConfig();
+            say(a, "Signed in as {s}", .{s.name});
+        } else |_| say(a, "Out of memory, not signed in", .{});
+    } else if (s.action == .rename and s.status == 200) {
+        say(a, "Your IR name is now {s}", .{s.name});
+    } else {
+        say(a, "{s}", .{ir.accountRefusal(s.status, s.action)});
+    }
+    s.destroy();
+    a.set.account = null;
 }
 
 fn startEditing(a: *App, it: Item) void {
@@ -548,7 +590,16 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
         const fx = x + 260 * u;
         const fh = 30 * u;
         g.round(fx, y + (h - fh) / 2, right - fx, fh, 6 * u, gfx.well);
-        g.fmt(fx + 10 * u, text_y, g.scaled(16), gfx.white, "{s}_", .{a.text.items});
+        switch (it) {
+            .ir_rename => g.fmt(fx + 10 * u, text_y, g.scaled(16), gfx.white, "New name: {s}_", .{a.text.items}),
+            .ir_signup, .ir_signin => if (a.set.account_name == null) {
+                g.fmt(fx + 10 * u, text_y, g.scaled(16), gfx.white, "Name: {s}_", .{a.text.items});
+            } else {
+                const stars: [64]u8 = @splat('*');
+                g.fmt(fx + 10 * u, text_y, g.scaled(16), gfx.white, "Password: {s}_", .{stars[0..@min(a.text.items.len, stars.len)]});
+            },
+            else => g.fmt(fx + 10 * u, text_y, g.scaled(16), gfx.white, "{s}_", .{a.text.items}),
+        }
         if (it == .green) {
             if (std.fmt.parseInt(u32, a.text.items, 10)) |shown| {
                 g.textRight(std.fmt.bufPrint(&buf, "{d} ms", .{greenMs(shown)}) catch "", right - 10 * u, text_y + 2 * u, g.scaled(12), gfx.dim);
@@ -625,7 +676,7 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
                 .add_root => std.fmt.bufPrint(&buf, "{d} configured", .{cfg.roots.len}) catch "",
                 .add_table => std.fmt.bufPrint(&buf, "{d} added", .{cfg.tables.len}) catch "",
                 .ir_url => if (cfg.ir_url.len > 0) cfg.ir_url else "Not set",
-                .ir_token => if (cfg.ir_token.len > 0) "Set" else "Not set",
+                .ir_signin => if (cfg.ir_token.len > 0) "Signed in" else "Not signed in",
                 .download_url => cfg.download_url,
                 else => "",
             };
@@ -727,6 +778,7 @@ pub fn draw(a: *App) void {
     const u = g.h / 720;
     pollPicker(a);
     pollSync(a);
+    pollAccount(a);
     if (select.tickTables(a)) say(a, "{s}", .{a.sel.status});
     const current = items[s.cursor].section();
     const drop_click = s.drop.open and g.clicked;
@@ -1028,6 +1080,11 @@ fn drawTableList(a: *App, item_index: usize, x: f32, w: f32, top: f32, bottom: f
 }
 
 fn commit(a: *App, it: Item) void {
+    // Before the trim below and the arena copy: a password is sent as typed and not kept.
+    if (a.set.account_name) |name| {
+        a.set.account_name = null;
+        return sendAccount(a, name, it == .ir_signup);
+    }
     const al = a.arena.allocator();
     const v = al.dupe(u8, std.mem.trim(u8, a.text.items, " \t\"")) catch return;
     switch (it) {
@@ -1062,7 +1119,17 @@ fn commit(a: *App, it: Item) void {
             a.saveConfig();
         },
         .ir_url => a.cfg.ir_url = v,
-        .ir_token => a.cfg.ir_token = v,
+        .ir_rename => {
+            if (v.len == 0) return;
+            a.set.account = ir.startAccount(a.gpa, a.cfg.ir_url, v, a.cfg.ir_token, .rename);
+            if (a.set.account == null) say(a, "Could not reach the IR server", .{});
+        },
+        .ir_signup, .ir_signin => {
+            if (v.len == 0) return;
+            a.set.account_name = v;
+            a.set.editing = it;
+            a.startText("");
+        },
         .download_url => a.cfg.download_url = v,
         .skin => a.cfg.skin = v,
         .bgm_set => pickSetRoot(a, &a.cfg.bgm_path, &a.cfg.bgm_root, v, skin_sound.musicSets),
@@ -1089,6 +1156,8 @@ fn keyEditing(a: *App, it: Item, sc: u32) void {
     switch (sc) {
         c.SDL_SCANCODE_ESCAPE => {
             s.editing = null;
+            s.account_name = null;
+            a.text.clearRetainingCapacity();
             a.stopText();
         },
         c.SDL_SCANCODE_RETURN => {
@@ -1166,7 +1235,8 @@ fn activate(a: *App, it: Item) void {
             s.capture_group = it;
             s.capture_slot = 0;
         },
-        .green, .add_table, .ir_url, .ir_token, .download_url => startEditing(a, it),
+        .green, .add_table, .ir_url, .download_url => startEditing(a, it),
+        .ir_signup, .ir_signin, .ir_rename => startAccount(a, it),
         else => adjust(a, it, 1),
     }
 }
@@ -1327,6 +1397,70 @@ test "left and right step a value, and arrow rows ignore enter" {
     openItem(a, .audio_rate);
     key(a, c.SDL_SCANCODE_RETURN);
     try std.testing.expectEqual(@as(u32, 44100), a.cfg.audio_rate);
+}
+
+test "signing up asks for a name, then sends the password as typed" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.cfg.ir_url = "";
+    a.cfg.ir_token = "";
+    openItem(a, .ir_signup);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expect(a.set.editing == null);
+
+    a.cfg.ir_url = "http://127.0.0.1:1";
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expectEqual(.ir_signup, a.set.editing.?);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expect(a.set.editing == null);
+    try std.testing.expect(a.set.account_name == null);
+
+    key(a, c.SDL_SCANCODE_RETURN);
+    try a.text.appendSlice(a.gpa, "alice");
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expectEqualStrings("alice", a.set.account_name.?);
+    try std.testing.expectEqual(.ir_signup, a.set.editing.?);
+    try std.testing.expectEqual(@as(usize, 0), a.text.items.len);
+    key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expect(a.set.account_name == null);
+
+    key(a, c.SDL_SCANCODE_RETURN);
+    try a.text.appendSlice(a.gpa, "alice");
+    key(a, c.SDL_SCANCODE_RETURN);
+    try a.text.appendSlice(a.gpa, " \"pass word\" ");
+    key(a, c.SDL_SCANCODE_RETURN);
+    const sent = a.set.account.?;
+    try std.testing.expectEqualStrings(" \"pass word\" ", sent.secret);
+    try std.testing.expectEqual(.register, sent.action);
+    try std.testing.expectEqual(@as(usize, 0), a.text.items.len);
+    while (!sent.done.load(.acquire)) c.SDL_Delay(5);
+    pollAccount(a);
+    try std.testing.expect(a.set.account == null);
+    try std.testing.expectEqualStrings("", a.cfg.ir_token);
+}
+
+test "renaming needs a sign-in and sends the token" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.cfg.ir_url = "http://127.0.0.1:1";
+    a.cfg.ir_token = "";
+    openItem(a, .ir_rename);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expect(a.set.editing == null);
+
+    a.cfg.ir_token = "tok";
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expectEqual(.ir_rename, a.set.editing.?);
+    try a.text.appendSlice(a.gpa, "alicia");
+    key(a, c.SDL_SCANCODE_RETURN);
+    const sent = a.set.account.?;
+    try std.testing.expectEqualStrings("alicia", sent.name);
+    try std.testing.expectEqualStrings("tok", sent.secret);
+    try std.testing.expectEqual(.rename, sent.action);
+    while (!sent.done.load(.acquire)) c.SDL_Delay(5);
+    pollAccount(a);
+    try std.testing.expect(a.set.account == null);
+    try std.testing.expectEqualStrings("tok", a.cfg.ir_token);
 }
 
 test "editing a value commits on enter and cancels on escape" {

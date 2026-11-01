@@ -2248,6 +2248,7 @@ test "escape drops a search before it leaves the view" {
 test "the IR key asks for a server first" {
     const a = try testing.open();
     defer testing.close(a);
+    a.cfg.ir_url = "";
     key(a, c.SDL_SCANCODE_F9);
     try std.testing.expectEqualStrings("Set an IR server in settings first", a.sel.status);
     try std.testing.expect(a.sel.query == null);
