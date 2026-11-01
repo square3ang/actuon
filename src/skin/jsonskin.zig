@@ -362,7 +362,9 @@ const Loader = struct {
         const rel = try l.a.dupe(u8, raw);
         std.mem.replaceScalar(u8, rel, '\\', '/');
         // skin_config.get_path hands out absolute paths inside the skin; nothing else may be absolute.
-        const abs_inside = if (std.mem.startsWith(u8, rel, l.dir)) std.mem.trimStart(u8, rel[l.dir.len..], "/") else rel;
+        const dir = try l.a.dupe(u8, l.dir);
+        std.mem.replaceScalar(u8, dir, '\\', '/');
+        const abs_inside = if (std.mem.startsWith(u8, rel, dir)) std.mem.trimStart(u8, rel[dir.len..], "/") else rel;
         const inside = try resolveWild(l.a, l.dir, l.head_files, abs_inside);
         const safe = !fs.climbs(inside) and !std.fs.path.isAbsolute(inside);
         return if (safe) lr2.walk(l.a, l.dir, inside) else null;
