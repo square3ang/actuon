@@ -9,6 +9,7 @@ jobs:
     steps:
       - run: pacman -Syu --noconfirm git zig sdl3 sdl3_ttf portaudio sqlite lua54 libarchive ffmpeg vulkan-icd-loader vulkan-headers rust python base-devel pkgconf rclone
       - uses: actions/checkout@v4
+      - run: cargo install naga-cli --version 30.0.1 --locked && echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - run: zig build test
       - run: zig build tools -Doptimize=ReleaseSafe
       - run: python3 tests/golden_check.py "$PWD/zig-out/bin/chartdump"
@@ -32,7 +33,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with: { version: 0.17.0 }
-      - run: brew install sdl3 sdl3_ttf portaudio sqlite lua@5.4 libarchive ffmpeg pkgconf
+      - run: brew install sdl3 sdl3_ttf portaudio sqlite lua@5.4 libarchive ffmpeg pkgconf spirv-cross
+      - run: cargo install naga-cli --version 30.0.1 --locked
       - run: zig build test
   windows:
     runs-on: windows-latest
@@ -47,6 +49,7 @@ jobs:
             mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-sdl3 mingw-w64-ucrt-x86_64-sdl3-ttf
             mingw-w64-ucrt-x86_64-portaudio mingw-w64-ucrt-x86_64-sqlite3 mingw-w64-ucrt-x86_64-lua
             mingw-w64-ucrt-x86_64-libarchive mingw-w64-ucrt-x86_64-ffmpeg zip
+            mingw-w64-ucrt-x86_64-rust mingw-w64-ucrt-x86_64-spirv-cross
       - uses: mlugg/setup-zig@v2
         with: { version: 0.17.0 }
-      - run: zig build test
+      - run: cargo install naga-cli --version 30.0.1 --locked && PATH="$HOME/.cargo/bin:$PATH" zig build test
