@@ -952,7 +952,7 @@ fn drawDock(a: *App, dock_y: f32) void {
         .{ .sc = 0, .label = std.fmt.bufPrint(&label_buf[4], "Hold {s} Options", .{start}) catch "" },
         .{ .sc = 0, .label = std.fmt.bufPrint(&label_buf[5], "Hold {s}+{s} or 5 Detail", .{ start, select_key }) catch "" },
         .{ .sc = c.SDL_SCANCODE_0, .label = "0 Search" },
-        .{ .sc = c.SDL_SCANCODE_7, .label = "7 IR" },
+        .{ .sc = c.SDL_SCANCODE_7, .label = "7 IR page" },
         .{ .sc = c.SDL_SCANCODE_8, .label = "8 Folder" },
         .{ .sc = c.SDL_SCANCODE_6, .label = "6 Key config" },
     };
@@ -1489,6 +1489,22 @@ fn closeQuery(a: *App) void {
     a.sel.query = null;
 }
 
+fn chartPageUrl(gpa: std.mem.Allocator, ir_url: []const u8, sha256: []const u8) ![:0]u8 {
+    return std.fmt.allocPrintSentinel(gpa, "{s}/charts/{s}", .{ ir_url, sha256 }, 0);
+}
+
+/// The chart's page in the browser. A row without a chart has no page, so it gets the ranking overlay.
+fn openChartPage(a: *App) void {
+    const song = selectedSong(&a.sel) orelse return openRanking(a);
+    if (a.cfg.ir_url.len == 0) return openRanking(a);
+    const url = chartPageUrl(a.gpa, a.cfg.ir_url, song.sha256) catch return;
+    defer a.gpa.free(url);
+    if (!c.SDL_OpenURL(url)) {
+        std.log.warn("open {s}: {s}", .{ url, c.SDL_GetError() });
+        a.sel.status = "Could not open the browser";
+    }
+}
+
 /// A chart row shows its ranking; a table or level row shows standings over its charts.
 fn openRanking(a: *App) void {
     const s = &a.sel;
@@ -1581,7 +1597,7 @@ fn keySound(a: *App, sc: u32) void {
     switch (sc) {
         c.SDL_SCANCODE_UP, c.SDL_SCANCODE_DOWN, c.SDL_SCANCODE_PAGEUP, c.SDL_SCANCODE_PAGEDOWN => a.sfx(.move),
         c.SDL_SCANCODE_F1, c.SDL_SCANCODE_F2, c.SDL_SCANCODE_F3, c.SDL_SCANCODE_F4, c.SDL_SCANCODE_F5 => a.sfx(.adjust),
-        c.SDL_SCANCODE_F6, c.SDL_SCANCODE_F7, c.SDL_SCANCODE_F8, c.SDL_SCANCODE_F9 => a.sfx(.confirm),
+        c.SDL_SCANCODE_F6, c.SDL_SCANCODE_F7, c.SDL_SCANCODE_F8, c.SDL_SCANCODE_F9, c.SDL_SCANCODE_7 => a.sfx(.confirm),
         c.SDL_SCANCODE_F10, c.SDL_SCANCODE_6 => a.sfxOr(a.sfx_option_open, .confirm),
         c.SDL_SCANCODE_1, c.SDL_SCANCODE_3 => a.sfx(.adjust),
         c.SDL_SCANCODE_8 => if (selectedSong(s) != null) a.sfx(.confirm),
@@ -1865,7 +1881,7 @@ pub fn key(a: *App, sc: u32) void {
         c.SDL_SCANCODE_3 => a.cfg.ln_mode = (@min(a.cfg.ln_mode, 2) + 1) % 3,
         c.SDL_SCANCODE_4 => nextReplay(a),
         c.SDL_SCANCODE_6 => settings.openControls(a),
-        c.SDL_SCANCODE_7 => key(a, c.SDL_SCANCODE_F9),
+        c.SDL_SCANCODE_7 => openChartPage(a),
         c.SDL_SCANCODE_8 => if (selectedSong(s)) |song| setFolder(a, song.folder),
         c.SDL_SCANCODE_0 => key(a, c.SDL_SCANCODE_F6),
         c.SDL_SCANCODE_R => if (selectedSong(s)) |song| playReplay(a, song),
@@ -2318,6 +2334,17 @@ test "a chart's ranking is asked for once the cursor rests, and only when signed
     while (!first.ready()) c.SDL_Delay(5);
     dropBoard(a);
     try std.testing.expect(a.select_state.ir_board == null);
+}
+
+test "the IR page key builds the chart's address and asks for a server first" {
+    const url = try chartPageUrl(std.testing.allocator, "https://ir.actuon.app", "abc");
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings("https://ir.actuon.app/charts/abc", url);
+    const a = try testing.open();
+    defer testing.close(a);
+    a.cfg.ir_url = "";
+    key(a, c.SDL_SCANCODE_7);
+    try std.testing.expectEqualStrings("Set an IR server in settings first", a.sel.status);
 }
 
 test "the IR key asks for a server first" {
