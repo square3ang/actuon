@@ -109,6 +109,16 @@ pub fn build(b: *std.Build) void {
         mod.linkFramework("IOKit", .{});
         mod.linkFramework("CoreFoundation", .{});
     }
+    // pkgconf hides MSYS2's own include and lib folders as defaults, but zig does not search them.
+    if (os == .windows) {
+        const prefix = std.mem.trim(u8, b.run(&.{ "pkg-config", "--variable=prefix", "sdl3" }), "\r\n");
+        const include: std.Build.LazyPath = .{ .cwd_relative = b.pathJoin(&.{ prefix, "include" }) };
+        const lib = b.pathJoin(&.{ prefix, "lib" });
+        mod.addIncludePath(include);
+        translate.addIncludePath(include);
+        mod.addLibraryPath(.{ .cwd_relative = lib });
+        translate.addCFlags(&.{b.fmt("-L{s}", .{lib})});
+    }
     // Homebrew's portaudio-2.0.pc lists -framework, which zig's pkg-config reader refuses.
     if (os == .macos) {
         const portaudio = std.mem.trim(u8, b.run(&.{ "pkg-config", "--variable=prefix", "portaudio-2.0" }), "\n");

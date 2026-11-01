@@ -6,11 +6,16 @@ const fs = @import("../platform/fs.zig");
 
 pub const Error = error{ Sqlite, OutOfMemory };
 
+// SQLITE_TRANSIENT is the destructor -1, and zig rejects that as a misaligned function pointer on arm64.
+const sqlite_transient: isize = -1;
+extern fn sqlite3_bind_text(*c.sqlite3_stmt, c_int, [*]const u8, c_int, isize) c_int;
+extern fn sqlite3_bind_blob(*c.sqlite3_stmt, c_int, [*]const u8, c_int, isize) c_int;
+
 pub const Stmt = struct {
     s: *c.sqlite3_stmt,
 
     pub fn bindText(st: Stmt, i: c_int, v: []const u8) void {
-        _ = c.sqlite3_bind_text(st.s, i, v.ptr, @intCast(v.len), c.SQLITE_TRANSIENT);
+        _ = sqlite3_bind_text(st.s, i, v.ptr, @intCast(v.len), sqlite_transient);
     }
     pub fn bindInt(st: Stmt, i: c_int, v: i64) void {
         _ = c.sqlite3_bind_int64(st.s, i, v);
@@ -19,7 +24,7 @@ pub const Stmt = struct {
         _ = c.sqlite3_bind_double(st.s, i, v);
     }
     pub fn bindBlob(st: Stmt, i: c_int, v: []const u8) void {
-        _ = c.sqlite3_bind_blob(st.s, i, v.ptr, @intCast(v.len), c.SQLITE_TRANSIENT);
+        _ = sqlite3_bind_blob(st.s, i, v.ptr, @intCast(v.len), sqlite_transient);
     }
     pub fn step(st: Stmt) Error!bool {
         const rc = c.sqlite3_step(st.s);
