@@ -35,7 +35,7 @@ const RANK_ORDER: &str = "ORDER BY s.verified DESC, s.ex DESC, s.date, s.user";
 const SCHEMA: &str = "
 PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS user(id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, pass TEXT NOT NULL, token TEXT UNIQUE NOT NULL);
-CREATE TABLE IF NOT EXISTS chart(sha256 TEXT PRIMARY KEY, owner INTEGER NOT NULL, size INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS chart(sha256 TEXT PRIMARY KEY, owner INTEGER NOT NULL, size INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '', artist TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS score(
   user INTEGER NOT NULL, sha256 TEXT NOT NULL, clear INTEGER NOT NULL, ex INTEGER NOT NULL, max_combo INTEGER NOT NULL, miss INTEGER NOT NULL,
   notes INTEGER NOT NULL, gauge_type INTEGER NOT NULL, date INTEGER NOT NULL, PRIMARY KEY(user, sha256));
@@ -343,20 +343,19 @@ fn upload_chart(req: &mut Request, db: &Connection, ctx: &Ctx, sha: &str) -> Api
     // Random: two players can upload the same new chart at once.
     let tmp = path.with_extension(format!("tmp{}", new_token()?));
     std::fs::write(&tmp, &body)?;
-    let args = [
-        "--check-chart".into(),
-        tmp.clone().into_os_string(),
-        format.to_string().into(),
-    ];
-    let checked = run_child(&args, &[], "file is not a playable chart");
-    let renamed = checked.and_then(|_| std::fs::rename(&tmp, &path).map_err(ApiError::from));
-    if let Err(e) = renamed {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
+    let info = match check_isolated(&tmp, format).and_then(|info| {
+        std::fs::rename(&tmp, &path)?;
+        Ok(info)
+    }) {
+        Ok(info) => info,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    };
     db.execute(
-        "INSERT INTO chart(sha256,owner,size) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING",
-        params![sha, user, body.len() as i64],
+        "INSERT INTO chart(sha256,owner,size,title,artist) VALUES(?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING",
+        params![sha, user, body.len() as i64, info.title, info.artist],
     )?;
     Ok(json!({"stored": true}))
 }
@@ -404,6 +403,37 @@ fn run_child(
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+fn check_isolated(path: &Path, format: u8) -> Result<core::ChartInfo, ApiError> {
+    let rejected = "file is not a playable chart";
+    let args = [
+        "--check-chart".into(),
+        path.as_os_str().to_owned(),
+        format.to_string().into(),
+    ];
+    serde_json::from_str(&run_child(&args, &[], rejected)?)
+        .map_err(|_| ApiError::new(422, rejected))
+}
+
+/// Charts stored before titles were kept. No format is stored, and PMS names a chart as BMS does.
+fn name_old_charts(db: &Connection, ctx: &Ctx) -> Result<(), ApiError> {
+    let shas = db
+        .prepare("SELECT sha256 FROM chart WHERE title=''")?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for sha in shas {
+        let path = chart_path(ctx, &sha);
+        let Ok(info) = check_isolated(&path, 1).or_else(|_| check_isolated(&path, 3)) else {
+            eprintln!("chart {sha} could not be named");
+            continue;
+        };
+        db.execute(
+            "UPDATE chart SET title=?1, artist=?2 WHERE sha256=?3",
+            params![info.title, info.artist, sha],
+        )?;
+    }
+    Ok(())
 }
 
 fn verify_isolated(
@@ -487,7 +517,17 @@ fn ranking(req: &Request, db: &Connection, sha: &str, url: &str) -> ApiResult {
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let (rank, total, clears) = standing(db, sha, me)?;
-    Ok(json!({"scores": scores, "rank": rank, "total": total, "clears": clears}))
+    let (title, artist) = db
+        .query_row(
+            "SELECT title,artist FROM chart WHERE sha256=?1",
+            [sha],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .optional()?
+        .unwrap_or_default();
+    Ok(
+        json!({"scores": scores, "rank": rank, "total": total, "clears": clears, "title": title, "artist": artist}),
+    )
 }
 
 /// The newest verified scores, for the web page. Claims stay out: nothing has checked them.
@@ -497,10 +537,10 @@ fn recent(db: &Connection, url: &str) -> ApiResult {
         .and_then(|l| l.parse().ok())
         .unwrap_or(50)
         .clamp(1, 100);
-    let mut st = db.prepare_cached("SELECT s.sha256,u.name,s.ex,s.clear,s.miss,s.date FROM score s JOIN user u ON u.id=s.user ORDER BY s.date DESC LIMIT ?1")?;
+    let mut st = db.prepare_cached("SELECT s.sha256,u.name,s.ex,s.clear,s.miss,s.date,COALESCE(c.title,'') FROM score s JOIN user u ON u.id=s.user LEFT JOIN chart c ON c.sha256=s.sha256 ORDER BY s.date DESC LIMIT ?1")?;
     let scores = st
         .query_map([limit], |r| {
-            Ok(json!({"sha256": r.get::<_, String>(0)?, "name": r.get::<_, String>(1)?, "ex": r.get::<_, i64>(2)?, "clear": r.get::<_, i64>(3)?, "miss": r.get::<_, i64>(4)?, "date": r.get::<_, i64>(5)?}))
+            Ok(json!({"sha256": r.get::<_, String>(0)?, "name": r.get::<_, String>(1)?, "ex": r.get::<_, i64>(2)?, "clear": r.get::<_, i64>(3)?, "miss": r.get::<_, i64>(4)?, "date": r.get::<_, i64>(5)?, "title": r.get::<_, String>(6)?}))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(json!({"scores": scores}))
@@ -730,7 +770,13 @@ fn check_chart_main(args: &[String]) -> i32 {
     let Ok(chart) = std::fs::read(Path::new(path)) else {
         return 2;
     };
-    i32::from(core::check_chart(&chart, format).is_err())
+    match core::check_chart(&chart, format) {
+        Ok(info) => {
+            println!("{}", serde_json::to_string(&info).unwrap_or_default());
+            0
+        }
+        Err(_) => 1,
+    }
 }
 
 /// Child mode of verify_isolated: chart path and format in argv, replay on stdin, result JSON on stdout.
@@ -780,6 +826,11 @@ fn initialize(db: &Connection) -> rusqlite::Result<()> {
     if !has_column("size")? {
         db.execute_batch("ALTER TABLE chart ADD COLUMN size INTEGER NOT NULL DEFAULT 0")?;
     }
+    if !has_column("title")? {
+        db.execute_batch(
+            "ALTER TABLE chart ADD COLUMN title TEXT NOT NULL DEFAULT ''; ALTER TABLE chart ADD COLUMN artist TEXT NOT NULL DEFAULT ''",
+        )?;
+    }
     if has_column("format")? {
         db.execute_batch("ALTER TABLE chart DROP COLUMN format")?;
     }
@@ -814,6 +865,9 @@ fn main() {
         attempts: Mutex::new(HashMap::new()),
         checks: AtomicUsize::new(0),
     });
+    if let Err(e) = name_old_charts(&open_db(&db_path).expect("open database"), &ctx) {
+        eprintln!("naming old charts failed: {}", e.1);
+    }
     eprintln!("actuon IR on http://{addr}");
     let threads: Vec<_> = (0..8)
         .map(|_| {
@@ -849,7 +903,19 @@ mod tests {
     #[test]
     fn core_rejects_files_without_notes() {
         assert!(core::check_chart(b"not a chart", 1).is_err());
-        assert!(core::check_chart(b"#BPM 120\n#WAV01 a.wav\n#00111:01\n", 1).is_ok());
+        let named = core::check_chart(
+            b"#TITLE A\n#ARTIST B\n#BPM 120\n#WAV01 a.wav\n#00111:01\n",
+            1,
+        );
+        assert_eq!(named.unwrap().title, "A");
+        let long = format!(
+            "#TITLE {}\n#BPM 120\n#WAV01 a.wav\n#00111:01\n",
+            "a".repeat(999)
+        );
+        assert_eq!(
+            core::check_chart(long.as_bytes(), 1).unwrap().title.len(),
+            255
+        );
     }
 
     #[test]

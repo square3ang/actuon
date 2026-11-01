@@ -7,7 +7,7 @@
   --lamp-hard: #ff5468; --lamp-exhard: #ffd65c; --lamp-fc: #96f5f5;
   --alpha-digit-off: .35;
   --suite: "SUITE", "Noto Sans CJK JP", "Hiragino Sans GB", "Apple SD Gothic Neo", "Yu Gothic", "Microsoft YaHei", Meiryo, sans-serif;
-  --text-12: 12px; --text-14: 14px; --text-16: 16px; --head-24: 24px; --num-48: 48px;
+  --text-12: 12px; --text-14: 14px; --text-16: 16px; --head-24: 24px; --head-32: 32px; --num-48: 48px;
   --space-4: 4px; --space-6: 6px; --space-10: 10px; --space-12: 12px; --space-14: 14px; --space-18: 18px;
   --radius-3: 3px; --radius-6: 6px; --radius-8: 8px;
   --bar-header: 40px; --row: 40px;
@@ -62,8 +62,10 @@ td a { color: var(--sky); text-decoration: none; border-radius: var(--radius-6);
 .lamp-1 { --lamp: var(--cyan); } .lamp-1 i { background: var(--lamp-failed); }
 .lamp-2, .lamp-3 { --lamp: var(--lamp-assist); } .lamp-4 { --lamp: var(--lamp-easy); } .lamp-5 { --lamp: var(--lamp-normal); }
 .lamp-6 { --lamp: var(--lamp-hard); } .lamp-7 { --lamp: var(--lamp-exhard); } .lamp-8, .lamp-9, .lamp-10 { --lamp: var(--lamp-fc); }
-.sha { margin: 0; padding: var(--space-10); overflow: hidden; white-space: nowrap; color: var(--sky); font-size: var(--text-14); }
-.sha span { display: block; margin-bottom: var(--space-4); color: var(--white); font-size: var(--text-14); }
+.chart-head { padding: var(--space-10); min-width: 0; }
+h1.title { margin: 0; font: 800 var(--head-32)/1.2 var(--suite); overflow: hidden; white-space: nowrap; }
+.artist { margin: var(--space-4) 0; color: var(--sky); }
+.sha { margin: 0; overflow: hidden; white-space: nowrap; color: var(--cyan); font-size: var(--text-12); }
 .readouts { display: flex; flex-wrap: wrap; gap: var(--space-6); }
 .readout { flex: 1 1 200px; display: flex; flex-direction: column; font: 800 var(--num-48)/1.1 var(--suite); text-align: right; }
 .readout > span:first-child { font: 500 var(--text-14) var(--suite); color: var(--cyan); text-align: left; padding: var(--space-4) 0; }

@@ -41,10 +41,16 @@ struct RecentScore {
     clear: usize,
     miss: u32,
     date: i64,
+    #[serde(default)]
+    title: String,
 }
 
 #[derive(Deserialize)]
 struct Ranking {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    artist: String,
     scores: Vec<RankedScore>,
     total: u32,
     /// Players per lamp, indexed like `CLEAR_NAMES`.
@@ -119,6 +125,11 @@ fn lookup(refused: bool) -> impl IntoView {
     }
 }
 
+/// A chart the server could not name still needs a link to click.
+fn chart_name(title: &str, sha: &str) -> String {
+    if title.is_empty() { &sha[..16] } else { title }.to_string()
+}
+
 fn recent_rows(scores: Vec<RecentScore>) -> impl IntoView {
     view! {
         <table>
@@ -129,7 +140,7 @@ fn recent_rows(scores: Vec<RecentScore>) -> impl IntoView {
             <tbody>
                 {scores.into_iter().map(|s| view! {
                     <tr>
-                        <td class="clip"><a href=format!("/charts/{}", s.sha256)>{s.sha256[..16].to_string()}</a></td>
+                        <td class="clip"><a href=format!("/charts/{}", s.sha256)>{chart_name(&s.title, &s.sha256)}</a></td>
                         <td class="clip">{s.name}</td>
                         <td>{lamp(s.clear)}</td>
                         <td class="num">{digits(s.ex, 5)}</td>
@@ -186,8 +197,16 @@ fn ranking_rows(scores: Vec<RankedScore>) -> impl IntoView {
 
 fn chart(sha: &str, ranking: Option<Ranking>) -> impl IntoView {
     let sha = sha.to_string();
+    let (title, artist) = ranking.as_ref().map_or_else(
+        || (sha.clone(), String::new()),
+        |r| (chart_name(&r.title, &sha), r.artist.clone()),
+    );
     view! {
-        <p class="sha"><span>"CHART SHA-256"</span>{sha}</p>
+        <div class="chart-head">
+            <h1 class="title">{title}</h1>
+            <p class="artist">{artist}</p>
+            <p class="sha">{sha}</p>
+        </div>
         {match ranking {
             None => notice("Could not reach the IR server").into_any(),
             Some(r) => view! {

@@ -32,13 +32,28 @@ export fn actuon_verify(input: *const VerifyInput, out: *replay.Result) callconv
     return 0;
 }
 
-/// Returns 0 when the bytes parse as a chart with notes to play, otherwise -2.
-export fn actuon_check_chart(data: [*]const u8, len: usize, format: u8) callconv(.c) i32 {
+pub const ChartInfo = extern struct {
+    /// UTF-8, NUL-terminated, cut short when longer than the field.
+    title: [256]u8,
+    artist: [256]u8,
+};
+
+fn copyText(out: *[256]u8, text: []const u8) void {
+    const n = @min(text.len, out.len - 1);
+    @memcpy(out[0..n], text[0..n]);
+    out[n] = 0;
+}
+
+/// Returns 0 when the bytes parse as a chart with notes to play, and names it in `info`. Otherwise -2.
+export fn actuon_check_chart(data: [*]const u8, len: usize, format: u8, info: *ChartInfo) callconv(.c) i32 {
     const gpa = std.heap.c_allocator;
     const bytes = data[0..len];
     var chart = (if (format == 3) core.bmson.parse(gpa, bytes) else core.bms.parse(gpa, bytes, .{ .is_pms = format == 2 })) catch return -2;
     defer chart.deinit();
-    return if (chart.total_notes > 0) 0 else -2;
+    if (chart.total_notes == 0) return -2;
+    copyText(&info.title, chart.title);
+    copyText(&info.artist, chart.artist);
+    return 0;
 }
 
 /// Lowercase hex SHA-256 and MD5 of a chart file, without decoding it.

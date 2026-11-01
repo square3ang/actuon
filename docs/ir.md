@@ -95,7 +95,7 @@ Replays played in CN or HCN mode on a chart that leaves its LN type open are ref
 web/target/release/actuon-web 127.0.0.1:8731 http://127.0.0.1:8730
 ```
 
-The server stores no chart titles, so charts appear by SHA-256.
+The server names a chart when it checks the upload, and names older charts at startup.
 
 To share the API's host name, send the page's paths to it and leave everything else on the API. `PUT /charts/{sha}` stays on the API, so split that path by method:
 
