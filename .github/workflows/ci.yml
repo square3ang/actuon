@@ -1,0 +1,47 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - run: pacman -Syu --noconfirm git zig sdl3 sdl3_ttf portaudio sqlite lua54 libarchive ffmpeg rust python base-devel pkgconf
+      - uses: actions/checkout@v4
+      - run: zig build test
+      - run: zig build tools -Doptimize=ReleaseSafe
+      - run: python3 tests/golden_check.py "$PWD/zig-out/bin/chartdump"
+      - name: Parser fuzz
+        run: |
+          ls "$PWD"/tests/charts/*.bm? "$PWD"/tests/charts/*.pms > fuzz-seeds.txt
+          ./zig-out/bin/fuzz_parser fuzz-seeds.txt 20000 "$GITHUB_RUN_NUMBER"
+      - run: zig build core -Doptimize=ReleaseSafe
+      - run: cargo test --release
+        working-directory: server
+      - run: cargo build --release
+        working-directory: server
+      - run: python3 tests/ir_e2e.py server/target/release/actuon-ir zig-out/bin/mkreplay tests/charts/stop.bms "$(mktemp -d)"
+  macos:
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with: { version: 0.17.0 }
+      - run: brew install sdl3 sdl3_ttf portaudio sqlite lua@5.4 libarchive ffmpeg pkgconf
+      - run: zig build test
+  windows:
+    runs-on: windows-latest
+    continue-on-error: true
+    defaults: { run: { shell: 'msys2 {0}' } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: >-
+            mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-sdl3 mingw-w64-ucrt-x86_64-sdl3-ttf
+            mingw-w64-ucrt-x86_64-portaudio mingw-w64-ucrt-x86_64-sqlite3 mingw-w64-ucrt-x86_64-lua
+            mingw-w64-ucrt-x86_64-libarchive mingw-w64-ucrt-x86_64-ffmpeg zip
+      - uses: mlugg/setup-zig@v2
+        with: { version: 0.17.0 }
+      - run: zig build test

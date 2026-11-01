@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=actuon
+Comment=BMS player
+Exec=actuon %f
+Icon=io.github.square3ang.actuon
+Categories=Game;Music;
+MimeType=application/x-bms;
+Terminal=false

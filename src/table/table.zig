@@ -1,0 +1,266 @@
+//! Difficulty tables in the bmstable format: an HTML page with a meta tag pointing at a
+//! header JSON, which points at a data JSON. Courses come from the header's "course" field.
+const std = @import("std");
+const core = @import("actuon_core");
+const http = @import("../platform/http.zig");
+const db_mod = @import("../db/db.zig");
+const Db = db_mod.Db;
+const J = std.json.Value;
+
+/// Value of `<meta name="bmstable" content="...">`, tolerant of attribute order and quoting.
+pub fn findMeta(html: []const u8) ?[]const u8 {
+    var pos: usize = 0;
+    while (std.ascii.findIgnoreCase(html[pos..], "<meta")) |off| {
+        const start = pos + off;
+        const end = std.mem.indexOfScalarPos(u8, html, start, '>') orelse return null;
+        pos = end;
+        const tag = html[start..end];
+        if (std.ascii.findIgnoreCase(tag, "bmstable") == null) continue;
+        if (std.ascii.findIgnoreCase(tag, "name") == null) continue;
+        const c_at = std.ascii.findIgnoreCase(tag, "content") orelse continue;
+        const eq = std.mem.indexOfScalarPos(u8, tag, c_at, '=') orelse continue;
+        var i = eq + 1;
+        while (i < tag.len and tag[i] == ' ') i += 1;
+        if (i >= tag.len) continue;
+        const q = tag[i];
+        if (q == '"' or q == '\'') {
+            const close = std.mem.indexOfScalarPos(u8, tag, i + 1, q) orelse continue;
+            return tag[i + 1..close];
+        }
+        const close = std.mem.indexOfAnyPos(u8, tag, i, " /") orelse tag.len;
+        return tag[i..close];
+    }
+    return null;
+}
+
+/// Table JSON is UTF-8 by spec, but older tables are served as Shift-JIS.
+fn parseJson(a: std.mem.Allocator, bytes_in: []const u8) !J {
+    var bytes = bytes_in;
+    if (std.mem.startsWith(u8, bytes, "\xEF\xBB\xBF")) bytes = bytes[3..];
+    if (!std.unicode.utf8ValidateSlice(bytes)) {
+        bytes = try core.encoding.toUtf8(a, bytes, core.encoding.detect(bytes));
+    }
+    return std.json.parseFromSliceLeaky(J, a, bytes, .{ .allocate = .alloc_always });
+}
+
+fn str(v: ?J) []const u8 {
+    const x = v orelse return "";
+    return if (x == .string) x.string else "";
+}
+
+/// Levels may be strings or numbers in the wild.
+fn levelStr(a: std.mem.Allocator, v: ?J) ![]const u8 {
+    const x = v orelse return "";
+    return switch (x) {
+        .string => |s| s,
+        .integer => |i| std.fmt.allocPrint(a, "{d}", .{i}),
+        .float => |f| std.fmt.allocPrint(a, "{d}", .{f}),
+        else => "",
+    };
+}
+
+fn levelLess(_: void, l: []const u8, r: []const u8) bool {
+    const ln = std.fmt.parseFloat(f64, l) catch null;
+    const rn = std.fmt.parseFloat(f64, r) catch null;
+    if (ln != null and rn != null) return ln.? < rn.?;
+    if (ln != null) return true;
+    if (rn != null) return false;
+    return std.mem.lessThan(u8, l, r);
+}
+
+fn hashList(a: std.mem.Allocator, course: std.json.ObjectMap) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    const add = struct {
+        fn f(o: *std.ArrayList(u8), al: std.mem.Allocator, kind: u8, h: []const u8) !void {
+            if (h.len == 0) return;
+            if (o.items.len > 0) try o.append(al, ',');
+            try o.append(al, kind);
+            try o.append(al, ':');
+            try o.appendSlice(al, h);
+        }
+    }.f;
+    if (course.get("md5")) |m| if (m == .array) for (m.array.items) |h| try add(&out, a, 'm', str(h));
+    if (course.get("sha256")) |m| if (m == .array) for (m.array.items) |h| try add(&out, a, 's', str(h));
+    if (course.get("charts")) |m| if (m == .array) for (m.array.items) |ch| {
+        if (ch != .object) continue;
+        const sha = str(ch.object.get("sha256"));
+        if (sha.len > 0) try add(&out, a, 's', sha) else try add(&out, a, 'm', str(ch.object.get("md5")));
+    };
+    return out.toOwnedSlice(a);
+}
+
+fn storeCourse(a: std.mem.Allocator, st: db_mod.Stmt, url: []const u8, v: J) !void {
+    if (v != .object) return;
+    const hashes = try hashList(a, v.object);
+    if (hashes.len == 0) return;
+    var constraints: std.ArrayList(u8) = .empty;
+    if (v.object.get("constraint")) |cs| if (cs == .array) for (cs.array.items) |x| {
+        try constraints.appendSlice(a, str(x));
+        try constraints.append(a, ',');
+    };
+    st.bindText(1, url);
+    st.bindText(2, str(v.object.get("name")));
+    st.bindText(3, hashes);
+    st.bindText(4, constraints.items);
+    _ = try st.step();
+    st.reset();
+}
+
+pub const FetchResult = struct { name: []const u8, songs: u32, courses: u32 };
+
+/// Parses already-downloaded JSON into the DB, replacing what was stored for `url`.
+pub fn store(gpa: std.mem.Allocator, d: Db, url: []const u8, head_bytes: []const u8, data_bytes: []const u8) !FetchResult {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const head = try parseJson(a, head_bytes);
+    if (head != .object) return error.BadTable;
+    const data = try parseJson(a, data_bytes);
+    if (data != .array) return error.BadTable;
+
+    var levels: std.ArrayList([]const u8) = .empty;
+    if (head.object.get("level_order")) |lo| if (lo == .array) {
+        for (lo.array.items) |l| try levels.append(a, try levelStr(a, l));
+    };
+    var extra: std.StringArrayHashMapUnmanaged(void) = .empty;
+    for (data.array.items) |e| {
+        if (e != .object) continue;
+        const l = try levelStr(a, e.object.get("level"));
+        var known = false;
+        for (levels.items) |k| known = known or std.mem.eql(u8, k, l);
+        if (!known) try extra.put(a, l, {});
+    }
+    const rest = try a.dupe([]const u8, extra.keys());
+    std.mem.sort([]const u8, rest, {}, levelLess);
+    try levels.appendSlice(a, rest);
+
+    try d.exec("BEGIN");
+    errdefer d.exec("ROLLBACK") catch {};
+    for ([_][]const u8{ "DELETE FROM table_song WHERE url=?1", "DELETE FROM course WHERE table_url=?1" }) |sql| {
+        const del = try d.prepare(sql);
+        defer del.deinit();
+        del.bindText(1, url);
+        _ = try del.step();
+    }
+    const meta = try d.prepare("INSERT OR REPLACE INTO bms_table(url,name,symbol,fetched) VALUES(?1,?2,?3,strftime('%s','now'))");
+    defer meta.deinit();
+    meta.bindText(1, url);
+    meta.bindText(2, str(head.object.get("name")));
+    meta.bindText(3, str(head.object.get("symbol")));
+    _ = try meta.step();
+
+    const ins = try d.prepare("INSERT INTO table_song(url,level,ord,md5,sha256,title,artist,zip_url,name_diff) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)");
+    defer ins.deinit();
+    var songs: u32 = 0;
+    for (data.array.items, 0..) |e, i| {
+        if (e != .object) continue;
+        const o = e.object;
+        const l = try levelStr(a, o.get("level"));
+        var li: usize = 0;
+        for (levels.items, 0..) |k, j| if (std.mem.eql(u8, k, l)) {
+            li = j;
+            break;
+        };
+        ins.bindText(1, url);
+        ins.bindText(2, l);
+        ins.bindInt(3, @intCast(li * 1_000_000 + i));
+        ins.bindText(4, str(o.get("md5")));
+        ins.bindText(5, str(o.get("sha256")));
+        ins.bindText(6, str(o.get("title")));
+        ins.bindText(7, str(o.get("artist")));
+        ins.bindText(8, str(o.get("url")));
+        ins.bindText(9, str(o.get("url_diff")));
+        _ = try ins.step();
+        ins.reset();
+        songs += 1;
+    }
+    var courses: u32 = 0;
+    if (head.object.get("course")) |cv| if (cv == .array) {
+        const cs = try d.prepare("INSERT OR REPLACE INTO course(table_url,name,hashes,constraints) VALUES(?1,?2,?3,?4)");
+        defer cs.deinit();
+        for (cv.array.items) |item| {
+            // Both a flat list and a list of groups exist in the wild.
+            if (item == .array) {
+                for (item.array.items) |x| {
+                    try storeCourse(a, cs, url, x);
+                    courses += 1;
+                }
+            } else {
+                try storeCourse(a, cs, url, item);
+                courses += 1;
+            }
+        }
+    };
+    try d.exec("COMMIT");
+    return .{ .name = "", .songs = songs, .courses = courses };
+}
+
+pub fn fetch(gpa: std.mem.Allocator, d: Db, url: []const u8) !FetchResult {
+    const page = try http.get(gpa, url);
+    defer gpa.free(page);
+    var head_url: []u8 = undefined;
+    // Some entries point straight at the header JSON.
+    if (findMeta(page)) |m| head_url = try http.join(gpa, url, m) else head_url = try gpa.dupe(u8, url);
+    defer gpa.free(head_url);
+    const head_bytes = if (std.mem.eql(u8, head_url, url)) try gpa.dupe(u8, page) else try http.get(gpa, head_url);
+    defer gpa.free(head_bytes);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const head = try parseJson(arena.allocator(), head_bytes);
+    if (head != .object) return error.BadTable;
+    const data_url = try http.join(arena.allocator(), head_url, str(head.object.get("data_url")));
+    const data_bytes = try http.get(gpa, data_url);
+    defer gpa.free(data_bytes);
+    return store(gpa, d, url, head_bytes, data_bytes);
+}
+
+pub const CourseLimits = struct {
+    /// Allowed random: 0 = off only, 1 = off or mirror, 2 = any.
+    random: u8 = 2,
+    no_speed: bool = false,
+    no_good: bool = false,
+    no_great: bool = false,
+};
+
+/// Constraint names follow beatoraja's CourseData.CourseDataConstraint.
+pub fn parseConstraints(s: []const u8) CourseLimits {
+    var l: CourseLimits = .{};
+    var it = std.mem.tokenizeScalar(u8, s, ',');
+    while (it.next()) |n| {
+        if (std.mem.eql(u8, n, "grade")) l.random = 0;
+        if (std.mem.eql(u8, n, "grade_mirror")) l.random = 1;
+        if (std.mem.eql(u8, n, "grade_random")) l.random = 2;
+        if (std.mem.eql(u8, n, "no_speed")) l.no_speed = true;
+        if (std.mem.eql(u8, n, "no_good")) l.no_good = true;
+        if (std.mem.eql(u8, n, "no_great")) l.no_great = true;
+    }
+    return l;
+}
+
+test "meta tag and level order" {
+    try std.testing.expectEqualStrings("head.json", findMeta("<html><META name=\"bmstable\" content=\"head.json\" /></html>").?);
+    try std.testing.expectEqualStrings("h.json", findMeta("<meta content='h.json' name='bmstable'>").?);
+    try std.testing.expect(findMeta("<meta charset=utf-8>") == null);
+    const gpa = std.testing.allocator;
+    const d = try Db.open(":memory:", gpa, false);
+    defer d.close();
+    try db_mod.initSchema(d);
+    const head =
+        \\{"name":"T","symbol":"t","data_url":"d.json","course":[[{"name":"C1","md5":["a","b"],"constraint":["grade","no_good"]}]]}
+    ;
+    const data =
+        \\[{"md5":"m2","level":"10","title":"x"},{"md5":"m1","level":2,"title":"y"},{"md5":"m3","level":"?","title":"z"}]
+    ;
+    const r = try store(gpa, d, "u", head, data);
+    try std.testing.expectEqual(@as(u32, 3), r.songs);
+    try std.testing.expectEqual(@as(u32, 1), r.courses);
+    const st = try d.prepare("SELECT md5 FROM table_song ORDER BY ord");
+    defer st.deinit();
+    for ([_][]const u8{ "m1", "m2", "m3" }) |want| {
+        try std.testing.expect(try st.step());
+        try std.testing.expectEqualStrings(want, st.text(0));
+    }
+    const lim = parseConstraints("grade,no_good,");
+    try std.testing.expectEqual(@as(u8, 0), lim.random);
+    try std.testing.expect(lim.no_good and !lim.no_great);
+}

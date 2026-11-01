@@ -1,0 +1,43 @@
+Texture2D<float4> _42 : register(t0);
+Texture2D<float4> _86 : register(t1);
+Texture2D<float4> _101 : register(t2);
+
+static float4 gl_FragCoord;
+static float4 _132;
+
+struct SPIRV_Cross_Input
+{
+    float4 gl_FragCoord : SV_Position;
+};
+
+struct SPIRV_Cross_Output
+{
+    float4 _132 : SV_Target0;
+};
+
+uint2 spvTextureSize(Texture2D<float4> Tex, uint Level, out uint Param)
+{
+    uint2 ret;
+    Tex.GetDimensions(Level, ret.x, ret.y, Param);
+    return ret;
+}
+
+void frag_main()
+{
+    int2 _140 = int2(gl_FragCoord.xy);
+    uint _143_dummy_parameter;
+    uint _157_dummy_parameter;
+    uint _171_dummy_parameter;
+    float4 _177 = ((float4(-0.0425243787467479705810546875f, -0.3715015351772308349609375f, -0.025622785091400146484375f, -0.2774516046047210693359375f) + mul(_42.Load(int3(clamp(_140, int2(0, 0), int2(spvTextureSize(_42, uint(0), _143_dummy_parameter)) - int2(1, 1)), 0)), float4x4(float4(0.023811884224414825439453125f, 0.02954806573688983917236328125f, -0.0066418983042240142822265625f, 0.1021223962306976318359375f), float4(-0.0568209178745746612548828125f, -0.43551003932952880859375f, -0.270052254199981689453125f, -0.2060186564922332763671875f), float4(-0.06896133720874786376953125f, -0.16896919906139373779296875f, -0.03067485056817531585693359375f, -0.24612522125244140625f), float4(-0.0057375836186110973358154296875f, -0.18923032283782958984375f, -0.02858714945614337921142578125f, -0.5032613277435302734375f)))) + mul(_86.Load(int3(clamp(_140, int2(0, 0), int2(spvTextureSize(_86, uint(0), _157_dummy_parameter)) - int2(1, 1)), 0)), float4x4(float4(0.546321332454681396484375f, 0.097280032932758331298828125f, 0.03075607679784297943115234375f, 0.067805893719196319580078125f), float4(-0.035606302320957183837890625f, -0.701386511325836181640625f, 0.18904435634613037109375f, -0.103665746748447418212890625f), float4(-0.17458261549472808837890625f, -0.2942218780517578125f, -0.0485423319041728973388671875f, -0.2983124554157257080078125f), float4(-0.052443183958530426025390625f, -0.3261034786701202392578125f, 0.3217246532440185546875f, 0.19580185413360595703125f)))) + _101.Load(int3(clamp(_140, int2(0, 0), int2(spvTextureSize(_101, uint(0), _171_dummy_parameter)) - int2(1, 1)), 0));
+    _132 = max(_177, 0.0f.xxxx) + (float4(0.139133989810943603515625f, 0.096032835543155670166015625f, 0.623534142971038818359375f, 0.1177272796630859375f) * min(_177, 0.0f.xxxx));
+}
+
+SPIRV_Cross_Output main(SPIRV_Cross_Input stage_input)
+{
+    gl_FragCoord = stage_input.gl_FragCoord;
+    gl_FragCoord.w = 1.0 / gl_FragCoord.w;
+    frag_main();
+    SPIRV_Cross_Output stage_output;
+    stage_output._132 = _132;
+    return stage_output;
+}

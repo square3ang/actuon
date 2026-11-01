@@ -1,0 +1,18 @@
+#TITLE bad_lines.bms
+#PLAYER 1
+#GENRE edge
+#ARTIST actuon tests
+#BPM 130
+#PLAYLEVEL 1
+#RANK 2
+#TOTAL 200
+#WAV01 a.wav
+#WAV02 b.wav
+#00111:0
+#0011A:01
+#XXXXX:01
+#999111:01
+#WAV
+#BPM abc
+#00211:01ZZ!!01
+#00311:01

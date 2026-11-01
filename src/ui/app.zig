@@ -1,0 +1,1062 @@
+//! Application shell: SDL setup, event pump, scene switching.
+const std = @import("std");
+const c = @import("c");
+const core = @import("actuon_core");
+const fs = @import("../platform/fs.zig");
+const gfx = @import("gfx.zig");
+const input = @import("../input/input.zig");
+const config = @import("../game/config.zig");
+const session_mod = @import("../game/session.zig");
+const engine_mod = @import("../audio/engine.zig");
+const menu_sound = @import("../audio/menu_sound.zig");
+const skin_sound = @import("../audio/skin_sound.zig");
+const preview_mod = @import("../audio/preview.zig");
+const db_mod = @import("../db/db.zig");
+const play = @import("play.zig");
+const select = @import("select.zig");
+const result = @import("result.zig");
+const settings = @import("settings.zig");
+const skinconf = @import("skinconf.zig");
+const skinslots = @import("skinslots.zig");
+const course_mod = @import("course.zig");
+const pause = @import("pause.zig");
+const editor = @import("editor.zig");
+const crash = @import("../platform/crash.zig");
+const bga = @import("bga.zig");
+const skin_mod = @import("../skin/skin.zig");
+const skin_scene = @import("../skin/scene.zig");
+const Session = session_mod.Session;
+
+pub const Scene = enum { select, loading, play, result, settings, skinconf, skinslots };
+
+pub const Pending = struct {
+    params: session_mod.Params,
+    record: bool,
+};
+
+pub const App = struct {
+    gpa: std.mem.Allocator,
+    /// Shared with main, so what menus allocate here is freed with what main allocated.
+    arena: *std.heap.ArenaAllocator,
+    cfg: config.Config,
+    g: gfx.Gfx,
+    engine: *engine_mod.Engine,
+    sfx_data: [std.enums.values(menu_sound.Sfx).len][]const f32 = @splat(&.{}),
+    sfx_slot: u8 = engine_mod.first_oneshot_slot,
+    sfx_thread: ?*c.SDL_Thread = null,
+    sfx_ready: std.atomic.Value(bool) = .init(false),
+    sounds: skin_sound.Player = undefined,
+    preview: preview_mod.Preview = undefined,
+    /// The skin's own system sounds, in place of the rendered ones.
+    sfx_skin: [std.enums.values(menu_sound.Sfx).len]?*skin_sound.Entry = @splat(null),
+    bgm_thread: ?*c.SDL_Thread = null,
+    bgm_data: []const f32 = &.{},
+    bgm_ready: std.atomic.Value(bool) = .init(false),
+    bgm_on: bool = false,
+    bgm_slot: u8 = 0,
+    /// What slot 0 is looping, so a different skin's music can take over.
+    bgm_playing: []const f32 = &.{},
+    /// The skins' own music, in place of the rendered loop.
+    bgm_skin: ?*skin_sound.Entry = null,
+    sfx_option_open: ?*skin_sound.Entry = null,
+    sfx_option_close: ?*skin_sound.Entry = null,
+    sfx_play_stop: ?*skin_sound.Entry = null,
+    sfx_play_ready: ?*skin_sound.Entry = null,
+    decide_bgm: ?*skin_sound.Entry = null,
+    decide_bgm_on: bool = false,
+    /// A key press a click asked for. Applied after drawing, because keys can replace what is being drawn.
+    click_key: ?u32 = null,
+    last_pump_ns: u64 = 0,
+    db: db_mod.Db,
+    scene: Scene = .select,
+    running: bool = true,
+    sel: select.State,
+    res: result.State = .{},
+    pause: pause.State = .{},
+    set: settings.State = .{},
+    skinconf: skinconf.State = .{},
+    skinslots: skinslots.State = .{},
+    session: ?*Session = null,
+    view: play.View = .{ .render_state = &.{} },
+    record: bool = true,
+    load_progress: std.atomic.Value(usize) = .init(0),
+    load_total: std.atomic.Value(usize) = .init(0),
+    load_done: std.atomic.Value(bool) = .init(false),
+    load_parsed: session_mod.Parsed = .{},
+    /// The skin's loading screen is up; 0 until the chart is parsed.
+    load_skin_at: u64 = 0,
+    /// When loading began, for the skin's scene clock.
+    load_at: u64 = 0,
+    load_err: bool = false,
+    load_thread: ?*c.SDL_Thread = null,
+    load_params: session_mod.Params = .{ .path = "" },
+    load_result: ?*Session = null,
+    /// Text input routed to whichever scene asked for it.
+    text: std.ArrayList(u8) = .empty,
+    text_active: bool = false,
+    joy_axis: [32]i16 = @splat(0),
+    joy_axis_at: [32]u64 = @splat(0),
+    /// Headless capture for tests: save a frame after N ms, then quit.
+    shot_path: ?[:0]const u8 = null,
+    shot_after_ms: u64 = 0,
+    start_ms: u64 = 0,
+    exit_after_play: bool = false,
+    course: ?course_mod.Run = null,
+    play_skin: ?*skin_mod.model.Skin = null,
+    result_skin: ?*skin_mod.model.Skin = null,
+    decide_skin: ?*skin_mod.model.Skin = null,
+    skin_mode: core.types.Mode = .beat7,
+    select_skin: ?*skin_mod.model.Skin = null,
+    select_skin_root: []const u8 = "",
+    select_skin_loaded: bool = false,
+    select_state: skin_scene.State = .{},
+    /// When song select was entered, its last frame, and the row the skin last showed.
+    select_at: u64 = 0,
+    select_seen: u64 = 0,
+    select_row: usize = 0,
+    /// The finished chart's text and graphs, for the result skin.
+    kept: std.heap.ArenaAllocator = undefined,
+    /// The banner decode runs beside decide, which doesn't wait for it.
+    stagefile_thread: ?*c.SDL_Thread = null,
+    stagefile_path: []const u8 = "",
+    stagefile_px: ?[*]u8 = null,
+    stagefile_w: c_int = 0,
+    stagefile_h: c_int = 0,
+    stagefile_done: std.atomic.Value(bool) = .init(false),
+    /// Decide runs over the load: sounds decode while it shows. 0 when it is not up.
+    want_decide: bool = false,
+    decide_at: u64 = 0,
+    decide_fade_at: u64 = 0,
+    last_scene: ?Scene = null,
+    select_shown_at: u64 = 0,
+    decide_cancel: bool = false,
+    skin_state: skin_scene.State = .{},
+    skin_poll_ms: u64 = 0,
+    editor_poll_ms: u64 = 0,
+    /// Editor preview: the file and measure to replay when the editor saves.
+    preview_buf: [4096]u8 = undefined,
+    /// The chart being played from song select; `load_params.path` and the session point here.
+    play_path_buf: [4096]u8 = undefined,
+    play_level_buf: [64]u8 = undefined,
+    play_table_buf: [128]u8 = undefined,
+    preview_path: []const u8 = "",
+    preview_measure: i32 = 0,
+    preview_mtime: i64 = 0,
+    /// Set when a preview must start on the next frame, after any running session ends.
+    preview_pending: bool = false,
+
+    pub fn startText(a: *App, initial: []const u8) void {
+        a.text.clearRetainingCapacity();
+        a.text.appendSlice(a.gpa, initial) catch {};
+        a.text_active = true;
+        _ = c.SDL_StartTextInput(a.g.win);
+    }
+
+    pub fn stopText(a: *App) void {
+        a.text_active = false;
+        _ = c.SDL_StopTextInput(a.g.win);
+    }
+
+    /// A sound only a set has; without one, the rendered sound nearest it.
+    pub fn sfxOr(a: *App, entry: ?*skin_sound.Entry, fallback: menu_sound.Sfx) void {
+        if (entry) |e| if (e.ready.load(.acquire) and e.data.len > 0) {
+            a.engine.uiPlay(skin_sound.nextSlot(&a.sfx_slot), e.data, false, a.cfg.sfx_volume);
+            return;
+        };
+        a.sfx(fallback);
+    }
+
+    pub fn sfx(a: *App, which: menu_sound.Sfx) void {
+        if (a.sfx_skin[@intFromEnum(which)]) |e| if (e.ready.load(.acquire) and e.data.len > 0) {
+            a.engine.uiPlay(skin_sound.nextSlot(&a.sfx_slot), e.data, false, a.cfg.sfx_volume);
+            return;
+        };
+        if (!a.sfx_ready.load(.acquire)) return;
+        a.engine.uiPlay(skin_sound.nextSlot(&a.sfx_slot), a.sfx_data[@intFromEnum(which)], false, a.cfg.sfx_volume);
+    }
+
+    /// Lua's audio calls, kept to files inside the skin.
+    fn skinAudio(ud: *anyopaque, path: []const u8, op: skin_sound.Op, gain: f32) void {
+        const a: *App = @ptrCast(@alignCast(ud));
+        if (std.mem.indexOf(u8, path, "..") != null) return;
+        const inside = for (std.enums.values(config.SkinSlot)) |slot| {
+            const dir = a.skinDir(slot);
+            if (dir.len > 0 and std.mem.startsWith(u8, path, dir)) break true;
+        } else false;
+        if (!inside) return;
+        a.sounds.request(path, op, gain * a.cfg.sfx_volume);
+    }
+
+    fn skinDir(a: *App, slot: config.SkinSlot) []const u8 {
+        const root = a.cfg.skinFor(slot);
+        const st = fs.stat(root) orelse return root;
+        return if (st.is_dir) root else std.fs.path.dirname(root) orelse root;
+    }
+
+    /// beatoraja's sound set names, in `Sfx` order, from the skin's Sound folder.
+    fn loadSkinSfx(a: *App, al: std.mem.Allocator) void {
+        const names = [std.enums.values(menu_sound.Sfx).len][]const u8{ "scratch", "o-change", "f-open", "f-close", "", "clear", "fail" };
+        for (names, &a.sfx_skin) |name, *slot| {
+            slot.* = a.systemSound(al, name);
+        }
+        a.sfx_option_open = a.systemSound(al, "o-open");
+        a.sfx_option_close = a.systemSound(al, "o-close");
+        a.sfx_play_stop = a.systemSound(al, "playstop");
+        a.sfx_play_ready = a.systemSound(al, "playready");
+        a.bgm_skin = a.musicSound(al, .select, "select");
+        a.decide_bgm = a.musicSound(al, .decide, "decide");
+    }
+
+    /// The picked sound set's file, else the skin's.
+    fn systemSound(a: *App, al: std.mem.Allocator, name: []const u8) ?*skin_sound.Entry {
+        if (a.cfg.sound_path.len > 0) if (skin_sound.findIn(al, a.cfg.sound_path, name)) |p| return a.sounds.entry(p);
+        // Song select may be built in while the other screens use a skin that brings the sounds.
+        // A skin picked for one other screen only keeps its sounds to itself.
+        for (std.enums.values(config.SkinSlot)) |slot| {
+            if (slot != .select and a.cfg.skins.get(slot).len > 0) continue;
+            if (name.len > 0) if (a.skinSound(al, slot, name)) |e| return e;
+        }
+        return null;
+    }
+
+    /// The picked music set's file, else the skin's.
+    fn musicSound(a: *App, al: std.mem.Allocator, slot: config.SkinSlot, name: []const u8) ?*skin_sound.Entry {
+        if (a.cfg.bgm_path.len > 0) if (skin_sound.findIn(al, a.cfg.bgm_path, name)) |p| return a.sounds.entry(p);
+        return a.skinSound(al, slot, name);
+    }
+
+    /// After the music set changes; what plays changes once the new file has decoded.
+    pub fn refreshBgm(a: *App) void {
+        var tmp = std.heap.ArenaAllocator.init(a.gpa);
+        defer tmp.deinit();
+        a.loadSkinSfx(tmp.allocator());
+    }
+
+    /// A sound set's file by beatoraja's name, in the slot's skin; music may have a folder of its own.
+    fn skinSound(a: *App, al: std.mem.Allocator, slot: config.SkinSlot, name: []const u8) ?*skin_sound.Entry {
+        const dir = a.skinDir(slot);
+        if (dir.len == 0) return null;
+        for ([_][]const u8{ "Sound", "Sound/bgm", "bgm" }) |sub| {
+            const folder = std.fs.path.join(al, &.{ dir, sub }) catch return null;
+            if (skin_sound.findIn(al, folder, name)) |p| return a.sounds.entry(p);
+        }
+        return null;
+    }
+
+    /// The menu music: the skin's, else the rendered loop, started the first time it is needed.
+    /// Null while it isn't ready.
+    fn menuBgm(a: *App) ?[]const f32 {
+        if (a.scene == .select and a.preview.current.len > 0) return a.preview.current;
+        if (a.bgm_skin) |e| {
+            if (!e.ready.load(.acquire)) return null;
+            if (e.data.len > 0) return e.data;
+        }
+        if (a.bgm_thread == null) a.bgm_thread = c.SDL_CreateThread(bgmThread, "bgm", a);
+        return if (a.bgm_ready.load(.acquire)) a.bgm_data else null;
+    }
+
+    /// Decide's music plays once, and stops with the screen.
+    fn startDecideBgm(a: *App) void {
+        const e = a.decide_bgm orelse return;
+        if (!e.ready.load(.acquire) or e.data.len == 0) return;
+        a.engine.uiPlay(engine_mod.decide_slot, e.data, false, a.cfg.bgm_volume);
+        a.decide_bgm_on = true;
+    }
+
+    /// Rendered off the main thread so startup doesn't wait on the reverb.
+    fn sfxThread(ud: ?*anyopaque) callconv(.c) c_int {
+        const a: *App = @ptrCast(@alignCast(ud));
+        // Menu sounds live until exit, past the engine that reads them.
+        for (std.enums.values(menu_sound.Sfx), 0..) |which, i| {
+            a.sfx_data[i] = menu_sound.renderSfx(std.heap.page_allocator, which, a.engine.rate) catch &.{};
+        }
+        a.sfx_ready.store(true, .release);
+        return 0;
+    }
+
+    fn bgmThread(ud: ?*anyopaque) callconv(.c) c_int {
+        const a: *App = @ptrCast(@alignCast(ud));
+        a.bgm_data = menu_sound.renderBgm(std.heap.page_allocator, a.engine.rate) catch return 0;
+        a.bgm_ready.store(true, .release);
+        return 0;
+    }
+
+    /// The loop is rendered off the main thread the first time a menu shows, so a chart launched
+    /// straight from the command line never pays for it.
+    fn tickBgm(a: *App) void {
+        a.sounds.tick();
+        if (a.scene != .result) if (a.res.music_slot) |s| {
+            a.engine.uiGain(s, 0);
+            a.res.music_slot = null;
+        };
+        const want = a.scene == .select or a.scene == .settings or a.scene == .skinconf or a.scene == .skinslots;
+        if (a.decide_bgm_on and a.decide_at == 0) {
+            a.engine.uiGain(engine_mod.decide_slot, 0);
+            a.decide_bgm_on = false;
+        }
+        if (want) {
+            if (a.menuBgm()) |data| if (!a.bgm_on or data.ptr != a.bgm_playing.ptr) {
+                if (a.bgm_on) a.engine.uiGain(a.bgm_slot, 0);
+                a.bgm_slot = (a.bgm_slot + 1) % engine_mod.menu_slots;
+                a.engine.uiPlay(a.bgm_slot, data, true, a.cfg.bgm_volume);
+                a.bgm_playing = data;
+                a.bgm_on = true;
+            };
+        } else if (a.bgm_on) {
+            a.engine.uiGain(a.bgm_slot, 0);
+            a.bgm_on = false;
+        }
+    }
+
+    pub fn startPlay(a: *App, params: session_mod.Params, record: bool) void {
+        if (a.load_thread != null) return;
+        // The rendered sound stands in only when no set or skin brings its own for starting a song.
+        if (a.scene == .select and a.sfx_play_ready == null and a.decide_bgm == null) a.sfx(.start);
+        a.load_params = params;
+        a.record = record and !params.autoplay and params.replay == null;
+        a.load_progress.store(0, .release);
+        a.load_total.store(0, .release);
+        a.load_done.store(false, .release);
+        a.load_err = false;
+        a.load_parsed.ready.store(false, .release);
+        a.load_skin_at = 0;
+        a.load_at = c.SDL_GetTicks();
+        a.want_decide = false;
+        a.decide_at = 0;
+        a.decide_fade_at = 0;
+        a.decide_cancel = false;
+        a.skin_state = .{};
+        a.scene = .loading;
+        a.load_thread = c.SDL_CreateThread(loadThread, "loader", a);
+    }
+
+    /// A play picked by hand, which opens on the skin's decide screen if it has one.
+    pub fn decidePlay(a: *App, params: session_mod.Params, record: bool) void {
+        a.startPlay(params, record);
+        a.want_decide = true;
+    }
+
+    fn loadThread(ud: ?*anyopaque) callconv(.c) c_int {
+        const a: *App = @ptrCast(@alignCast(ud));
+        a.load_result = Session.create(a.gpa, a.engine, &a.cfg, a.load_params, &a.load_progress, &a.load_total, &a.load_parsed) catch |e| blk: {
+            std.log.err("load failed: {t}", .{e});
+            break :blk null;
+        };
+        a.load_done.store(true, .release);
+        return 0;
+    }
+
+    pub fn startPreview(a: *App, file: []const u8, measure: i32) void {
+        if (file.len == 0 or file.len > a.preview_buf.len) return;
+        @memcpy(a.preview_buf[0..file.len], file);
+        a.preview_path = a.preview_buf[0..file.len];
+        a.preview_measure = measure;
+        a.preview_mtime = if (fs.stat(a.preview_path)) |st| st.mtime else 0;
+        a.preview_pending = true;
+    }
+
+    fn launchPreview(a: *App) void {
+        a.preview_pending = false;
+        var tmp = std.heap.ArenaAllocator.init(a.gpa);
+        defer tmp.deinit();
+        var start_us: i64 = 0;
+        if (a.preview_measure > 0) {
+            if (Session.parseFile(a.gpa, a.preview_path, null, 0)) |parsed| {
+                var ch = parsed;
+                defer ch.deinit();
+                start_us = editor.measureStart(&ch, a.preview_measure);
+            } else |_| {}
+        }
+        a.startPlay(.{ .path = a.preview_path, .autoplay = true, .start_us = start_us }, false);
+    }
+
+    /// Heartbeat, editor commands, and replay on save. Runs a few times a second, not per frame.
+    fn pollEditor(a: *App) void {
+        const now = c.SDL_GetTicks();
+        if (now - a.editor_poll_ms < 250) return;
+        a.editor_poll_ms = now;
+        var tmp = std.heap.ArenaAllocator.init(a.gpa);
+        defer tmp.deinit();
+        const al = tmp.allocator();
+        editor.heartbeat(al);
+        if (editor.receive(al)) |cmd| {
+            if (a.session != null and a.scene == .play) {
+                const s = a.session.?;
+                a.finishPlay(s.snapshot(), false);
+            }
+            if (cmd.stop) {
+                a.preview_path = "";
+                a.scene = .select;
+            } else a.startPreview(cmd.file, cmd.measure);
+        }
+        if (a.preview_path.len > 0 and a.load_thread == null) {
+            if (fs.stat(a.preview_path)) |st| if (st.mtime != a.preview_mtime) {
+                a.preview_mtime = st.mtime;
+                if (a.session != null and a.scene == .play) {
+                    const s = a.session.?;
+                    a.finishPlay(s.snapshot(), false);
+                }
+                a.preview_pending = true;
+            };
+        }
+        if (a.preview_pending and a.load_thread == null and a.session == null) a.launchPreview();
+    }
+
+    fn bestEx(a: *App, sha: []const u8) u32 {
+        const st = a.db.prepare("SELECT ex FROM score WHERE sha256=?1") catch return 0;
+        defer st.deinit();
+        st.bindText(1, sha);
+        return if (st.step() catch false) @intCast(st.int(0)) else 0;
+    }
+
+    /// Brings the skin up as soon as the chart is parsed, so sounds decode behind its loading screen.
+    fn startLoadingSkin(a: *App) void {
+        const ch = &a.load_parsed.chart;
+        a.load_skin_at = c.SDL_GetTicks();
+        a.skin_state.fromChart(ch, a.load_params, &a.cfg);
+        a.skin_state.loaded = false;
+        a.skin_state.load_frac = 0;
+        a.reloadSkins(ch.mode);
+        // Decide's clock starts once it can be drawn, so its opening is seen whole.
+        const show_decide = a.want_decide and a.decide_skin != null;
+        if (show_decide) {
+            a.decide_at = c.SDL_GetTicks();
+            a.startDecideBgm();
+        }
+        if ((a.play_skin == null and !show_decide) or ch.stagefile.len == 0) return;
+        var tmp = std.heap.ArenaAllocator.init(a.gpa);
+        defer tmp.deinit();
+        const al = tmp.allocator();
+        const dir = std.fs.path.dirname(a.load_params.path) orelse ".";
+        const path = (fs.resolveAsset(al, dir, ch.stagefile, &.{ "png", "jpg", "jpeg", "bmp", "gif", "tga" }) catch null) orelse return;
+        a.stagefile_path = a.gpa.dupe(u8, path) catch return;
+        a.stagefile_done.store(false, .release);
+        a.stagefile_thread = c.SDL_CreateThread(stagefileThread, "stagefile", a);
+    }
+
+    fn stagefileThread(ud: ?*anyopaque) callconv(.c) c_int {
+        const a: *App = @ptrCast(@alignCast(ud));
+        defer a.stagefile_done.store(true, .release);
+        const bytes = fs.readAlloc(a.gpa, a.stagefile_path, 1 << 26) catch return 0;
+        defer a.gpa.free(bytes);
+        var n: c_int = 0;
+        a.stagefile_px = c.stbi_load_from_memory(bytes.ptr, @intCast(bytes.len), &a.stagefile_w, &a.stagefile_h, &n, 4);
+        return 0;
+    }
+
+    /// Joins the decode; with `show`, what it made goes up as the banner.
+    fn finishStagefile(a: *App, show: bool) void {
+        c.SDL_WaitThread(a.stagefile_thread, null);
+        a.stagefile_thread = null;
+        a.gpa.free(a.stagefile_path);
+        const px = a.stagefile_px orelse return;
+        a.stagefile_px = null;
+        defer c.stbi_image_free(px);
+        if (show) a.skin_state.stagefile = a.g.textureFromPixels(px, a.stagefile_w, a.stagefile_h, @intCast(a.stagefile_w * 4));
+    }
+
+    /// Starts the fade out of decide, which ends it.
+    fn decideLeave(a: *App, cancel: bool) void {
+        if (a.decide_fade_at != 0) return;
+        a.decide_fade_at = c.SDL_GetTicks();
+        a.decide_cancel = cancel;
+        a.skin_state.timers[2] = @intCast(a.decide_fade_at - a.decide_at);
+    }
+
+    fn decideKey(a: *App, sc: c.SDL_Scancode) void {
+        if (a.decide_at == 0) return;
+        const sk = a.decide_skin orelse return;
+        if (sc == c.SDL_SCANCODE_ESCAPE) return a.decideLeave(true);
+        if (c.SDL_GetTicks() - a.decide_at >= @as(u64, @intCast(@max(sk.input_ms, 0)))) a.decideLeave(false);
+    }
+
+    /// Draws decide; false once it is over and the load's own screen takes over.
+    fn tickDecide(a: *App) bool {
+        const sk = a.decide_skin.?;
+        const now = c.SDL_GetTicks();
+        const shown: i64 = @intCast(now - a.decide_at);
+        if (shown >= std.math.clamp(sk.scene_ms, 0, 20_000)) a.decideLeave(false);
+        const over = a.decide_fade_at != 0 and now - a.decide_fade_at >= @as(u64, @intCast(std.math.clamp(sk.fadeout_ms, 0, 5000)));
+        if (!over) {
+            skin_scene.drawLoading(&a.g, sk, &a.skin_state, shown);
+            return true;
+        }
+        if (a.decide_cancel) {
+            // shortcut: backing out waits for the decode on a black screen, until the loader can be aborted.
+            if (!a.load_done.load(.acquire)) return true;
+            c.SDL_WaitThread(a.load_thread, null);
+            a.load_thread = null;
+            if (a.load_result) |s| s.destroy();
+            a.load_result = null;
+            a.dropStagefile();
+            a.decide_at = 0;
+            a.scene = .select;
+            return true;
+        }
+        a.decide_at = 0;
+        a.load_at = now;
+        a.skin_state.timers = @splat(-1);
+        return false;
+    }
+
+    fn tickLoading(a: *App) void {
+        const g = &a.g;
+        const t = a.load_total.load(.acquire);
+        const frac: f32 = if (t > 0) @min(@as(f32, @floatFromInt(a.load_progress.load(.acquire))) / @as(f32, @floatFromInt(t)), 1) else 0;
+        const finished = a.load_done.load(.acquire);
+        if (a.load_skin_at == 0 and a.load_parsed.ready.load(.acquire) and (!finished or a.load_result != null)) a.startLoadingSkin();
+        if (a.stagefile_thread != null and a.stagefile_done.load(.acquire)) a.finishStagefile(true);
+        if (a.decide_at != 0 and a.tickDecide()) return;
+        const elapsed: i64 = @intCast(c.SDL_GetTicks() - a.load_at);
+        if (a.load_skin_at != 0 and a.play_skin != null and !a.play_skin.?.plain_loading) {
+            a.skin_state.load_frac = frac;
+            skin_scene.drawLoading(g, a.play_skin.?, &a.skin_state, elapsed);
+        } else {
+            if (a.want_decide and a.load_skin_at == 0 and a.cfg.skinFor(.decide).len > 0) return;
+            g.textCentered("LOADING", g.w / 2, g.h * 0.42, 32, gfx.white);
+            if (t > 0) {
+                g.rect(g.w * 0.3, g.h * 0.72, g.w * 0.4, 8, gfx.rule);
+                g.rect(g.w * 0.3, g.h * 0.72, g.w * 0.4 * frac, 8, gfx.white);
+            }
+        }
+        if (!a.load_done.load(.acquire)) return;
+        // The skin's own minimum, so its opening plays out; a preview jumps straight in.
+        if (a.play_skin) |sk| {
+            const least: i64 = std.math.clamp(sk.loadend_ms, 0, 5000);
+            if (a.load_skin_at != 0 and a.load_params.start_us == 0 and elapsed < least) return;
+        }
+        c.SDL_WaitThread(a.load_thread, null);
+        a.load_thread = null;
+        const s = a.load_result orelse {
+            a.scene = if (a.exit_after_play) blk: {
+                a.running = false;
+                break :blk .select;
+            } else .select;
+            a.sel.status = "Could not load that chart";
+            a.dropStagefile();
+            return;
+        };
+        a.load_result = null;
+        a.session = s;
+        a.view = .{ .render_state = a.gpa.alloc(u8, s.vis.len) catch {
+            s.destroy();
+            a.session = null;
+            a.scene = .select;
+            return;
+        } };
+        a.view.bga = bga.Bga.create(a.gpa, &a.g, s);
+        a.view.best_ex = a.bestEx(&s.chart.sha256);
+        // The clock carries on from the loading screen, so what it opened is not replayed.
+        if (a.load_skin_at != 0 and a.play_skin != null) a.skin_state.load_ms = elapsed;
+        a.skin_state.fromSession(s, &a.cfg);
+        a.dropStagefile();
+        if (a.load_skin_at == 0) a.reloadSkins(s.chart.mode);
+        a.scene = .play;
+        // As beatoraja, the load's end is heard; a preview jumping in partway stays quiet.
+        if (a.load_params.start_us == 0) if (a.sfx_play_ready) |e| if (e.ready.load(.acquire) and e.data.len > 0) {
+            a.engine.uiPlay(skin_sound.nextSlot(&a.sfx_slot), e.data, false, a.cfg.sfx_volume);
+        };
+        input.setPollRate(if (s.params.autoplay or s.params.replay != null) 0 else a.cfg.input_poll_hz);
+        s.start();
+    }
+
+    fn dropStagefile(a: *App) void {
+        if (a.stagefile_thread != null) a.finishStagefile(false);
+        if (a.skin_state.stagefile) |tex| a.g.destroyTexture(tex);
+        a.skin_state.stagefile = null;
+    }
+
+    /// No-op without a configured skin. A broken skin falls back to the built-in look rather than blocking play.
+    fn reloadSkins(a: *App, mode: core.types.Mode) void {
+        a.dropSkins();
+        a.skin_mode = mode;
+        var tmp = std.heap.ArenaAllocator.init(a.gpa);
+        defer tmp.deinit();
+        const al = tmp.allocator();
+        a.loadSkinSfx(al);
+        const load_ctx = a.skin_state.loadCtx();
+        skin_mod.setLuaCtx(&load_ctx);
+        defer skin_mod.setLuaCtx(null);
+        skin_mod.lua_mod.audio_quiet = true;
+        defer skin_mod.lua_mod.audio_quiet = false;
+        a.play_skin = a.loadSlot(al, skin_mod.playSlot(mode), mode);
+        a.decide_skin = a.loadSlot(al, .decide, mode);
+        a.result_skin = a.loadSlot(al, .result, mode);
+    }
+
+    /// A slot's skin; a missing or broken one means the built-in look rather than blocking play.
+    fn loadSlot(a: *App, al: std.mem.Allocator, slot: config.SkinSlot, mode: core.types.Mode) ?*skin_mod.model.Skin {
+        const root = a.cfg.skinFor(slot);
+        if (root.len == 0) return null;
+        const p = skin_mod.find(al, root, skin_mod.slotType(slot)) orelse {
+            std.log.warn("no skin of the needed type under {s}", .{root});
+            return null;
+        };
+        return skin_mod.load(a.gpa, &a.g, p, mode, noOption, skin_mod.loadConf(al, root, skin_mod.slotType(slot))) catch |e| {
+            std.log.err("skin {s}: {t}", .{ p, e });
+            return null;
+        };
+    }
+
+    /// Brings the song select skin in line with the config; textures stay cached across a reload.
+    pub fn syncSelectSkin(a: *App) void {
+        const root = a.cfg.skinFor(.select);
+        if (a.select_skin_loaded and std.mem.eql(u8, root, a.select_skin_root)) return;
+        a.dropSelectSkin();
+        a.select_skin_loaded = true;
+        a.select_skin_root = a.gpa.dupe(u8, root) catch "";
+        var tmp = std.heap.ArenaAllocator.init(a.gpa);
+        defer tmp.deinit();
+        const al = tmp.allocator();
+        a.loadSkinSfx(al);
+        a.select_state = .{};
+        const load_ctx = a.select_state.loadCtx();
+        skin_mod.setLuaCtx(&load_ctx);
+        defer skin_mod.setLuaCtx(null);
+        skin_mod.lua_mod.audio_quiet = true;
+        defer skin_mod.lua_mod.audio_quiet = false;
+        a.select_skin = a.loadSlot(al, .select, .beat7);
+    }
+
+    fn dropSelectSkin(a: *App) void {
+        if (a.select_skin) |sk| skin_mod.destroy(a.gpa, sk);
+        a.select_skin = null;
+        if (a.select_skin_root.len > 0) a.gpa.free(a.select_skin_root);
+        a.select_skin_root = "";
+    }
+
+    /// Beatoraja builds the result skin on entry, and skins read the score while loading.
+    pub fn reloadResultSkin(a: *App) void {
+        const root = a.cfg.skinFor(.result);
+        if (root.len == 0) return;
+        var tmp = std.heap.ArenaAllocator.init(a.gpa);
+        defer tmp.deinit();
+        const al = tmp.allocator();
+        const p = skin_mod.find(al, root, skin_mod.type_result) orelse return;
+        const load_ctx = a.skin_state.loadCtx();
+        skin_mod.setLuaCtx(&load_ctx);
+        defer skin_mod.setLuaCtx(null);
+        const fresh = skin_mod.load(a.gpa, &a.g, p, a.skin_mode, noOption, skin_mod.loadConf(al, root, skin_mod.type_result)) catch return;
+        if (a.result_skin) |old| skin_mod.destroy(a.gpa, old);
+        a.result_skin = fresh;
+    }
+
+    fn dropSkins(a: *App) void {
+        if (a.play_skin) |sk| skin_mod.destroy(a.gpa, sk);
+        if (a.result_skin) |sk| skin_mod.destroy(a.gpa, sk);
+        if (a.decide_skin) |sk| skin_mod.destroy(a.gpa, sk);
+        a.decide_skin = null;
+        a.play_skin = null;
+        a.result_skin = null;
+    }
+
+    /// Hot reload, polled once a second.
+    fn pollSkin(a: *App, mode: core.types.Mode) void {
+        const now = c.SDL_GetTicks();
+        if (now - a.skin_poll_ms < 1000) return;
+        a.skin_poll_ms = now;
+        const sk = a.play_skin orelse return;
+        if (skin_mod.changed(sk)) a.reloadSkins(mode);
+    }
+
+    fn tickPlay(a: *App) void {
+        const s = a.session.?;
+        a.pollSkin(s.chart.mode);
+        const snap = if (a.play_skin) |sk|
+            skin_scene.drawPlay(&a.g, sk, &a.skin_state, s, &a.view, &a.cfg)
+        else
+            a.view.draw(&a.g, s, &a.cfg);
+        if (a.pause.open) return pause.tick(a);
+        if (s.was_paused and a.record) a.g.textRight("NOT RECORDED: PAUSED", a.g.w - 22 * a.g.h / 720, 52 * a.g.h / 720, a.g.scaled(16), gfx.amber);
+        if (s.canSkip(snap)) a.g.textCentered("ENTER: SKIP", a.g.w / 2, a.g.h * 0.5, a.g.scaled(28), gfx.white);
+        if (s.done.load(.acquire)) a.finishPlay(snap, true);
+    }
+
+    /// Throws the current play away, unrecorded, and loads the same chart again.
+    pub fn retryPlay(a: *App) void {
+        const s = a.session.?;
+        s.stop();
+        input.setPollRate(0);
+        a.pause = .{};
+        a.gpa.free(a.view.render_state);
+        if (a.view.bga) |b| b.destroy();
+        a.view = .{ .render_state = &.{} };
+        s.destroy();
+        a.session = null;
+        a.startPlay(a.load_params, a.record);
+    }
+
+    /// `natural` is false when the player quit: quitting never counts as a clear, but the play still counts.
+    pub fn finishPlay(a: *App, snap: session_mod.Snapshot, natural: bool) void {
+        const s = a.session.?;
+        a.pause = .{};
+        s.stop();
+        input.setPollRate(0);
+        if (!natural or snap.failed) a.sfxOr(a.sfx_play_stop, .back);
+        const continues = a.course != null and course_mod.stageDone(a, s, snap, natural);
+        if (!continues) {
+            result.capture(a, s, snap, natural);
+            _ = a.kept.reset(.retain_capacity);
+            a.skin_state.keepChart(a.kept.allocator());
+        }
+        a.gpa.free(a.view.render_state);
+        if (a.view.bga) |b| b.destroy();
+        a.view = .{ .render_state = &.{} };
+        s.destroy();
+        a.session = null;
+        if (a.exit_after_play) {
+            a.running = false;
+            return;
+        }
+        if (continues) {
+            course_mod.next(a);
+            return;
+        }
+        if (a.course != null) course_mod.finish(a);
+        a.scene = .result;
+        select.reload(a);
+    }
+
+    fn sdlKey(a: *App, sc: u32, ts: u64, down: bool, repeat: bool) void {
+        if (a.scene == .play) {
+            if (!repeat and !input.direct_keyboard.load(.acquire) and sc < input.joy_base) {
+                input.push(.{ .mono_ns = ts, .code = @intCast(sc), .down = down });
+            }
+            if (down and !repeat and a.pause.open) return pause.key(a, sc);
+            if (down and !repeat) {
+                switch (sc) {
+                    c.SDL_SCANCODE_ESCAPE => {
+                        const s = a.session.?;
+                        const snap = s.snapshot();
+                        // Past the last note there is nothing left to pause for, and leaving keeps the clear.
+                        if (s.canSkip(snap)) a.finishPlay(snap, true) else pause.open(a);
+                    },
+                    c.SDL_SCANCODE_RETURN => {
+                        const s = a.session.?;
+                        const snap = s.snapshot();
+                        if (s.canSkip(snap)) a.finishPlay(snap, true);
+                    },
+                    c.SDL_SCANCODE_LEFT, c.SDL_SCANCODE_RIGHT => {
+                        // Section search: autoplay only, because a seek rebuilds the sim from zero.
+                        const s = a.session.?;
+                        if (s.params.autoplay) {
+                            const step: i64 = if (sc == c.SDL_SCANCODE_LEFT) -5_000_000 else 5_000_000;
+                            s.seek(@max(s.snapshot().time_us + step, 0));
+                        }
+                    },
+                    c.SDL_SCANCODE_UP => a.cfg.green_ms += 25,
+                    c.SDL_SCANCODE_DOWN => a.cfg.green_ms = @max(a.cfg.green_ms, 75) - 25,
+                    c.SDL_SCANCODE_PAGEUP => a.cfg.setCover(a.cfg.lane_cover + 0.02),
+                    c.SDL_SCANCODE_PAGEDOWN => a.cfg.setCover(a.cfg.lane_cover - 0.02),
+                    c.SDL_SCANCODE_HOME => a.cfg.setLift(a.cfg.lift + 0.02),
+                    c.SDL_SCANCODE_END => a.cfg.setLift(a.cfg.lift - 0.02),
+                    c.SDL_SCANCODE_INSERT => a.cfg.setHidden(a.cfg.hidden + 0.02),
+                    c.SDL_SCANCODE_DELETE => a.cfg.setHidden(a.cfg.hidden - 0.02),
+                    else => {},
+                }
+            }
+            return;
+        }
+        if (!down) return;
+        switch (a.scene) {
+            .select => select.key(a, sc),
+            .result => result.key(a, sc),
+            .settings => settings.key(a, sc),
+            .skinconf => skinconf.key(a, sc),
+            .skinslots => skinslots.key(a, sc),
+            .loading => if (!repeat) a.decideKey(sc),
+            else => {},
+        }
+    }
+
+    /// Clicking anywhere jumps to that fraction of the song, in autoplay.
+    fn applyMouse(a: *App) void {
+        const g = &a.g;
+        defer {
+            g.clicked = false;
+            g.right_clicked = false;
+            g.wheel = 0;
+            a.click_key = null;
+        }
+        if (a.scene == .play or a.scene == .loading) return;
+        if (a.scene == .result and g.clicked) a.click_key = c.SDL_SCANCODE_RETURN;
+        if (g.right_clicked) {
+            if (a.scene == .settings and a.set.capture_slot != null) {
+                settings.captured(a, c.SDL_SCANCODE_ESCAPE);
+            } else a.sdlKey(c.SDL_SCANCODE_ESCAPE, 0, true, false);
+        }
+        if (a.click_key) |k| a.sdlKey(k, 0, true, false);
+        if (a.set.capture_slot != null and a.scene == .settings) return;
+        var steps: i32 = @intFromFloat(@round(g.wheel));
+        while (steps != 0) : (steps -= std.math.sign(steps)) {
+            a.sdlKey(if (steps > 0) c.SDL_SCANCODE_UP else c.SDL_SCANCODE_DOWN, 0, true, false);
+        }
+    }
+
+    fn clickSeek(a: *App, x: f32) void {
+        const s = a.session orelse return;
+        if (!s.params.autoplay or a.g.w <= 0) return;
+        s.seek(@intFromFloat(@as(f64, x / a.g.w) * @as(f64, @floatFromInt(s.chart.last_time_us))));
+    }
+
+    fn pump(a: *App) void {
+        var ev: c.SDL_Event = undefined;
+        while (c.SDL_PollEvent(&ev)) {
+            switch (ev.type) {
+                c.SDL_EVENT_QUIT => a.running = false,
+                c.SDL_EVENT_WINDOW_FOCUS_GAINED => input.focused.store(true, .release),
+                c.SDL_EVENT_WINDOW_FOCUS_LOST => input.focused.store(false, .release),
+                c.SDL_EVENT_KEY_DOWN, c.SDL_EVENT_KEY_UP => {
+                    const down = ev.type == c.SDL_EVENT_KEY_DOWN;
+                    if (a.set.capture_slot != null and down and a.scene == .settings) {
+                        settings.captured(a, @intCast(ev.key.scancode));
+                    } else a.sdlKey(ev.key.scancode, ev.key.timestamp, down, ev.key.repeat);
+                },
+                c.SDL_EVENT_TEXT_INPUT => if (a.text_active) a.text.appendSlice(a.gpa, std.mem.span(ev.text.text)) catch {},
+                c.SDL_EVENT_MOUSE_MOTION => {
+                    a.g.mx = ev.motion.x * a.g.pixelDensity();
+                    a.g.my = ev.motion.y * a.g.pixelDensity();
+                },
+                c.SDL_EVENT_MOUSE_BUTTON_DOWN, c.SDL_EVENT_MOUSE_BUTTON_UP => {
+                    a.g.mx = ev.button.x * a.g.pixelDensity();
+                    a.g.my = ev.button.y * a.g.pixelDensity();
+                    const pressed = ev.type == c.SDL_EVENT_MOUSE_BUTTON_DOWN;
+                    if (ev.button.button == c.SDL_BUTTON_LEFT) {
+                        a.g.down = pressed;
+                        if (pressed) {
+                            a.g.clicked = true;
+                            if (a.scene == .play and !a.pause.open) a.clickSeek(ev.button.x);
+                        }
+                    } else if (ev.button.button == c.SDL_BUTTON_RIGHT and pressed) a.g.right_clicked = true;
+                },
+                c.SDL_EVENT_MOUSE_WHEEL => a.g.wheel += ev.wheel.y,
+                c.SDL_EVENT_JOYSTICK_ADDED => _ = c.SDL_OpenJoystick(ev.jdevice.which),
+                c.SDL_EVENT_JOYSTICK_BUTTON_DOWN, c.SDL_EVENT_JOYSTICK_BUTTON_UP => {
+                    if (ev.jbutton.button >= input.joy_axis_base - input.joy_base) continue;
+                    const code = input.joy_base + @as(u16, ev.jbutton.button);
+                    const down = ev.type == c.SDL_EVENT_JOYSTICK_BUTTON_DOWN;
+                    if (a.set.capture_slot != null and down and a.scene == .settings) {
+                        settings.captured(a, code);
+                    } else input.push(.{ .mono_ns = ev.jbutton.timestamp, .code = code, .down = down });
+                },
+                c.SDL_EVENT_JOYSTICK_AXIS_MOTION => a.joyAxis(ev.jaxis.axis, ev.jaxis.value, ev.jaxis.timestamp),
+                else => {},
+            }
+        }
+        a.joyAxisRelease();
+    }
+
+    // Turntables report an ever-moving axis, so a direction press is any movement and the release
+    // is a short pause in movement.
+    const axis_release_ns = 60 * std.time.ns_per_ms;
+
+    fn joyAxis(a: *App, axis: u8, value: i16, ts: u64) void {
+        if (axis >= 16) return;
+        const prev = a.joy_axis[axis];
+        const delta = @as(i32, value) - prev;
+        if (@abs(delta) < 8) return;
+        a.joy_axis[axis] = value;
+        const wrapped = if (delta > 32768) delta - 65536 else if (delta < -32768) delta + 65536 else delta;
+        const pos = wrapped > 0;
+        const code = input.joy_axis_base + @as(u16, axis) * 2 + @intFromBool(!pos);
+        if (a.set.capture_slot != null and a.scene == .settings) {
+            settings.captured(a, code);
+            return;
+        }
+        const idx: usize = @as(usize, axis) * 2 + @intFromBool(!pos);
+        const other = idx ^ 1;
+        if (a.joy_axis_at[other] != 0) {
+            input.push(.{ .mono_ns = ts, .code = input.joy_axis_base + @as(u16, @intCast(other)), .down = false });
+            a.joy_axis_at[other] = 0;
+        }
+        if (a.joy_axis_at[idx] == 0) input.push(.{ .mono_ns = ts, .code = code, .down = true });
+        a.joy_axis_at[idx] = ts;
+    }
+
+    fn joyAxisRelease(a: *App) void {
+        const now = c.SDL_GetTicksNS();
+        for (&a.joy_axis_at, 0..) |*at, i| {
+            if (at.* != 0 and now -| at.* > axis_release_ns) {
+                input.push(.{ .mono_ns = now, .code = input.joy_axis_base + @as(u16, @intCast(i)), .down = false });
+                at.* = 0;
+            }
+        }
+    }
+
+    pub fn saveConfig(a: *App) void {
+        config.save(a.gpa, a.cfg);
+    }
+
+    fn shot(a: *App) void {
+        a.g.saveShot(a.shot_path.?.ptr);
+        a.running = false;
+    }
+
+    pub fn run(a: *App) void {
+        a.start_ms = c.SDL_GetTicks();
+        a.sfx_thread = c.SDL_CreateThread(sfxThread, "sfx", a);
+        while (a.running) {
+            a.g.waitFrame();
+            // Key events carry their own timestamps, so a finer poll wouldn't change judgement.
+            const pump_now = c.SDL_GetTicksNS();
+            if (pump_now - a.last_pump_ns >= 500_000) {
+                a.last_pump_ns = pump_now;
+                a.pump();
+            }
+            a.tickBgm();
+            a.pollEditor();
+            a.g.beginFrame();
+            const scene_now = a.scene;
+            switch (scene_now) {
+                .select => {
+                    if (a.last_scene != .select) a.select_shown_at = c.SDL_GetTicks();
+                    select.draw(a);
+                    if (a.select_skin == null) {
+                        const alpha = fadeInAlpha(c.SDL_GetTicks() - a.select_shown_at);
+                        if (alpha > 0) a.g.rect(0, 0, a.g.w, a.g.h, .{ .r = 0, .g = 0, .b = 0, .a = alpha });
+                    }
+                },
+                .loading => a.tickLoading(),
+                .play => a.tickPlay(),
+                .result => result.draw(a),
+                .settings => {
+                    a.g.backdrop();
+                    settings.draw(a);
+                },
+                .skinconf => {
+                    a.g.backdrop();
+                    skinconf.draw(a);
+                },
+                .skinslots => {
+                    a.g.backdrop();
+                    skinslots.draw(a);
+                },
+            }
+            a.last_scene = scene_now;
+            a.applyMouse();
+            if (a.shot_path != null and c.SDL_GetTicks() - a.start_ms >= a.shot_after_ms) a.shot();
+            a.g.present();
+        }
+        if (a.view.bga) |b| b.destroy();
+        a.view.bga = null;
+        if (a.session) |s| s.destroy();
+        a.session = null;
+        if (a.view.render_state.len > 0) a.gpa.free(a.view.render_state);
+        a.dropSkins();
+        a.saveConfig();
+        if (a.bgm_thread) |t| c.SDL_WaitThread(t, null);
+        if (a.sfx_thread) |t| c.SDL_WaitThread(t, null);
+    }
+};
+
+const select_fade_ms = 300;
+
+/// The black over the built-in song select as it comes in.
+fn fadeInAlpha(age_ms: u64) u8 {
+    if (age_ms >= select_fade_ms) return 0;
+    return @intCast(255 - age_ms * 255 / select_fade_ms);
+}
+
+test "the song select fade starts black and clears" {
+    try std.testing.expectEqual(@as(u8, 255), fadeInAlpha(0));
+    try std.testing.expectEqual(@as(u8, 128), fadeInAlpha(150));
+    try std.testing.expectEqual(@as(u8, 0), fadeInAlpha(select_fade_ms));
+}
+
+/// Load-time #IF conditions on runtime state are treated as off: state options re-evaluate per draw.
+fn noOption(_: i32) bool {
+    return false;
+}
+
+pub const Options = struct {
+    play_path: ?[]const u8 = null,
+    autoplay: bool = false,
+    replay: ?[]const u8 = null,
+    shot: ?[:0]const u8 = null,
+    shot_after_ms: u64 = 3000,
+    decide: bool = false,
+    null_audio: bool = false,
+    start_us: i64 = 0,
+    preview: ?editor.Command = null,
+};
+
+pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
+    // Vsync under Wayland stays well below the refresh rate; SDL_VIDEODRIVER still picks another.
+    if (@import("builtin").os.tag == .linux and c.SDL_getenv("SDL_VIDEODRIVER") == null) _ = c.SDL_SetHint(c.SDL_HINT_VIDEO_DRIVER, "x11,wayland");
+    if (!c.SDL_Init(c.SDL_INIT_VIDEO | c.SDL_INIT_JOYSTICK | c.SDL_INIT_EVENTS)) return error.SdlInit;
+    defer c.SDL_Quit();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const cfg = config.load(arena.allocator());
+    const flags: u64 = c.rb_window_flags() | c.SDL_WINDOW_RESIZABLE | c.SDL_WINDOW_HIGH_PIXEL_DENSITY | (if (cfg.fullscreen) @as(u64, c.SDL_WINDOW_FULLSCREEN) else 0);
+    const win = c.SDL_CreateWindow("actuon", @intCast(cfg.width), @intCast(cfg.height), flags) orelse return error.SdlWindow;
+
+    const engine = try engine_mod.Engine.create(gpa);
+    defer engine.destroy();
+    engine.gain = cfg.volume;
+    try engine.open(cfg.audio_rate, cfg.audio_frames, opts.null_audio, cfg.audio_device);
+    input.startDirect();
+
+    const app = try gpa.create(App);
+    defer gpa.destroy(app);
+    app.* = .{
+        .gpa = gpa,
+        .arena = &arena,
+        .cfg = cfg,
+        .g = try gfx.Gfx.init(gpa, win),
+        .engine = engine,
+        .db = try db_mod.openMain(gpa),
+        .sel = .{},
+    };
+    defer app.db.close();
+    defer app.g.deinit();
+    defer app.text.deinit(gpa);
+    if (opts.shot) |p| {
+        app.shot_path = p;
+        app.shot_after_ms = opts.shot_after_ms;
+    }
+    app.g.setVsync(cfg.vsync);
+    app.g.setReflex(cfg.reflex);
+    app.g.upscale_on = cfg.bga_upscale;
+    app.kept = .init(gpa);
+    defer app.kept.deinit();
+    app.sounds = .{ .gpa = gpa, .engine = app.engine, .slot = &app.sfx_slot };
+    defer app.sounds.deinit();
+    app.preview = .{ .gpa = gpa, .rate = app.engine.rate };
+    defer app.preview.deinit();
+    skin_mod.lua_mod.audio_hook = .{ .ud = app, .f = App.skinAudio };
+    // Textures stay cached, so a play's skins come up without the wait.
+    app.reloadSkins(.beat7);
+    app.dropSkins();
+    app.syncSelectSkin();
+    defer app.dropSelectSkin();
+    defer skin_mod.clearTextures(gpa, &app.g);
+    select.init(app);
+    defer select.deinit(app);
+    if (opts.play_path) |p| {
+        app.exit_after_play = opts.shot == null;
+        var params: session_mod.Params = .{ .path = p, .autoplay = opts.autoplay, .gauge = config.gaugeType(cfg.gauge), .gas = cfg.gauge == config.gas, .start_us = opts.start_us };
+        if (opts.replay) |rp| {
+            const bytes = try fs.readAlloc(arena.allocator(), rp, 1 << 28);
+            const r = try core.replay.decode(arena.allocator(), bytes);
+            params.replay = r;
+            params.gauge = r.gauge;
+            params.gas = r.gas;
+            params.random = r.random;
+            params.seed = r.seed;
+        }
+        if (opts.decide) app.decidePlay(params, true) else app.startPlay(params, true);
+    }
+    if (crash.takePrevious(arena.allocator())) app.sel.status = "The last run crashed: see crash-last.txt in the data folder";
+    if (opts.preview) |cmd| if (!cmd.stop) app.startPreview(cmd.file, cmd.measure);
+    app.run();
+    skinconf.close(app);
+    skinslots.close(app);
+    var hb = std.heap.ArenaAllocator.init(gpa);
+    defer hb.deinit();
+    editor.clearHeartbeat(hb.allocator());
+    if (app.load_thread) |t| c.SDL_WaitThread(t, null);
+    // Quit during decide or loading: nothing took what the loader made.
+    if (app.load_result) |loaded| loaded.destroy();
+    app.dropStagefile();
+}
