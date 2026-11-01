@@ -175,7 +175,8 @@ test "the menu wraps, and a course has no retry" {
     key(a, c.SDL_SCANCODE_DOWN);
     try std.testing.expectEqual(@as(u8, 0), a.pause.sel);
     try std.testing.expectEqual(Action.retry, actionOf(a, 1));
-    a.course = undefined;
+    // An undefined payload, not an undefined optional: that one reads as null on arm64.
+    a.course = @as(@typeInfo(@TypeOf(a.course)).optional.child, undefined);
     defer a.course = null;
     key(a, c.SDL_SCANCODE_UP);
     try std.testing.expectEqual(@as(u8, 1), a.pause.sel);
