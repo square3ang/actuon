@@ -79,6 +79,12 @@ pub const State = struct {
     card_job: ?*JacketJob = null,
     query: ?*ir.Query = null,
     query_title: []const u8 = "",
+    /// The selected chart's ranking, asked for once the cursor rests on it.
+    board: ?*ir.Board = null,
+    board_sha: [64]u8 = undefined,
+    board_sha_len: usize = 0,
+    board_since_ms: u64 = 0,
+    board_asked: bool = false,
     table_thread: ?*c.SDL_Thread = null,
     table_done: std.atomic.Value(bool) = .init(false),
     table_failed: std.atomic.Value(u32) = .init(0),
@@ -119,6 +125,7 @@ pub fn init(a: *App) void {
 
 pub fn deinit(a: *App) void {
     const s = &a.sel;
+    dropBoard(a);
     if (s.replay_arena) |*r| r.deinit();
     if (s.scan_thread) |t| c.SDL_WaitThread(t, null);
     if (s.table_thread) |t| c.SDL_WaitThread(t, null);
@@ -810,6 +817,9 @@ fn drawWheel(a: *App, wheel_x: f32, dock_y: f32) void {
 }
 
 /// The jacket and data of the selected row.
+/// Scrolling past charts asks the server nothing.
+const board_delay_ms = 400;
+
 fn drawChartInfo(a: *App, wheel_x: f32, dock_y: f32) void {
     const g = &a.g;
     const s = &a.sel;
@@ -859,6 +869,10 @@ fn drawChartInfo(a: *App, wheel_x: f32, dock_y: f32) void {
                 if (song.miss >= 0 and song.played > 0) g.fmt(lx + 18 * u, iy + 40 * u, g.scaled(12), gfx.dim, "BP {d}   PLAYS {d}", .{ song.miss, song.played });
                 g.digits(lx + lw * 0.74, iy + 14 * u, g.scaled(48), 5, song.ex, gfx.white);
                 if (song.clear > 0) g.textRight(result.rankOf(song.ex, song.notes), lx + lw - 10 * u, iy + 14 * u, g.scaled(48), gfx.cyan);
+                if (s.board) |b| {
+                    var place: [64]u8 = undefined;
+                    _ = g.text(b.placeText(&place), lx + 18 * u, iy + sh - 20 * u, g.scaled(12), gfx.sky);
+                }
             }
         } else {
             g.textClip(s.rows[s.cursor].label, lx, iy, lw, g.scaled(32), gfx.white);
@@ -958,7 +972,36 @@ fn drawDock(a: *App, dock_y: f32) void {
     }
 }
 
+/// Forgets the ranking, so it is asked for again: a play or a sign-in changes it.
+pub fn dropBoard(a: *App) void {
+    const s = &a.sel;
+    if (s.board) |b| b.release();
+    s.board = null;
+    a.select_state.ir_board = null;
+    s.board_sha_len = 0;
+    s.board_asked = false;
+}
+
+/// Only when signed in, so browsing tells no server what is in the library before that.
+fn tickBoard(a: *App, now_ms: u64) void {
+    const s = &a.sel;
+    const signed_in = a.cfg.ir_url.len > 0 and a.cfg.ir_token.len > 0;
+    const sha = if (signed_in) if (selectedSong(s)) |song| song.sha256 else "" else "";
+    if (!std.mem.eql(u8, sha, s.board_sha[0..s.board_sha_len])) {
+        dropBoard(a);
+        s.board_sha_len = @min(sha.len, s.board_sha.len);
+        @memcpy(s.board_sha[0..s.board_sha_len], sha[0..s.board_sha_len]);
+        s.board_since_ms = now_ms;
+        return;
+    }
+    if (sha.len == 0 or s.board_asked or now_ms - s.board_since_ms < board_delay_ms) return;
+    s.board_asked = true;
+    s.board = ir.startRanking(a.gpa, a.cfg.ir_url, a.cfg.ir_token, sha);
+    a.select_state.ir_board = s.board;
+}
+
 pub fn draw(a: *App) void {
+    tickBoard(a, c.SDL_GetTicks());
     tickScan(a);
     updatePreview(a);
     tickDownload(a);
@@ -2243,6 +2286,38 @@ test "escape drops a search before it leaves the view" {
     key(a, c.SDL_SCANCODE_ESCAPE);
     try std.testing.expect(!a.sel.searching);
     try expectRows(a, &.{ "Library", "Table", "Courses" });
+}
+
+test "a chart's ranking is asked for once the cursor rests, and only when signed in" {
+    const a = try testing.open();
+    defer testing.close(a);
+    var song: db_mod.Song = undefined;
+    song.sha256 = "aaa";
+    const rows = [_]Row{.{ .label = "x", .song = song }};
+    const kept = a.sel.rows;
+    defer a.sel.rows = kept;
+    a.sel.rows = @constCast(&rows);
+    a.sel.cursor = 0;
+
+    a.cfg.ir_url = "http://127.0.0.1:1";
+    a.cfg.ir_token = "";
+    tickBoard(a, 1000);
+    tickBoard(a, 5000);
+    try std.testing.expect(a.sel.board == null);
+
+    a.cfg.ir_token = "tok";
+    tickBoard(a, 5000);
+    tickBoard(a, 5000 + board_delay_ms - 1);
+    try std.testing.expect(a.sel.board == null);
+    tickBoard(a, 5000 + board_delay_ms);
+    const first = a.sel.board.?;
+    try std.testing.expectEqual(first, a.select_state.ir_board.?);
+    tickBoard(a, 9000);
+    try std.testing.expectEqual(first, a.sel.board.?);
+
+    while (!first.ready()) c.SDL_Delay(5);
+    dropBoard(a);
+    try std.testing.expect(a.select_state.ir_board == null);
 }
 
 test "the IR key asks for a server first" {

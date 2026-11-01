@@ -292,8 +292,6 @@ pub const State = struct {
             1202 => return se.replays < 4,
             1203 => return se.replays >= 4,
             1205...1208 => return se.replay_slot == id - 1205,
-            50 => return true,
-            51 => return false,
             100 => return se.clear == 0,
             101 => return se.clear == 1,
             1100 => return se.clear == 2,
@@ -941,6 +939,20 @@ test "hits fold into the bin of their note, once each" {
     st.foldHits(&snap);
     try std.testing.expectEqual(@as(u16, 1), st.graph_judged[st.binOf(1_000_000)][2]);
     try std.testing.expectEqual(@as(u16, 0), st.graph_judged[st.binOf(9_000_000)][4]);
+}
+
+test "song select tells the skin about the IR" {
+    var st: State = .{ .select = .{} };
+    try std.testing.expect(State.opt(&st, 50));
+    try std.testing.expect(!State.opt(&st, 51));
+    var b: ir.Board = .{ .gpa = std.testing.allocator, .total = 7 };
+    b.state.store(ir.Board.accepted, .release);
+    st.ir_board = &b;
+    try std.testing.expect(State.opt(&st, 51));
+    try std.testing.expect(!State.opt(&st, 50));
+    try std.testing.expect(State.opt(&st, 602));
+    try std.testing.expectEqual(@as(?i64, 7), State.num(&st, 200));
+    try std.testing.expectEqualStrings("Actuon IR", State.str(&st, 1020));
 }
 
 test "song select tells the skin its panel and options" {

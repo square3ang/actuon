@@ -58,6 +58,7 @@ pub fn capture(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, nat
     r.saved = false;
     r.ir_used = false;
     dropBoard(a);
+    select.dropBoard(a);
     r.paused = s.was_paused;
     r.shown_at = c.SDL_GetTicks();
     r.leave_at = 0;
@@ -124,11 +125,11 @@ pub fn rankOf(ex: u32, notes: u32) []const u8 {
     return "F";
 }
 
-fn irLabel(r: *const State) []const u8 {
+fn irLabel(r: *const State, buf: []u8) []const u8 {
     const b = r.board orelse return "";
     return switch (b.state.load(.acquire)) {
         ir.Board.pending => "IR: uploading...",
-        ir.Board.accepted => "IR: accepted",
+        ir.Board.accepted => b.placeText(buf),
         else => "IR: upload failed",
     };
 }
@@ -169,7 +170,8 @@ fn drawSkinned(a: *App, sk: *@import("../skin/model.zig").Skin) void {
     if (r.ir_used) {
         const u = g.h / 720;
         const size = g.scaled(14);
-        const label = irLabel(r);
+        var place: [64]u8 = undefined;
+        const label = irLabel(r, &place);
         const w = g.measure(label, size) + 24 * u;
         g.panel(g.w - w - 12 * u, g.h - 44 * u, w, 32 * u, "");
         g.textRight(label, g.w - 24 * u, g.h - 37 * u, size, gfx.sky);
@@ -217,7 +219,8 @@ fn drawExPanel(a: *App, ease: f32, ex: u32) void {
     const lamp_y = 622 * u;
     if (r.recorded or r.ir_used) g.panel(30 * u, lamp_y, g.w * 0.48 - 44 * u, 48 * u, "");
     if (r.recorded) g.fmt(44 * u, lamp_y + 14 * u, g.scaled(14), gfx.dim, "BEST LAMP  {s}", .{clear_names[r.prev_clear]});
-    if (r.ir_used) g.textRight(irLabel(r), g.w * 0.48 - 30 * u, lamp_y + 14 * u, g.scaled(14), gfx.sky);
+    var place: [64]u8 = undefined;
+    if (r.ir_used) g.textRight(irLabel(r, &place), g.w * 0.48 - 30 * u, lamp_y + 14 * u, g.scaled(14), gfx.sky);
 }
 
 /// Judges slide in from the right, one after another. Stats and the gauge follow.

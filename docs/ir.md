@@ -76,6 +76,9 @@ Nothing checks a claim, so anyone can claim any score. Rankings mark it unverifi
 table standings leave it out, and any verified score of the same player on that chart replaces it. Download merges your rows on the server into the local database through `GET /me/scores`.
 Neither direction lowers a score.
 
+Once signed in, song select fetches the selected chart's ranking after the cursor rests for 0.4 s. It shows in the built-in
+BEST panel and reaches select skins through the same ids as below, and skins' IR online option turns on.
+
 Result skins get the chart's ranking, your rank before and after the upload, and the clear counts through beatoraja's IR
 ids. Your own row is named `YOU`, and unverified rows end in `(unv.)`. The wheel, Up and Down, and the skin's slider
 scroll the list through the first 1000 places.

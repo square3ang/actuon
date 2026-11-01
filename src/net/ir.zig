@@ -63,6 +63,20 @@ pub const Board = struct {
         return b.state.load(.acquire) != pending;
     }
 
+    /// The one line a built-in screen shows.
+    pub fn placeText(b: *const Board, buf: []u8) []const u8 {
+        return switch (b.state.load(.acquire)) {
+            pending => "IR: loading...",
+            failed => "IR: unavailable",
+            else => if (b.total == 0)
+                "IR: no scores yet"
+            else if (b.rank == 0)
+                std.fmt.bufPrint(buf, "IR: {d} players", .{b.total}) catch ""
+            else
+                std.fmt.bufPrint(buf, "IR: #{d} of {d}", .{ b.rank, b.total }) catch "",
+        };
+    }
+
     fn percent(b: *const Board, n: i64) i64 {
         return if (b.total > 0) @divTrunc(n * 100, b.total) else 0;
     }
@@ -208,6 +222,48 @@ fn uploadThread(ud: ?*anyopaque) callconv(.c) c_int {
     gpa.free(u.replay);
     gpa.destroy(u);
     return 0;
+}
+
+const RankingFetch = struct { base: []u8, token: []u8, sha: []u8, board: *Board };
+
+fn rankingThread(ud: ?*anyopaque) callconv(.c) c_int {
+    const f: *RankingFetch = @ptrCast(@alignCast(ud));
+    const gpa = f.board.gpa;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    if (fetchStanding(arena.allocator(), f.base, f.token, f.sha)) |s| {
+        fillBoard(f.board, s);
+        f.board.state.store(Board.accepted, .release);
+    } else |e| {
+        std.log.warn("IR ranking: {t}", .{e});
+        f.board.state.store(Board.failed, .release);
+    }
+    f.board.release();
+    gpa.free(f.base);
+    gpa.free(f.token);
+    gpa.free(f.sha);
+    gpa.destroy(f);
+    return 0;
+}
+
+/// A chart's ranking with no upload, for song select. The caller owns one reference, as with startUpload.
+pub fn startRanking(gpa: std.mem.Allocator, base: []const u8, token: []const u8, sha: []const u8) ?*Board {
+    const board = gpa.create(Board) catch return null;
+    board.* = .{ .gpa = gpa };
+    const f = gpa.create(RankingFetch) catch return null;
+    f.* = .{
+        .base = gpa.dupe(u8, base) catch return null,
+        .token = gpa.dupe(u8, token) catch return null,
+        .sha = gpa.dupe(u8, sha) catch return null,
+        .board = board,
+    };
+    if (c.SDL_CreateThread(rankingThread, "ir-ranking", f)) |t| {
+        c.SDL_DetachThread(t);
+    } else {
+        board.state.store(Board.failed, .release);
+        board.release();
+    }
+    return board;
 }
 
 /// The caller owns one reference to the answer and gives it back with release.
@@ -598,6 +654,27 @@ pub fn startAccount(gpa: std.mem.Allocator, base: []const u8, name: []const u8, 
         s.done.store(true, .release);
     }
     return s;
+}
+
+test "a board says where the player stands" {
+    var buf: [64]u8 = undefined;
+    var b: Board = .{ .gpa = std.testing.allocator };
+    try std.testing.expectEqualStrings("IR: loading...", b.placeText(&buf));
+    b.state.store(Board.failed, .release);
+    try std.testing.expectEqualStrings("IR: unavailable", b.placeText(&buf));
+    b.state.store(Board.accepted, .release);
+    try std.testing.expectEqualStrings("IR: no scores yet", b.placeText(&buf));
+    b.total = 12;
+    try std.testing.expectEqualStrings("IR: 12 players", b.placeText(&buf));
+    b.rank = 3;
+    try std.testing.expectEqualStrings("IR: #3 of 12", b.placeText(&buf));
+}
+
+test "a ranking that cannot be fetched fails instead of hanging" {
+    const b = startRanking(std.testing.allocator, "http://127.0.0.1:1", "t", "a").?;
+    defer b.release();
+    while (!b.ready()) c.SDL_Delay(5);
+    try std.testing.expectEqual(@as(u8, Board.failed), b.state.load(.acquire));
 }
 
 test "every refusal explains itself" {

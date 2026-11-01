@@ -323,7 +323,7 @@ fn pollSync(a: *App) void {
 
 fn startAccount(a: *App, it: Item) void {
     if (a.set.account != null) return;
-    if (!isWebUrl(a.cfg.ir_url)) return say(a, "Set an IR server first", .{});
+    if (!isWebUrl(a.cfg.ir_url)) return say(a, "Set an IR server first, like https://ir.actuon.app", .{});
     if (it == .ir_rename and a.cfg.ir_token.len == 0) return say(a, "Sign in to an IR server first", .{});
     startEditing(a, it);
 }
@@ -343,6 +343,7 @@ fn pollAccount(a: *App) void {
         if (a.arena.allocator().dupe(u8, token)) |kept| {
             a.cfg.ir_token = kept;
             a.saveConfig();
+            select.dropBoard(a);
             say(a, "Signed in as {s}", .{s.name});
         } else |_| say(a, "Out of memory, not signed in", .{});
     } else if (s.action == .rename and s.status == 200) {
@@ -1118,7 +1119,8 @@ fn commit(a: *App, it: Item) void {
             a.cfg.green_ms = greenMs(shown);
             a.saveConfig();
         },
-        .ir_url => a.cfg.ir_url = v,
+        // A bare host is what people type, and a password must not go out over plain HTTP by accident.
+        .ir_url => a.cfg.ir_url = if (v.len == 0 or isWebUrl(v)) v else std.fmt.allocPrint(al, "https://{s}", .{v}) catch return,
         .ir_rename => {
             if (v.len == 0) return;
             a.set.account = ir.startAccount(a.gpa, a.cfg.ir_url, v, a.cfg.ir_token, .rename);
@@ -1437,6 +1439,23 @@ test "signing up asks for a name, then sends the password as typed" {
     pollAccount(a);
     try std.testing.expect(a.set.account == null);
     try std.testing.expectEqualStrings("", a.cfg.ir_token);
+}
+
+test "an IR server typed without a scheme uses https" {
+    const a = try testing.open();
+    defer testing.close(a);
+    openItem(a, .ir_url);
+    for ([_][2][]const u8{
+        .{ "ir.actuon.app", "https://ir.actuon.app" },
+        .{ "http://127.0.0.1:8730", "http://127.0.0.1:8730" },
+        .{ "", "" },
+    }) |case| {
+        key(a, c.SDL_SCANCODE_RETURN);
+        a.text.clearRetainingCapacity();
+        try a.text.appendSlice(a.gpa, case[0]);
+        key(a, c.SDL_SCANCODE_RETURN);
+        try std.testing.expectEqualStrings(case[1], a.cfg.ir_url);
+    }
 }
 
 test "renaming needs a sign-in and sends the token" {
