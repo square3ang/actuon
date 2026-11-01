@@ -177,7 +177,7 @@ fn bearer(a: std.mem.Allocator, token: []const u8) ![]const std.http.Header {
 
 /// Submit, and when the server has never seen this chart (428) upload it and submit again.
 /// `prev_rank` gets the player's place from before this score, when the caller wants it.
-pub fn submit(gpa: std.mem.Allocator, base: []const u8, token: []const u8, sha: []const u8, chart_path: []const u8, replay: []const u8, prev_rank: ?*i64) !u16 {
+pub fn submit(gpa: std.mem.Allocator, client: *std.http.Client, base: []const u8, token: []const u8, sha: []const u8, chart_path: []const u8, replay: []const u8, prev_rank: ?*i64) !u16 {
     // Without the file nothing says how the chart should be parsed.
     if (chart_path.len == 0) return error.NoChart;
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -186,13 +186,13 @@ pub fn submit(gpa: std.mem.Allocator, base: []const u8, token: []const u8, sha: 
     const hs = try bearer(a, token);
     const format = chartFormat(chart_path);
     const url = try std.fmt.allocPrint(a, "{s}/scores/{s}?format={d}", .{ base, sha, format });
-    var r = try http.request(a, .POST, url, replay, hs);
+    var r = try http.send(client, a, .POST, url, replay, hs);
     if (r.status == 428) {
         const chart = try fs.readAlloc(a, chart_path, 16 << 20);
         const put = try std.fmt.allocPrint(a, "{s}/charts/{s}?format={d}", .{ base, sha, format });
-        const up = try http.request(a, .PUT, put, chart, hs);
+        const up = try http.send(client, a, .PUT, put, chart, hs);
         if (up.status != 200) return up.status;
-        r = try http.request(a, .POST, url, replay, hs);
+        r = try http.send(client, a, .POST, url, replay, hs);
     }
     if (prev_rank) |out| if (r.status == 200) {
         const v = std.json.parseFromSliceLeaky(struct { prev_rank: i64 = 0 }, a, r.body, .{ .ignore_unknown_fields = true }) catch return r.status;
@@ -206,7 +206,9 @@ fn uploadThread(ud: ?*anyopaque) callconv(.c) c_int {
     var arena = std.heap.ArenaAllocator.init(u.gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const code = submit(u.gpa, u.base, u.token, u.sha, u.chart_path, u.replay, &u.board.prev_rank) catch |e| blk: {
+    var client = http.client(u.gpa);
+    defer client.deinit();
+    const code = submit(u.gpa, &client, u.base, u.token, u.sha, u.chart_path, u.replay, &u.board.prev_rank) catch |e| blk: {
         std.log.warn("IR upload: {t}", .{e});
         break :blk 0;
     };
@@ -504,22 +506,79 @@ pub const Sync = struct {
     }
 };
 
+/// Below the server's 4 checks at once, so that one player's sync leaves room for a score just played.
+const push_workers = 3;
+const push_tries = 3;
+
+const Push = struct {
+    s: *Sync,
+    pending: []const Pending,
+    next: *std.atomic.Value(usize),
+    accepted: u32 = 0,
+    failed: u32 = 0,
+};
+
+/// A kept connection the server has closed fails once, and a busy server says 503: both pass on another try.
+fn submitPatiently(s: *Sync, client: *std.http.Client, p: Pending, replay: []const u8) u16 {
+    var tries: u32 = 1;
+    while (true) : (tries += 1) {
+        const code = submit(s.gpa, client, s.base, s.token, p.sha, p.path, replay, null) catch |e| switch (e) {
+            error.NoChart => return 0,
+            else => @as(u16, 0),
+        };
+        if (tries == push_tries or (code != 0 and code != 503)) return code;
+        if (code == 503) c.SDL_Delay(1000);
+    }
+}
+
+fn pushReplays(w: *Push) !void {
+    const d = try db_mod.openMain(w.s.gpa);
+    defer d.close();
+    const load = try d.prepare("SELECT data FROM replay WHERE id=?1");
+    defer load.deinit();
+    var client = http.client(w.s.gpa);
+    defer client.deinit();
+    while (true) {
+        const i = w.next.fetchAdd(1, .monotonic);
+        if (i >= w.pending.len) return;
+        defer _ = w.s.progress.fetchAdd(1, .release);
+        load.bindInt(1, w.pending[i].id);
+        defer load.reset();
+        // One bad replay or missing chart must not stop the rest.
+        const code = if (try load.step()) submitPatiently(w.s, &client, w.pending[i], load.text(0)) else 0;
+        if (code == 200) w.accepted += 1 else w.failed += 1;
+    }
+}
+
+fn pushThread(ud: ?*anyopaque) callconv(.c) c_int {
+    const w: *Push = @ptrCast(@alignCast(ud));
+    pushReplays(w) catch |e| std.log.warn("IR sync worker: {t}", .{e});
+    return 0;
+}
+
+/// shortcut: every new chart still costs a refused POST before its PUT, ask for the known list first if that shows.
+fn pushAllReplays(s: *Sync, pending: []const Pending) !void {
+    var next: std.atomic.Value(usize) = .init(0);
+    var workers: [push_workers]Push = @splat(.{ .s = s, .pending = pending, .next = &next });
+    var threads: [push_workers - 1]?*c.SDL_Thread = @splat(null);
+    // A worker that fails to start only slows the rest down; this thread sees every replay handled.
+    for (&threads, workers[1..]) |*t, *w| t.* = c.SDL_CreateThread(pushThread, "ir-push", w);
+    const own = pushReplays(&workers[0]);
+    for (threads) |t| if (t) |started| c.SDL_WaitThread(started, null);
+    for (workers) |w| {
+        s.accepted += w.accepted;
+        s.failed += w.failed;
+    }
+    return own;
+}
+
 fn pushAll(s: *Sync, d: db_mod.Db) !void {
     var arena = std.heap.ArenaAllocator.init(s.gpa);
     defer arena.deinit();
     const a = arena.allocator();
     const pending = try pendingReplays(a, d, try fetchMine(a, s.base, s.token));
     s.total.store(@intCast(pending.len), .release);
-    const load = try d.prepare("SELECT data FROM replay WHERE id=?1");
-    defer load.deinit();
-    for (pending, 1..) |p, i| {
-        defer s.progress.store(@intCast(i), .release);
-        load.bindInt(1, p.id);
-        defer load.reset();
-        // One bad replay or missing chart must not stop the rest.
-        const code = if (try load.step()) submit(s.gpa, s.base, s.token, p.sha, p.path, load.text(0), null) catch 0 else 0;
-        if (code == 200) s.accepted += 1 else s.failed += 1;
-    }
+    try pushAllReplays(s, pending);
     // Asked again because the replays above just changed the answer.
     try sendClaims(s, a, try pendingClaims(a, d, try fetchMine(a, s.base, s.token)));
 }
@@ -701,6 +760,57 @@ test "sync uploads only what the server lacks, once per improvement" {
     try std.testing.expectEqualStrings("new", p[1].sha);
     try std.testing.expectEqualStrings("/d.bms", p[1].path);
     try std.testing.expectEqualStrings("new", p[2].sha); // lower EX, but the only HARD clear
+}
+
+test "workers send every replay once and try again on a busy server" {
+    const a = std.testing.allocator;
+    const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    var server = try address.listen(fs.io, .{ .reuse_address = true });
+    defer server.deinit(fs.io);
+    const total = 5;
+    const Peer = struct {
+        fn run(listener: *std.Io.net.Server, seen: *[total + 1][]const u8, names: *[total + 1][64]u8) void {
+            for (seen, names, 0..) |*one, *name, n| {
+                const stream = listener.accept(fs.io) catch return;
+                defer stream.close(fs.io);
+                var in_buf: [1024]u8 = undefined;
+                var reader = stream.reader(fs.io, &in_buf);
+                const start = reader.interface.takeDelimiterInclusive('\n') catch return;
+                const at = std.mem.indexOf(u8, start, "/scores/") orelse return;
+                one.* = std.fmt.bufPrint(name, "{s}", .{start[at + 8 ..][0..1]}) catch return;
+                while (true) {
+                    const line = reader.interface.takeDelimiterInclusive('\n') catch return;
+                    if (line.len == 2) break;
+                }
+                reader.interface.discardAll(1) catch return;
+                var out_buf: [128]u8 = undefined;
+                var writer = stream.writer(fs.io, &out_buf);
+                const status = if (n == 0) "503 Busy" else "200 OK";
+                writer.interface.print("HTTP/1.1 {s}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n", .{status}) catch return;
+                writer.interface.flush() catch return;
+            }
+        }
+    };
+    var seen: [total + 1][]const u8 = @splat("");
+    var names: [total + 1][64]u8 = undefined;
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{ &server, &seen, &names });
+    defer thread.join();
+
+    const d = try db_mod.openMain(a);
+    defer d.close();
+    try d.exec("DELETE FROM replay; INSERT INTO replay(id,sha256,ex,clear,data) VALUES(1,'a',1,1,'r'),(2,'b',1,1,'r'),(3,'c',1,1,'r'),(4,'d',1,1,'r'),(5,'e',1,1,'r')");
+    defer d.exec("DELETE FROM replay") catch {};
+    const pending = [total]Pending{
+        .{ .id = 1, .sha = "a", .path = "/a.bms" }, .{ .id = 2, .sha = "b", .path = "/b.bms" }, .{ .id = 3, .sha = "c", .path = "/c.bms" },
+        .{ .id = 4, .sha = "d", .path = "/d.bms" }, .{ .id = 5, .sha = "e", .path = "/e.bms" },
+    };
+    var base_buf: [64]u8 = undefined;
+    const base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{server.socket.address.getPort()});
+    var s: Sync = .{ .gpa = a, .base = base, .token = @constCast("t"), .upload = true };
+    try pushAllReplays(&s, &pending);
+    try std.testing.expectEqual(@as(u32, total), s.accepted);
+    try std.testing.expectEqual(@as(u32, 0), s.failed);
+    try std.testing.expectEqual(@as(u32, total), s.progress.load(.acquire));
 }
 
 test "only scores the server cannot match become claims" {

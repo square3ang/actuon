@@ -5,11 +5,20 @@ const fs = @import("fs.zig");
 pub const Response = struct { status: u16, body: []u8 };
 
 pub fn request(gpa: std.mem.Allocator, method: std.http.Method, url: []const u8, payload: ?[]const u8, headers: []const std.http.Header) !Response {
-    var client: std.http.Client = .{ .allocator = gpa, .io = fs.io };
-    defer client.deinit();
+    var c = client(gpa);
+    defer c.deinit();
+    return send(&c, gpa, method, url, payload, headers);
+}
+
+pub fn client(gpa: std.mem.Allocator) std.http.Client {
+    return .{ .allocator = gpa, .io = fs.io };
+}
+
+/// Keeps the client's connection for the next call, which spares a TLS handshake per request.
+pub fn send(c: *std.http.Client, gpa: std.mem.Allocator, method: std.http.Method, url: []const u8, payload: ?[]const u8, headers: []const std.http.Header) !Response {
     var body: std.Io.Writer.Allocating = .init(gpa);
     errdefer body.deinit();
-    const res = try client.fetch(.{
+    const res = try c.fetch(.{
         .location = .{ .url = url },
         .method = method,
         .payload = payload,
@@ -41,13 +50,13 @@ pub const Progress = struct {
 
 /// Streams a response to a file, so a big package never sits in memory.
 pub fn download(gpa: std.mem.Allocator, url: []const u8, path: []const u8, progress: *Progress) !void {
-    var client: std.http.Client = .{ .allocator = gpa, .io = fs.io };
-    defer client.deinit();
+    var c = client(gpa);
+    defer c.deinit();
     const file = try std.Io.Dir.cwd().createFile(fs.io, path, .{});
     defer file.close(fs.io);
     var buf: [1 << 16]u8 = undefined;
     var w = file.writer(fs.io, &buf);
-    var req = try client.request(.GET, try std.Uri.parse(url), .{ .redirect_behavior = @fromBackingInt(@intCast(3)), .headers = .{ .accept_encoding = .omit } });
+    var req = try c.request(.GET, try std.Uri.parse(url), .{ .redirect_behavior = @fromBackingInt(@intCast(3)), .headers = .{ .accept_encoding = .omit } });
     defer req.deinit();
     try req.sendBodiless();
     var redirect_buf: [8192]u8 = undefined;
@@ -118,6 +127,44 @@ test "a request sends its headers and does not follow a redirect with them" {
     try std.testing.expectEqual(@as(u16, 302), r.status);
     try std.testing.expect(std.mem.indexOf(u8, seen[0..len], "Authorization: Bearer t\r\n") != null);
     try std.testing.expectEqual(@as(usize, 1), accepted);
+}
+
+test "one client sends two requests over one connection" {
+    const a = std.testing.allocator;
+    const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    var server = try address.listen(fs.io, .{ .reuse_address = true });
+    defer server.deinit(fs.io);
+    const Peer = struct {
+        fn run(s: *std.Io.net.Server, answered: *usize) void {
+            const stream = s.accept(fs.io) catch return;
+            defer stream.close(fs.io);
+            var in_buf: [1024]u8 = undefined;
+            var reader = stream.reader(fs.io, &in_buf);
+            var out_buf: [256]u8 = undefined;
+            var writer = stream.writer(fs.io, &out_buf);
+            while (answered.* < 2) {
+                while (true) {
+                    const line = reader.interface.takeDelimiterInclusive('\n') catch return;
+                    if (line.len == 2) break;
+                }
+                writer.interface.writeAll("HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n") catch return;
+                writer.interface.flush() catch return;
+                answered.* += 1;
+            }
+        }
+    };
+    var answered: usize = 0;
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{ &server, &answered });
+    defer thread.join();
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{server.socket.address.getPort()});
+    var c = client(a);
+    defer c.deinit();
+    for (0..2) |_| {
+        const r = try send(&c, a, .GET, url, null, &.{});
+        defer a.free(r.body);
+        try std.testing.expectEqual(@as(u16, 200), r.status);
+    }
 }
 
 test "url join" {
