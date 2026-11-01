@@ -221,7 +221,7 @@ fn document(title: &str, main: impl IntoView + 'static) -> String {
                 <link rel="icon" href="/icon.svg" />
             </head>
             <body>
-                <header><a href="/"><img src="/logo.svg" alt="actuon" /></a></header>
+                <header><a href="https://actuon.app"><img src="/logo.svg" alt="actuon" /></a></header>
                 <main>{main}</main>
             </body>
         </html>
