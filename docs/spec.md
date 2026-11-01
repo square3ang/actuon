@@ -18,6 +18,10 @@ derives from decompilation. "LR2 rule" below means lr2oraja's implementation of 
 The simulation never reads a clock. It takes timestamped input and steps on an absolute 1 ms grid, so frame rate cannot
 change a result. A replay is the input stream, and the IR server re-simulates it with this same code through a C ABI.
 
+During play, song time is the monotonic clock plus a fixed offset. The offset is measured from the audio output in the
+first second after a start, seek or resume, then stays put. After that the audio follows the clock: it slews by up to
+0.4% to remove drift, and skips forward when it falls more than 50 ms behind.
+
 ## Intentional differences from beatoraja
 
 beatoraja's parser ignores two commands that the BMS format defines and that we implement:

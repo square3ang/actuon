@@ -36,7 +36,7 @@ The next-generation BMS player.
 ```mermaid
 flowchart LR
     I[Input hardware timestamps] --> S[Judge]
-    A[Audio clock] --> S
+    A[Tick clock] --> S
     C[Chart] --> S
     S --> D[(Scores and replays)]
     D -. optional .-> R[Self-hosted IR]

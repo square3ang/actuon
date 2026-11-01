@@ -9,6 +9,14 @@ const decode = @import("decode.zig");
 pub const max_voices = 256;
 /// Largest buffer the settings allow.
 const feed_max = 4096;
+/// Song frames one output buffer can consume: `feed_max` plus the largest slew.
+const song_max = feed_max + feed_max / 256 + 1;
+/// Slew at most one frame per this many: 0.4%, about 7 cents.
+const slew_period = 256;
+/// Audio this close to the tick clock is left alone, so jitter cannot wobble the pitch.
+const sync_deadband_us = 2_000;
+/// Audio further behind than this, such as after an underrun, skips instead of slewing.
+const sync_skip_us = 50_000;
 pub const ui_slots = 11;
 /// Menu music takes turns on these, so the old track can fade under the new one. Three because a
 /// new track can start before the last fade ended.
@@ -64,9 +72,16 @@ pub const Engine = struct {
     cmd_head: std.atomic.Value(u32) = .init(0),
     cmd_tail: std.atomic.Value(u32) = .init(0),
     gain: f32 = 1,
-    /// Clock offset (song µs - monotonic µs), smoothed; the writer thread is the only writer.
+    /// Tick clock (song µs - monotonic µs), fixed once settled; the writer thread is the only writer.
     clock_offset_us: std.atomic.Value(i64) = .init(0),
     clock_valid: std.atomic.Value(bool) = .init(false),
+    // Audio sync state, writer thread only.
+    settle_frames: i64 = 0,
+    audio_err_us: i64 = 0,
+    slew: i64 = 0,
+    slew_carry: u32 = 0,
+    skip_frames: i64 = 0,
+    song_buf: [song_max * 2]f32 = undefined,
     host: HostInfo = .{},
     /// Drives the mixer, writing to `stream` or, on the null output, only keeping time.
     feed_thread: ?*c.SDL_Thread = null,
@@ -234,7 +249,7 @@ pub const Engine = struct {
         const latency_s = e.host.latency_ms / 1000;
         while (!e.feed_quit.load(.acquire)) {
             e.mix(&buf, frames);
-            if (!e.paused) e.updateClock(latency_s + buffer_s);
+            if (!e.paused) e.updateClock(latency_s + buffer_s, frames);
             const err = c.Pa_WriteStream(e.stream, &buf, frames);
             if (err != c.paNoError and err != c.paOutputUnderflowed) c.SDL_Delay(1);
         }
@@ -260,7 +275,7 @@ pub const Engine = struct {
                 continue;
             }
             e.mix(&buf, 512);
-            e.updateClock(0);
+            if (!e.paused) e.updateClock(0, 512);
             next += @as(u64, 512) * 1_000_000_000 / e.rate;
         }
         return 0;
@@ -418,6 +433,25 @@ pub const Engine = struct {
         e.processCmds();
         e.mixUi(out, frames);
         if (e.paused) return;
+        // Skipping through the mixer keeps scheduled notes and voice positions right.
+        while (e.skip_frames > 0) {
+            const n: usize = @intCast(@min(e.skip_frames, feed_max));
+            e.mixSong(n);
+            e.skip_frames -= @intCast(n);
+        }
+        const n: usize = @intCast(@as(i64, @intCast(frames)) + e.slew);
+        e.mixSong(n);
+        e.addSong(out, frames, n);
+        // Soft clip only when needed: a dense chart routinely sums past full scale.
+        for (out[0 .. frames * 2]) |*s| {
+            const x = s.*;
+            if (x > 1 or x < -1) s.* = std.math.clamp(x, -1.5, 1.5) * (1 - std.math.clamp(x, -1.5, 1.5) * std.math.clamp(x, -1.5, 1.5) / 6.75);
+        }
+    }
+
+    /// Renders the next `frames` of the song into `song_buf` and advances the song position.
+    fn mixSong(e: *Engine, frames: usize) void {
+        @memset(e.song_buf[0 .. frames * 2], 0);
         const f0 = e.frame.load(.monotonic);
         const f1 = f0 + @as(i64, @intCast(frames));
         while (e.sched_pos < e.schedule.len and e.schedule[e.sched_pos].frame < f1) : (e.sched_pos += 1) {
@@ -432,21 +466,34 @@ pub const Engine = struct {
             const avail = (v.data.len - v.pos) / 2;
             const n = @min(frames - skip, avail);
             const src = v.data[v.pos..][0 .. n * 2];
-            const dst = out[skip * 2 ..][0 .. n * 2];
+            const dst = e.song_buf[skip * 2 ..][0 .. n * 2];
             const g = v.gain * e.gain;
             for (dst, src) |*d, s| d.* += s * g;
             v.pos += n * 2;
             if (v.pos >= v.data.len) v.data = &.{};
         }
-        // Soft clip only when needed: a dense chart routinely sums past full scale.
-        for (out[0 .. frames * 2]) |*s| {
-            const x = s.*;
-            if (x > 1 or x < -1) s.* = std.math.clamp(x, -1.5, 1.5) * (1 - std.math.clamp(x, -1.5, 1.5) * std.math.clamp(x, -1.5, 1.5) / 6.75);
-        }
         e.frame.store(f1, .release);
     }
 
-    fn updateClock(e: *Engine, dac_delay_s: f64) void {
+    /// Adds `n` rendered frames to `out`, stretched to `frames`. The ends line up with the
+    /// rendered ends, so consecutive buffers join without keeping resampler state.
+    fn addSong(e: *const Engine, out: [*]f32, frames: usize, n: usize) void {
+        if (n == frames) {
+            for (out[0 .. frames * 2], e.song_buf[0 .. frames * 2]) |*d, s| d.* += s;
+            return;
+        }
+        const step = @as(f64, @floatFromInt(n - 1)) / @as(f64, @floatFromInt(frames - 1));
+        for (0..frames) |i| {
+            const pos = @as(f64, @floatFromInt(i)) * step;
+            const j: usize = @intFromFloat(pos);
+            const k = @min(j + 1, n - 1);
+            const frac: f32 = @floatCast(pos - @as(f64, @floatFromInt(j)));
+            out[i * 2] += std.math.lerp(e.song_buf[j * 2], e.song_buf[k * 2], frac);
+            out[i * 2 + 1] += std.math.lerp(e.song_buf[j * 2 + 1], e.song_buf[k * 2 + 1], frac);
+        }
+    }
+
+    fn updateClock(e: *Engine, dac_delay_s: f64, frames: u32) void {
         // Song time of what the listener hears right now, relative to the shared monotonic clock.
         const now_us: i64 = @intCast(c.SDL_GetTicksNS() / 1000);
         const f = e.frame.load(.monotonic);
@@ -454,12 +501,42 @@ pub const Engine = struct {
         const raw = song_us - @as(i64, @intFromFloat(dac_delay_s * 1e6)) - now_us;
         if (!e.clock_valid.load(.monotonic)) {
             e.clock_offset_us.store(raw, .release);
+            e.settle_frames = e.rate;
+            e.audio_err_us = 0;
+            e.slew = 0;
+            e.skip_frames = 0;
             e.clock_valid.store(true, .release);
             return;
         }
-        // Writer wake-up jitter is the noise here; the mean is what's true.
         const prev = e.clock_offset_us.load(.monotonic);
-        e.clock_offset_us.store(prev + @divTrunc(raw - prev, 32), .release);
+        // A fresh stream fills its queue faster than real time, so the first readings run early.
+        if (e.settle_frames > 0) {
+            e.settle_frames -= frames;
+            e.clock_offset_us.store(prev + @divTrunc(raw - prev, 8), .release);
+            return;
+        }
+        e.steerAudio(raw - prev, frames);
+    }
+
+    /// Moves the audio toward the tick clock. `err_us` is how far the audio is ahead of it.
+    /// shortcut: audio far ahead only slews, as a stalled device stalls our writes too; add a hold if that proves wrong.
+    fn steerAudio(e: *Engine, err_us: i64, frames: u32) void {
+        // Writer wake-up jitter is the noise here; the mean is what's true.
+        e.audio_err_us += @divTrunc(err_us - e.audio_err_us, 32);
+        if (e.audio_err_us < -sync_skip_us) {
+            e.skip_frames = @max(e.usToFrame(-err_us), 0);
+            e.audio_err_us = 0;
+            e.slew = 0;
+            return;
+        }
+        if (@abs(e.audio_err_us) <= sync_deadband_us) {
+            e.slew = 0;
+            return;
+        }
+        e.slew_carry += frames;
+        const budget: i64 = e.slew_carry / slew_period;
+        e.slew_carry %= slew_period;
+        e.slew = std.math.clamp(-e.usToFrame(e.audio_err_us), -budget, budget);
     }
 
     /// Converts a monotonic timestamp to song time.
@@ -493,6 +570,60 @@ test "mixer schedules sample accurately" {
     try std.testing.expectEqual(@as(f32, 1), out[4]);
     try std.testing.expectEqual(@as(f32, 0.5), out[6]);
     try std.testing.expectEqual(@as(f32, 0), out[8]);
+}
+
+test "tick clock stays fixed after settling and audio follows it" {
+    const e = try Engine.create(std.testing.allocator);
+    defer e.destroy();
+    e.clock_valid.store(true, .release);
+    e.clock_offset_us.store(123, .release);
+    e.updateClock(0, 128);
+    try std.testing.expectEqual(@as(i64, 123), e.clock_offset_us.load(.acquire));
+
+    // Jitter inside the deadband leaves the pitch alone.
+    e.audio_err_us = 0;
+    e.steerAudio(sync_deadband_us, 128);
+    try std.testing.expectEqual(@as(i64, 0), e.slew);
+
+    // Ahead consumes fewer frames, behind consumes more, each within the slew limit.
+    e.audio_err_us = 10_000;
+    e.steerAudio(10_000, 512);
+    try std.testing.expectEqual(@as(i64, -2), e.slew);
+    e.audio_err_us = -10_000;
+    e.steerAudio(-10_000, 512);
+    try std.testing.expectEqual(@as(i64, 2), e.slew);
+    var out: [1024]f32 = undefined;
+    const f0 = e.frame.load(.monotonic);
+    e.mix(&out, 512);
+    try std.testing.expectEqual(f0 + 514, e.frame.load(.monotonic));
+
+    // Far behind skips, and voices move with the song position.
+    const data: [96000]f32 = @splat(0.25);
+    const samples = [_]decode.Sample{.{ .data = @constCast(&data) }};
+    e.samples = &samples;
+    e.startVoice(0, 0, 0, 0);
+    e.slew = 0;
+    e.audio_err_us = -sync_skip_us - 1;
+    e.steerAudio(-100_000, 128);
+    try std.testing.expectEqual(@as(i64, 4800), e.skip_frames);
+    const f1 = e.frame.load(.monotonic);
+    e.mix(&out, 128);
+    try std.testing.expectEqual(f1 + 4928, e.frame.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 4928 * 2), e.voices[0].pos);
+}
+
+test "slew stretches without clicks at the buffer ends" {
+    const e = try Engine.create(std.testing.allocator);
+    defer e.destroy();
+    for (0..9) |i| {
+        e.song_buf[i * 2] = @floatFromInt(i);
+        e.song_buf[i * 2 + 1] = @floatFromInt(i);
+    }
+    var out: [16]f32 = @splat(0);
+    e.addSong(&out, 8, 9);
+    try std.testing.expectEqual(@as(f32, 0), out[0]);
+    try std.testing.expectEqual(@as(f32, 8), out[14]);
+    try std.testing.expect(out[2] > 1 and out[2] < 1.2);
 }
 
 test "menu layer plays while paused and leaves the song clock alone" {
