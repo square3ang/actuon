@@ -5,5 +5,8 @@
 !src
 !third_party
 !server
+!web
+!assets
 server/target
 server/.env
+web/target

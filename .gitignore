@@ -3,3 +3,4 @@ zig-out/
 server/target/
 *.AppImage
 server/.env
+web/target/

@@ -59,6 +59,8 @@ try:
     time.sleep(1.1)
     assert call("POST", f"/scores/{sha}?format=1", replay, alice)[0] == 200
     assert call("GET", "/me/scores", None, alice)[1]["scores"][0]["date"] == first_date, "no improvement, so the tiebreak date stays"
+    recent = call("GET", "/recent")[1]["scores"]
+    assert recent and recent[0]["sha256"] == sha and "pass" not in recent[0] and "token" not in recent[0]
     status, r = call("GET", f"/scores/{sha}")
     assert r["scores"][0] == {**r["scores"][0], "name": "alice", "ex": best}, r
     assert call("GET", "/me/scores")[0] == 401

@@ -21,6 +21,8 @@ jobs:
         working-directory: server
       - run: cargo build --release
         working-directory: server
+      - run: cargo test --release
+        working-directory: web
       - run: python3 tests/ir_e2e.py server/target/release/actuon-ir zig-out/bin/mkreplay tests/charts/stop.bms "$(mktemp -d)"
       - run: python3 tests/backup_check.py server/backup/backup.sh "$(mktemp -d)"
   macos:

@@ -86,3 +86,23 @@ scroll the list through the first 1000 places.
 `tests/ir_e2e.py` runs the whole round trip.
 
 Replays played in CN or HCN mode on a chart that leaves its LN type open are refused: they change the note count, so they cannot rank on the chart's board.
+
+## Web page
+
+`web/` renders recent verified scores and each chart's ranking as plain HTML from this API, with no script in the browser. `GET /recent?limit=` (1 to 100, default 50) is the public feed behind it.
+
+```sh
+web/target/release/actuon-web 127.0.0.1:8731 http://127.0.0.1:8730
+```
+
+The server stores no chart titles, so charts appear by SHA-256.
+
+To share the API's host name, send the page's paths to it and leave everything else on the API. `PUT /charts/{sha}` stays on the API, so split that path by method:
+
+```nginx
+map $request_method $ir_charts { GET 127.0.0.1:8731; default 127.0.0.1:8730; }
+# Inside the server block:
+location = / { proxy_pass http://127.0.0.1:8731; }
+location ~ ^/(style\.css|logo\.svg|icon\.svg|fonts/) { proxy_pass http://127.0.0.1:8731; }
+location /charts/ { proxy_pass http://$ir_charts; proxy_set_header Host $host; }
+```

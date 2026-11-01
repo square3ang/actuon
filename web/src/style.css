@@ -1,0 +1,70 @@
+/* Hallmark · v2.0.0 · shape: app screen · theme: actuon design system (by request) · posture: restrained · signature: the scoreboard table with fixed digit cells and lamps */
+/* critique: no chart titles exist on the server, so the hash carries the chart; a title would read far better. */
+:root {
+  --bg: #0a0f1c; --well: #050810; --plate: #0f1628; --plate-225: #0f1628e1; --rule: #222e48;
+  --white: #ecf0f8; --dim: #8694b0; --cyan: #b0d4ff; --sky: #82beff; --accent: #265cf0; --danger: #d63e36; --amber: #f0aa46;
+  --lamp-noplay: #404552; --lamp-failed: #963442; --lamp-assist: #b280ff; --lamp-easy: #7ce294; --lamp-normal: #5ec4ff;
+  --lamp-hard: #ff5468; --lamp-exhard: #ffd65c; --lamp-fc: #96f5f5;
+  --alpha-digit-off: .35;
+  --suite: "SUITE", "Noto Sans CJK JP", "Hiragino Sans GB", "Apple SD Gothic Neo", "Yu Gothic", "Microsoft YaHei", Meiryo, sans-serif;
+  --text-12: 12px; --text-14: 14px; --text-16: 16px; --head-24: 24px; --num-48: 48px;
+  --space-4: 4px; --space-6: 6px; --space-10: 10px; --space-12: 12px; --space-14: 14px; --space-18: 18px;
+  --radius-3: 3px; --radius-6: 6px; --radius-8: 8px;
+  --bar-header: 40px; --row: 40px;
+  color-scheme: dark;
+}
+@font-face { font-family: "SUITE"; font-weight: 500; font-display: swap; src: url(/fonts/SUITE-Medium.ttf) format("truetype"); }
+@font-face { font-family: "SUITE"; font-weight: 800; font-display: swap; src: url(/fonts/SUITE-ExtraBold.ttf) format("truetype"); }
+html, body { margin: 0; overflow-x: clip; background: var(--well); color: var(--white); font: 500 var(--text-16) var(--suite); }
+header, main { box-sizing: border-box; max-width: 1280px; margin: 0 auto; padding: 0 var(--space-14); }
+header { display: flex; align-items: center; gap: var(--space-10); height: calc(var(--bar-header) + var(--space-14)); }
+header a { display: flex; border-radius: var(--radius-6); padding: var(--space-4) var(--space-6); }
+header img { display: block; height: 32px; width: auto; }
+main { display: flex; flex-direction: column; gap: var(--space-6); padding-bottom: var(--space-14); }
+a:hover { color: var(--white); background: var(--rule); }
+a:active { background: var(--accent); color: var(--white); }
+/* Focus is the row's own inversion, per the design system: a fill, no ring. */
+a:focus-visible, button:focus-visible { outline: none; background: var(--accent); color: var(--white); }
+.panel { color: var(--white); background: var(--plate); border-radius: var(--radius-8); padding: var(--space-4) var(--space-10) var(--space-10); min-width: 0; }
+h1 { text-wrap: balance; margin: var(--space-6) 0 var(--space-10); font: 800 var(--head-24) var(--suite); color: var(--white); }
+.notice { margin: 0; padding: var(--space-18) var(--space-10); color: var(--sky); font-size: var(--text-14); }
+.lookup { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-10); background: var(--plate); border-radius: var(--radius-8); padding: var(--space-10); }
+.lookup label { color: var(--white); font-size: var(--text-14); }
+.lookup input { flex: 1 1 280px; min-width: 0; height: 36px; box-sizing: border-box; padding: 0 var(--space-10); border: 0; border-radius: var(--radius-6); background: var(--rule); color: var(--white); font: inherit; caret-color: var(--white); }
+.lookup input:focus-visible { outline: none; background: var(--accent); color: var(--white); }
+.lookup button { height: 36px; padding: 0 var(--space-18); border: 0; border-radius: var(--radius-6); background: var(--accent); color: var(--white); font: inherit; cursor: pointer; }
+.lookup button:hover { background: var(--white); color: var(--accent); }
+.lookup button:active { background: var(--white); color: var(--accent); }
+.lookup button:focus-visible { background: var(--white); color: var(--accent); }
+.refused { flex-basis: 100%; margin: 0; color: var(--lamp-hard); font-size: var(--text-14); }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+th { height: 28px; padding: 0 var(--space-12); text-align: left; color: var(--cyan); font: 500 var(--text-14) var(--suite); }
+tbody tr:nth-child(odd) td { background: var(--well); }
+td { height: var(--row); padding: 0 var(--space-12); }
+tbody tr:nth-child(n):hover td { background: var(--rule); }
+td:first-child { border-radius: var(--radius-8) 0 0 var(--radius-8); }
+td:last-child { border-radius: 0 var(--radius-8) var(--radius-8) 0; }
+.rank { width: 56px; }
+.lamp-col { width: 136px; }
+.ex { width: 96px; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.dim { color: var(--cyan); font-size: var(--text-14); }
+.clip { overflow: hidden; white-space: nowrap; }
+td a { color: var(--sky); text-decoration: none; border-radius: var(--radius-6); padding: var(--space-4) var(--space-6); margin-left: calc(-1 * var(--space-6)); }
+.claim { margin-left: var(--space-10); color: var(--amber); font-size: var(--text-12); }
+.digits { color: var(--white); font-variant-numeric: tabular-nums; }
+.off { opacity: var(--alpha-digit-off); }
+.lamp { display: flex; align-items: center; gap: var(--space-10); white-space: nowrap; overflow: hidden; color: var(--lamp); font-size: var(--text-14); }
+.lamp i { flex: none; width: 6px; height: 24px; border-radius: var(--radius-3); background: var(--lamp); }
+.lamp-0 { --lamp: var(--cyan); }
+/* lamp-failed is 2.5:1 as text: the bar keeps it, the name does not. */
+.lamp-1 { --lamp: var(--cyan); } .lamp-1 i { background: var(--lamp-failed); }
+.lamp-2, .lamp-3 { --lamp: var(--lamp-assist); } .lamp-4 { --lamp: var(--lamp-easy); } .lamp-5 { --lamp: var(--lamp-normal); }
+.lamp-6 { --lamp: var(--lamp-hard); } .lamp-7 { --lamp: var(--lamp-exhard); } .lamp-8, .lamp-9, .lamp-10 { --lamp: var(--lamp-fc); }
+.sha { margin: 0; padding: var(--space-10); overflow: hidden; white-space: nowrap; color: var(--sky); font-size: var(--text-14); }
+.sha span { display: block; margin-bottom: var(--space-4); color: var(--white); font-size: var(--text-14); }
+.readouts { display: flex; flex-wrap: wrap; gap: var(--space-6); }
+.readout { flex: 1 1 200px; display: flex; flex-direction: column; font: 800 var(--num-48)/1.1 var(--suite); text-align: right; }
+.readout > span:first-child { font: 500 var(--text-14) var(--suite); color: var(--cyan); text-align: left; padding: var(--space-4) 0; }
+@media (max-width: 40rem) { .wide { display: none; } th, td { padding: 0 var(--space-6); } .rank { width: 44px; } .lamp-col { width: 104px; } .ex { width: 76px; } }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }

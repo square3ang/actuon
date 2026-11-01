@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS score(
   user INTEGER NOT NULL, sha256 TEXT NOT NULL, clear INTEGER NOT NULL, ex INTEGER NOT NULL, max_combo INTEGER NOT NULL, miss INTEGER NOT NULL,
   notes INTEGER NOT NULL, gauge_type INTEGER NOT NULL, date INTEGER NOT NULL, PRIMARY KEY(user, sha256));
 CREATE INDEX IF NOT EXISTS score_rank ON score(sha256, ex DESC);
+CREATE INDEX IF NOT EXISTS score_date ON score(date DESC);
 CREATE TABLE IF NOT EXISTS rival(user INTEGER NOT NULL, rival INTEGER NOT NULL, PRIMARY KEY(user, rival));
 CREATE TABLE IF NOT EXISTS claim(
   user INTEGER NOT NULL, sha256 TEXT NOT NULL, clear INTEGER NOT NULL, ex INTEGER NOT NULL, max_combo INTEGER NOT NULL, miss INTEGER NOT NULL,
@@ -489,6 +490,22 @@ fn ranking(req: &Request, db: &Connection, sha: &str, url: &str) -> ApiResult {
     Ok(json!({"scores": scores, "rank": rank, "total": total, "clears": clears}))
 }
 
+/// The newest verified scores, for the web page. Claims stay out: nothing has checked them.
+fn recent(db: &Connection, url: &str) -> ApiResult {
+    let limit: i64 = query_of(url)
+        .get("limit")
+        .and_then(|l| l.parse().ok())
+        .unwrap_or(50)
+        .clamp(1, 100);
+    let mut st = db.prepare_cached("SELECT s.sha256,u.name,s.ex,s.clear,s.miss,s.date FROM score s JOIN user u ON u.id=s.user ORDER BY s.date DESC LIMIT ?1")?;
+    let scores = st
+        .query_map([limit], |r| {
+            Ok(json!({"sha256": r.get::<_, String>(0)?, "name": r.get::<_, String>(1)?, "ex": r.get::<_, i64>(2)?, "clear": r.get::<_, i64>(3)?, "miss": r.get::<_, i64>(4)?, "date": r.get::<_, i64>(5)?}))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({"scores": scores}))
+}
+
 /// Every row the caller holds, for IR sync. A chart can have both a verified score and a claim:
 /// the client must see the verified one to know which replays are still worth sending.
 fn my_scores(req: &Request, db: &Connection) -> ApiResult {
@@ -664,6 +681,7 @@ fn route(req: &mut Request, db: &Connection, ctx: &Ctx) -> ApiResult {
             sha_ok(sha)?;
             rival_scores(req, db, sha)
         }
+        (Method::Get, ["recent"]) => recent(db, &url),
         (Method::Get, ["me", "scores"]) => my_scores(req, db),
         (Method::Post, ["me", "claims"]) => add_claims(req, db),
         (Method::Post, ["me", "name"]) => rename(req, db),

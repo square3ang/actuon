@@ -24,7 +24,7 @@ ssh_shared "$target" 'umask 077; cat >/opt/actuon/server/.env' <server/.env
 ssh_shared "$target" 'dnf -y -q install epel-release && dnf -y -q install podman podman-compose && systemctl enable podman-restart'
 # Built here: compiling Zig and Rust runs a small host out of memory.
 (cd server && docker compose build)
-docker save localhost/actuon-ir localhost/actuon-backup | gzip | ssh_shared "$target" 'gzip -d | podman load'
+docker save localhost/actuon-ir localhost/actuon-web localhost/actuon-backup | gzip | ssh_shared "$target" 'gzip -d | podman load'
 ssh_shared "$target" 'sh -s' <<'REMOTE'
 set -eu
 cd /opt/actuon/server
@@ -38,6 +38,12 @@ until curl -fsS http://127.0.0.1:8730/health; do
 	sleep 2
 done
 echo
+tries=0
+until curl -fsS -o /dev/null http://127.0.0.1:8731/; do
+	tries=$((tries + 1))
+	[ "$tries" -lt 30 ] || { echo "web page did not come up" >&2; podman-compose logs web >&2; exit 1; }
+	sleep 2
+done
 # Not podman-compose exec: it prints the S3 secret and puts it on the command line.
 podman exec server_backup_1 sh /usr/local/bin/backup.sh once
 REMOTE
