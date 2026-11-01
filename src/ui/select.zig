@@ -3,6 +3,8 @@ const std = @import("std");
 const c = @import("c");
 const core = @import("actuon_core");
 const gfx = @import("gfx.zig");
+const i18n = @import("i18n.zig");
+const tr = i18n.tr;
 const app_mod = @import("app.zig");
 const result = @import("result.zig");
 const course_mod = @import("course.zig");
@@ -45,7 +47,7 @@ pub const State = struct {
     search: []const u8 = "",
     searching: bool = false,
     status: []const u8 = "",
-    status_buf: [64]u8 = undefined,
+    status_buf: [128]u8 = undefined,
     autoplay: bool = false,
     sort: u8 = 0,
     scan_thread: ?*c.SDL_Thread = null,
@@ -115,7 +117,7 @@ const random_names = [_][]const u8{ "OFF", "MIRROR", "RANDOM", "R-RANDOM", "S-RA
 const gauge_names = [_][]const u8{ "ASSIST EASY", "EASY", "NORMAL", "HARD", "EX HARD", "HAZARD", "GAS" };
 const hs_names = [_][]const u8{ "START", "MAX", "MAIN", "OFF" };
 // In beatoraja's order: its skins show the sort by this index.
-const sort_names = [_][]const u8{ "TITLE", "ARTIST", "BPM", "LENGTH", "LEVEL", "CLEAR", "EX", "MISS" };
+const sort_count = 8;
 const scan_interval_ms = 30_000;
 
 pub fn init(a: *App) void {
@@ -186,7 +188,7 @@ pub fn tickTables(a: *App) bool {
     s.table_thread = null;
     const failed = s.table_failed.load(.acquire);
     const total = if (s.table_only != null) 1 else a.cfg.tables.len;
-    s.status = if (failed == 0) "Tables updated" else std.fmt.bufPrint(&s.status_buf, "{d} of {d} tables failed to load", .{ failed, total }) catch "Tables failed to load";
+    s.status = if (failed == 0) tr("Tables updated") else i18n.bufPrint(&s.status_buf, "{d} of {d} tables failed to load", .{ failed, total }) catch tr("Tables failed to load");
     reload(a);
     return true;
 }
@@ -327,13 +329,13 @@ fn searchRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row), words: 
 }
 
 fn rootRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
-    try rows.append(al, .{ .label = "Library", .kind = .group });
+    try rows.append(al, .{ .label = tr("Library"), .kind = .group });
     const st = try a.db.prepare("SELECT url,name,symbol FROM bms_table ORDER BY name");
     defer st.deinit();
     while (try st.step()) {
         try rows.append(al, .{ .label = try al.dupe(u8, st.text(1)), .kind = .table, .target = try al.dupe(u8, st.text(0)) });
     }
-    try rows.append(al, .{ .label = "Courses", .kind = .group, .id = 1 });
+    try rows.append(al, .{ .label = tr("Courses"), .kind = .group, .id = 1 });
 }
 
 fn libraryRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
@@ -365,9 +367,10 @@ fn tableRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
     const st = try a.db.prepare("SELECT level, COUNT(*) FROM table_song WHERE url=?1 GROUP BY level ORDER BY MIN(ord)");
     defer st.deinit();
     st.bindText(1, s.table_url);
+    var level_buf: [256]u8 = undefined;
     while (try st.step()) {
         try rows.append(al, .{
-            .label = try std.fmt.allocPrint(al, "Level {s}  ({d})", .{ st.text(0), st.int(1) }),
+            .label = try al.dupe(u8, try i18n.bufPrint(&level_buf, "Level {s}  ({d})", .{ st.text(0), st.int(1) })),
             .kind = .level,
             .target = try al.dupe(u8, st.text(0)),
         });
@@ -744,9 +747,9 @@ fn drawHeader(a: *App) void {
     if (s.logo == null) s.logo = gfx.loadTexture(g, "logo", @embedFile("logo"));
     if (s.logo) |t| g.sprite(t, null, .{ .x = 26 * u, .y = 12 * u, .w = 32 * u * t.w / t.h, .h = 32 * u }, .{});
     if (s.searching) {
-        g.fmt(290 * u, 18 * u, g.scaled(16), gfx.cyan, "SEARCH: {s}_", .{a.text.items});
+        g.fmtTr(290 * u, 18 * u, g.scaled(16), gfx.cyan, "SEARCH: {s}_", .{a.text.items});
     } else if (s.scan_thread != null) {
-        g.fmt(290 * u, 19 * u, g.scaled(14), gfx.dim, "Scanning... {d}", .{s.scan_progress.load(.monotonic)});
+        g.fmtTr(290 * u, 19 * u, g.scaled(14), gfx.dim, "Scanning... {d}", .{s.scan_progress.load(.monotonic)});
     } else if (s.status.len > 0) g.textClip(s.status, 290 * u, 19 * u, g.w - 310 * u, g.scaled(14), gfx.sky);
 
     if (s.download) |j| {
@@ -812,7 +815,7 @@ fn drawWheel(a: *App, wheel_x: f32, dock_y: f32) void {
     }
     g.unclip();
     if (s.rows.len == 0) {
-        g.textCentered(if (a.cfg.roots.len == 0) (if (a.cfg.beatoraja_select) "No library folders yet. Press 6 to add one." else "No library folders yet. Press F10 to add one.") else if (s.search.len > 0) "No charts match." else "Nothing here.", g.w * 0.72, mid - 10 * u, g.scaled(16), gfx.dim);
+        g.textCentered(if (a.cfg.roots.len == 0) (if (a.cfg.beatoraja_select) tr("No library folders yet. Press 6 to add one.") else tr("No library folders yet. Press F10 to add one.")) else if (s.search.len > 0) tr("No charts match.") else tr("Nothing here."), g.w * 0.72, mid - 10 * u, g.scaled(16), gfx.dim);
     }
 }
 
@@ -879,7 +882,7 @@ fn drawChartInfo(a: *App, wheel_x: f32, dock_y: f32) void {
             iy += 44 * u;
             var hint_key: [32]u8 = undefined;
             const open_key = guideKey(a, a.cfg.p1[0], "Enter", &hint_key);
-            g.fmt(lx, iy, g.scaled(14), gfx.sky, "{s}: {s}", .{ open_key, if (s.rows[s.cursor].kind == .missing) "download this chart" else "open" });
+            g.fmt(lx, iy, g.scaled(14), gfx.sky, "{s}: {s}", .{ open_key, if (s.rows[s.cursor].kind == .missing) tr("download this chart") else tr("open") });
         }
     }
 }
@@ -914,25 +917,25 @@ fn drawDock(a: *App, dock_y: f32) void {
     tab(a, tab_x(u, tw, 0), dock_y, tw, c.SDL_SCANCODE_F1, "F1", "RANDOM", random_names[@min(a.cfg.random, 4)]);
     tab(a, tab_x(u, tw, 1), dock_y, tw, c.SDL_SCANCODE_F2, "F2", "GAUGE", gauge_names[@min(a.cfg.gauge, config.gas)]);
     tab(a, tab_x(u, tw, 2), dock_y, tw, c.SDL_SCANCODE_F3, "F3", "HS FIX / GREEN", std.fmt.bufPrint(&dock_buf, "{s}  {d}", .{ hs_names[@min(a.cfg.hs_fix, 3)], a.cfg.green_ms * 3 / 5 }) catch "");
-    tab(a, tab_x(u, tw, 3), dock_y, tw, c.SDL_SCANCODE_F4, if (on) "2" else "F4", "SORT", sort_names[s.sort]);
-    tab(a, tab_x(u, tw, 4), dock_y, tw, c.SDL_SCANCODE_1, "1", "KEY MODE", mode_filters[s.mode_filter].name);
+    tab(a, tab_x(u, tw, 3), dock_y, tw, c.SDL_SCANCODE_F4, if (on) "2" else "F4", tr("SORT"), ([sort_count][]const u8{ tr("TITLE"), tr("ARTIST"), "BPM", tr("LENGTH"), tr("LEVEL"), "CLEAR", "EX", "MISS" })[s.sort]);
+    tab(a, tab_x(u, tw, 4), dock_y, tw, c.SDL_SCANCODE_1, "1", tr("KEY MODE"), mode_filters[s.mode_filter].name);
     tab(a, tab_x(u, tw, 5), dock_y, tw, c.SDL_SCANCODE_3, "3", "LN MODE", ([_][]const u8{ "LN", "CN", "HCN" })[@min(a.cfg.ln_mode, 2)]);
     var replay_buf: [16]u8 = undefined;
     const replays = if (selectedSong(s)) |song| replaysOf(a, song.sha256) else 0;
-    tab(a, tab_x(u, tw, 6), dock_y, tw, c.SDL_SCANCODE_4, "4", "REPLAY", if (replays == 0) "NONE" else std.fmt.bufPrint(&replay_buf, "{d} / {d}", .{ s.replay_slot + 1, replays }) catch "");
-    tab(a, tab_x(u, tw, tabs - 1), dock_y, tw, c.SDL_SCANCODE_F5, "F5", "AUTOPLAY", if (s.autoplay) "ON" else "OFF");
+    tab(a, tab_x(u, tw, 6), dock_y, tw, c.SDL_SCANCODE_4, "4", tr("REPLAY"), if (replays == 0) tr("NONE") else std.fmt.bufPrint(&replay_buf, "{d} / {d}", .{ s.replay_slot + 1, replays }) catch "");
+    tab(a, tab_x(u, tw, tabs - 1), dock_y, tw, c.SDL_SCANCODE_F5, "F5", tr("AUTOPLAY"), if (s.autoplay) "ON" else "OFF");
 
     // The remaining commands, as a row of text buttons.
     const Cmd = struct { sc: u32, label: []const u8 };
     const keyboard_cmds = [_]Cmd{
-        .{ .sc = c.SDL_SCANCODE_F6, .label = "F6 Search" },
-        .{ .sc = c.SDL_SCANCODE_F7, .label = "F7 Rescan" },
-        .{ .sc = c.SDL_SCANCODE_F8, .label = "F8 Tables" },
+        .{ .sc = c.SDL_SCANCODE_F6, .label = tr("F6 Search") },
+        .{ .sc = c.SDL_SCANCODE_F7, .label = tr("F7 Rescan") },
+        .{ .sc = c.SDL_SCANCODE_F8, .label = tr("F8 Tables") },
         .{ .sc = c.SDL_SCANCODE_F9, .label = "F9 IR" },
-        .{ .sc = c.SDL_SCANCODE_F10, .label = "F10 Settings" },
-        .{ .sc = c.SDL_SCANCODE_R, .label = "R Replay" },
-        .{ .sc = c.SDL_SCANCODE_8, .label = "8 Folder" },
-        .{ .sc = c.SDL_SCANCODE_ESCAPE, .label = "Esc Back" },
+        .{ .sc = c.SDL_SCANCODE_F10, .label = tr("F10 Settings") },
+        .{ .sc = c.SDL_SCANCODE_R, .label = tr("R Replay") },
+        .{ .sc = c.SDL_SCANCODE_8, .label = tr("8 Folder") },
+        .{ .sc = c.SDL_SCANCODE_ESCAPE, .label = tr("Esc Back") },
     };
     var name_buf: [4][32]u8 = undefined;
     const cfg = &a.cfg;
@@ -944,17 +947,17 @@ fn drawDock(a: *App, dock_y: f32) void {
     var label_buf: [7][80]u8 = undefined;
     // Without a key of its own to click, sc 0 does nothing.
     const beatoraja_cmds = [_]Cmd{
-        .{ .sc = c.SDL_SCANCODE_RETURN, .label = std.fmt.bufPrint(&label_buf[0], "{s} Open", .{settings.keyName(cfg.p1[0], &key_buf[0])}) catch "" },
-        .{ .sc = 0, .label = std.fmt.bufPrint(&label_buf[1], "{s} Auto", .{settings.keyName(cfg.p1[4], &key_buf[1])}) catch "" },
-        .{ .sc = 0, .label = std.fmt.bufPrint(&label_buf[6], "{s} Replay", .{settings.keyName(cfg.p1[6], &key_buf[3])}) catch "" },
-        .{ .sc = c.SDL_SCANCODE_ESCAPE, .label = std.fmt.bufPrint(&label_buf[2], "{s} Back", .{settings.keyName(cfg.p1[1], &key_buf[2])}) catch "" },
-        .{ .sc = 0, .label = std.fmt.bufPrint(&label_buf[3], "{s}, {s} Scroll", .{ scratch_a, scratch_b }) catch "" },
-        .{ .sc = 0, .label = std.fmt.bufPrint(&label_buf[4], "Hold {s} Options", .{start}) catch "" },
-        .{ .sc = 0, .label = std.fmt.bufPrint(&label_buf[5], "Hold {s}+{s} or 5 Detail", .{ start, select_key }) catch "" },
-        .{ .sc = c.SDL_SCANCODE_0, .label = "0 Search" },
-        .{ .sc = c.SDL_SCANCODE_7, .label = "7 IR page" },
-        .{ .sc = c.SDL_SCANCODE_8, .label = "8 Folder" },
-        .{ .sc = c.SDL_SCANCODE_6, .label = "6 Key config" },
+        .{ .sc = c.SDL_SCANCODE_RETURN, .label = i18n.bufPrint(&label_buf[0], "{s} Open", .{settings.keyName(cfg.p1[0], &key_buf[0])}) catch "" },
+        .{ .sc = 0, .label = i18n.bufPrint(&label_buf[1], "{s} Auto", .{settings.keyName(cfg.p1[4], &key_buf[1])}) catch "" },
+        .{ .sc = 0, .label = i18n.bufPrint(&label_buf[6], "{s} Replay", .{settings.keyName(cfg.p1[6], &key_buf[3])}) catch "" },
+        .{ .sc = c.SDL_SCANCODE_ESCAPE, .label = i18n.bufPrint(&label_buf[2], "{s} Back", .{settings.keyName(cfg.p1[1], &key_buf[2])}) catch "" },
+        .{ .sc = 0, .label = i18n.bufPrint(&label_buf[3], "{s}, {s} Scroll", .{ scratch_a, scratch_b }) catch "" },
+        .{ .sc = 0, .label = i18n.bufPrint(&label_buf[4], "Hold {s} Options", .{start}) catch "" },
+        .{ .sc = 0, .label = i18n.bufPrint(&label_buf[5], "Hold {s}+{s} or 5 Detail", .{ start, select_key }) catch "" },
+        .{ .sc = c.SDL_SCANCODE_0, .label = tr("0 Search") },
+        .{ .sc = c.SDL_SCANCODE_7, .label = tr("7 IR page") },
+        .{ .sc = c.SDL_SCANCODE_8, .label = tr("8 Folder") },
+        .{ .sc = c.SDL_SCANCODE_6, .label = tr("6 Key config") },
     };
     const cmds: []const Cmd = if (cfg.beatoraja_select) &beatoraja_cmds else &keyboard_cmds;
     const cmd_size = g.scaled(12);
@@ -1050,11 +1053,11 @@ fn drawPanel(a: *App) void {
             std.fmt.bufPrint(&buf[1], "{s}  GAUGE  {s}", .{ settings.keyName(cfg.p1[2], &names[2]), gauge_names[@min(cfg.gauge, config.gas)] }) catch "",
             std.fmt.bufPrint(&buf[2], "{s}  HS FIX  {s}", .{ settings.keyName(cfg.p1[4], &names[2]), hs_names[@min(cfg.hs_fix, 3)] }) catch "",
         },
-        2 => .{ "Nothing to set here yet", "", "" },
+        2 => .{ tr("Nothing to set here yet"), "", "" },
         else => .{
             std.fmt.bufPrint(&buf[0], "{s}  GAS  {s}", .{ settings.keyName(cfg.p1[1], &names[0]), if (cfg.gauge == config.gas) "ON" else "OFF" }) catch "",
-            std.fmt.bufPrint(&buf[1], "{s}, {s}  DURATION  {d} ms", .{ settings.keyName(cfg.p1[3], &names[0]), settings.keyName(cfg.p1[5], &names[1]), cfg.green_ms }) catch "",
-            std.fmt.bufPrint(&buf[2], "{s}, {s}  JUDGE OFFSET  {d} ms", .{ settings.keyName(cfg.p1[4], &names[0]), settings.keyName(cfg.p1[6], &names[1]), cfg.judge_offset_ms }) catch "",
+            i18n.bufPrint(&buf[1], "{s}, {s}  DURATION  {d} ms", .{ settings.keyName(cfg.p1[3], &names[0]), settings.keyName(cfg.p1[5], &names[1]), cfg.green_ms }) catch "",
+            i18n.bufPrint(&buf[2], "{s}, {s}  JUDGE OFFSET  {d} ms", .{ settings.keyName(cfg.p1[4], &names[0]), settings.keyName(cfg.p1[6], &names[1]), cfg.judge_offset_ms }) catch "",
         },
     };
     const w = 420 * u;
@@ -1098,11 +1101,11 @@ fn fillSkinState(a: *App) void {
         .kind = if (s.searching) .search else bar.kind,
         .directory = switch (s.view) {
             .root => "",
-            .library => "LIBRARY",
+            .library => tr("LIBRARY"),
             .folder => std.fs.path.basename(s.folder),
-            .table => "TABLE",
+            .table => tr("TABLE"),
             .level => s.level,
-            .courses => "COURSES",
+            .courses => tr("COURSES"),
         },
         .search = a.text.items,
         .clear = bar.clear,
@@ -1204,14 +1207,14 @@ fn drawSkinned(a: *App) void {
     const u = g.h / 720;
     if (s.searching) {
         g.panel(10 * u, 8 * u, g.w - 20 * u, 40 * u, "");
-        g.fmt(26 * u, 18 * u, g.scaled(16), gfx.cyan, "SEARCH: {s}_", .{a.text.items});
+        g.fmtTr(26 * u, 18 * u, g.scaled(16), gfx.cyan, "SEARCH: {s}_", .{a.text.items});
     } else if (s.scan_thread != null) {
-        g.fmt(26 * u, 8 * u, g.scaled(14), gfx.dim, "Scanning... {d}", .{s.scan_progress.load(.monotonic)});
+        g.fmtTr(26 * u, 8 * u, g.scaled(14), gfx.dim, "Scanning... {d}", .{s.scan_progress.load(.monotonic)});
     } else if (s.status.len > 0) {
         g.panel(10 * u, 8 * u, g.w - 20 * u, 40 * u, "");
         g.textClip(s.status, 26 * u, 19 * u, g.w - 52 * u, g.scaled(14), gfx.sky);
     }
-    if (s.rows.len == 0) g.textCentered(if (a.cfg.roots.len == 0) (if (a.cfg.beatoraja_select) "No library folders yet. Press 6 to add one." else "No library folders yet. Press F10 to add one.") else if (s.search.len > 0) "No charts match." else "Nothing here.", g.w * 0.72, g.h * 0.48, g.scaled(16), gfx.white);
+    if (s.rows.len == 0) g.textCentered(if (a.cfg.roots.len == 0) (if (a.cfg.beatoraja_select) tr("No library folders yet. Press 6 to add one.") else tr("No library folders yet. Press F10 to add one.")) else if (s.search.len > 0) tr("No charts match.") else tr("Nothing here."), g.w * 0.72, g.h * 0.48, g.scaled(16), gfx.white);
     drawQuery(a);
 }
 
@@ -1226,9 +1229,9 @@ fn drawQuery(a: *App) void {
         g.rect(qx, qy, g.w * 0.6, 3, gfx.accent);
         _ = g.text(s.query_title, qx + 24, qy + 18, 20, gfx.white);
         if (!q.done.load(.acquire)) {
-            _ = g.text("Loading...", qx + 24, qy + 56, 16, gfx.dim);
+            _ = g.text(tr("Loading..."), qx + 24, qy + 56, 16, gfx.dim);
         } else if (q.failed) {
-            _ = g.text("Could not reach the IR server", qx + 24, qy + 56, 16, gfx.dim);
+            _ = g.text(tr("Could not reach the IR server"), qx + 24, qy + 56, 16, gfx.dim);
         } else {
             var ly = qy + 56;
             for (q.lines.items) |l| {
@@ -1296,13 +1299,13 @@ pub fn startTableFetch(a: *App, only: ?[]const u8) void {
     const s = &a.sel;
     if (s.table_thread != null) return;
     if (a.cfg.tables.len == 0) {
-        s.status = "No tables yet. Add one in Settings, Tables.";
+        s.status = tr("No tables yet. Add one in Settings, Tables.");
         return;
     }
     s.table_only = only;
     s.table_done.store(false, .release);
     s.table_failed.store(0, .release);
-    s.status = "Updating tables...";
+    s.status = tr("Updating tables...");
     s.table_thread = c.SDL_CreateThread(tableThread, "tables", a);
 }
 
@@ -1310,11 +1313,11 @@ pub fn startTableFetch(a: *App, only: ?[]const u8) void {
 fn startDownload(a: *App, row: Row) void {
     const s = &a.sel;
     if (s.download != null) {
-        s.status = "A download is already running";
+        s.status = tr("A download is already running");
         return;
     }
     if (a.cfg.roots.len == 0) {
-        s.status = "Add a library folder first";
+        s.status = tr("Add a library folder first");
         return;
     }
     var buf: [2048]u8 = undefined;
@@ -1324,11 +1327,11 @@ fn startDownload(a: *App, row: Row) void {
     else
         row.extra;
     if (url.len == 0) {
-        s.status = "No download source for this chart";
+        s.status = tr("No download source for this chart");
         return;
     }
     s.download = download.start(a.gpa, url, a.cfg.roots[0], row.target);
-    s.status = if (s.download != null) "Downloading..." else "Could not start download";
+    s.status = if (s.download != null) tr("Downloading...") else tr("Could not start download");
     s.download_seen = 0;
     s.download_shown = 0;
     s.download_moved_ms = c.SDL_GetTicks();
@@ -1343,7 +1346,7 @@ fn tickDownload(a: *App) void {
     if (st == 0) {
         const now = c.SDL_GetTicks();
         if (j.extracting.load(.acquire)) {
-            s.status = "Extracting...";
+            s.status = tr("Extracting...");
             return;
         }
         const done = j.progress.done.load(.acquire);
@@ -1351,7 +1354,7 @@ fn tickDownload(a: *App) void {
             s.download_seen = done;
             s.download_moved_ms = now;
         } else if (now - s.download_moved_ms > download_stall_ms) {
-            s.status = "Download stalled: the server stopped sending";
+            s.status = tr("Download stalled: the server stopped sending");
             j.abandon();
             s.download = null;
             return;
@@ -1364,7 +1367,7 @@ fn tickDownload(a: *App) void {
         }
         return;
     }
-    s.status = if (st == 1) "Download finished" else "Download failed";
+    s.status = if (st == 1) tr("Download finished") else tr("Download failed");
     j.destroy();
     s.download = null;
     if (st == 1) startScan(a);
@@ -1436,12 +1439,12 @@ fn playReplay(a: *App, song: db_mod.Song) void {
     const s = &a.sel;
     if (a.load_thread != null) return;
     if (s.replay_slot >= replaysOf(a, song.sha256)) {
-        s.status = "No replay in this slot";
+        s.status = tr("No replay in this slot");
         return;
     }
     const r = loadReplay(a, song.sha256, s.replay_slot) catch |e| {
         std.log.err("replay load failed: {t}", .{e});
-        s.status = "Could not read this replay";
+        s.status = tr("Could not read this replay");
         return;
     };
     startSongWith(a, song, r);
@@ -1501,7 +1504,7 @@ fn openChartPage(a: *App) void {
     defer a.gpa.free(url);
     if (!c.SDL_OpenURL(url)) {
         std.log.warn("open {s}: {s}", .{ url, c.SDL_GetError() });
-        a.sel.status = "Could not open the browser";
+        a.sel.status = tr("Could not open the browser");
     }
 }
 
@@ -1509,7 +1512,7 @@ fn openChartPage(a: *App) void {
 fn openRanking(a: *App) void {
     const s = &a.sel;
     if (a.cfg.ir_url.len == 0 or s.cursor >= s.rows.len) {
-        s.status = "Set an IR server in settings first";
+        s.status = tr("Set an IR server in settings first");
         return;
     }
     const row = s.rows[s.cursor];
@@ -1520,7 +1523,7 @@ fn openRanking(a: *App) void {
         // With a token the list narrows to rivals only when asked: full ranking is the default view.
         const url = std.fmt.allocPrint(al, "{s}/scores/{s}?limit=50", .{ a.cfg.ir_url, song.sha256 }) catch return;
         s.query = ir.startQuery(a.gpa, url, a.cfg.ir_token, null);
-        s.query_title = "Ranking";
+        s.query_title = tr("Ranking");
         return;
     }
     if (row.kind != .level and row.kind != .table) return;
@@ -1545,7 +1548,7 @@ fn openRanking(a: *App) void {
     body.appendSlice(al, "]}") catch return;
     const url = std.fmt.allocPrint(al, "{s}/table-ranking", .{a.cfg.ir_url}) catch return;
     s.query = ir.startQuery(a.gpa, url, a.cfg.ir_token, body.items);
-    s.query_title = "Table standings";
+    s.query_title = tr("Table standings");
 }
 
 fn keyQuery(a: *App, sc: u32) void {
@@ -1553,11 +1556,11 @@ fn keyQuery(a: *App, sc: u32) void {
     if (sc == c.SDL_SCANCODE_F9) {
         closeQuery(a);
         const url_ok = s.cursor < s.rows.len and s.rows[s.cursor].song != null and a.cfg.ir_token.len > 0;
-        if (url_ok and !std.mem.eql(u8, s.query_title, "Rivals")) {
+        if (url_ok and !std.mem.eql(u8, s.query_title, tr("Rivals"))) {
             var buf: [1024]u8 = undefined;
             const url = std.fmt.bufPrint(&buf, "{s}/scores/{s}/rivals", .{ a.cfg.ir_url, s.rows[s.cursor].song.?.sha256 }) catch return;
             s.query = ir.startQuery(a.gpa, url, a.cfg.ir_token, null);
-            s.query_title = "Rivals";
+            s.query_title = tr("Rivals");
         }
     } else if (sc == c.SDL_SCANCODE_ESCAPE) closeQuery(a);
 }
@@ -1857,7 +1860,7 @@ pub fn key(a: *App, sc: u32) void {
         c.SDL_SCANCODE_F2 => a.cfg.gauge = (a.cfg.gauge + 1) % (config.gas + 1),
         c.SDL_SCANCODE_F3 => a.cfg.hs_fix = (a.cfg.hs_fix + 1) % 4,
         c.SDL_SCANCODE_F4 => {
-            s.sort = @intCast((s.sort + 1) % sort_names.len);
+            s.sort = @intCast((s.sort + 1) % sort_count);
             reload(a);
         },
         c.SDL_SCANCODE_F5 => s.autoplay = !s.autoplay,

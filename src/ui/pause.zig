@@ -3,6 +3,8 @@
 const std = @import("std");
 const c = @import("c");
 const gfx = @import("gfx.zig");
+const i18n = @import("i18n.zig");
+const tr = i18n.tr;
 const testing = @import("testing.zig");
 const App = @import("app.zig").App;
 
@@ -11,7 +13,6 @@ const stagger_ms: f32 = 45;
 const count_ms: u64 = 3000;
 
 const Action = enum { resume_play, retry, quit };
-const labels = [_][]const u8{ "RESUME", "RETRY", "QUIT" };
 
 pub const State = struct {
     open: bool = false,
@@ -103,8 +104,8 @@ pub fn tick(a: *App) void {
 
     // Left: the word, entering from off screen.
     const word_w = 520 * u;
-    _ = g.text("PAUSED", 72 * u - word_w * (1 - k), g.h * 0.5 - 62 * u, g.scaled(96), gfx.white);
-    if (a.record) _ = g.text("Resuming will leave this play unrecorded", 76 * u - word_w * (1 - k), g.h * 0.5 + 56 * u, g.scaled(20), gfx.amber);
+    _ = g.text(tr("PAUSED"), 72 * u - word_w * (1 - k), g.h * 0.5 - 62 * u, g.scaled(96), gfx.white);
+    if (a.record) _ = g.text(tr("Resuming will leave this play unrecorded"), 76 * u - word_w * (1 - k), g.h * 0.5 + 56 * u, g.scaled(20), gfx.amber);
 
     // Right: the menu on a band of its own, each row landing just after the one above.
     const band_w = 380 * u;
@@ -138,6 +139,7 @@ pub fn tick(a: *App) void {
             g.rect(x, y, band_w, row_h, gfx.slab);
             g.rect(x, y, 5 * u, row_h, gfx.cyan);
         }
+        const labels = [_][]const u8{ tr("RESUME"), tr("RETRY"), tr("QUIT") };
         _ = g.text(labels[@backingInt(actionOf(a, idx))], x + 36 * u, y + 16 * u, g.scaled(28), if (on) gfx.white else gfx.dim);
     }
 

@@ -8,11 +8,14 @@ const skinslots = @import("skinslots.zig");
 const Drop = @import("dropdown.zig").Drop;
 const skin_sound = @import("../audio/skin_sound.zig");
 const gfx = @import("gfx.zig");
+const i18n = @import("i18n.zig");
+const tr = i18n.tr;
 const app_mod = @import("app.zig");
 const select = @import("select.zig");
 const db_mod = @import("../db/db.zig");
 const input = @import("../input/input.zig");
 const ir = @import("../net/ir.zig");
+const update = @import("../net/update.zig");
 const testing = @import("testing.zig");
 const App = app_mod.App;
 
@@ -28,14 +31,14 @@ const Section = enum {
 
     fn title(sec: Section) []const u8 {
         return switch (sec) {
-            .library => "Library",
-            .tables => "Tables",
-            .audio => "Audio",
-            .display => "Display",
-            .timing => "Timing",
-            .scores => "Scores",
-            .online => "Online",
-            .controls => "Controls",
+            .library => tr("Library"),
+            .tables => tr("Tables"),
+            .audio => tr("Audio"),
+            .display => tr("Display"),
+            .timing => tr("Timing"),
+            .scores => tr("Scores"),
+            .online => tr("Online"),
+            .controls => tr("Controls"),
         };
     }
 };
@@ -61,6 +64,7 @@ const Item = enum {
     bga_upscale,
     skin,
     skin_slots,
+    language,
     green,
     lift,
     hidden,
@@ -75,6 +79,7 @@ const Item = enum {
     ir_upload,
     ir_download,
     download_url,
+    update,
     input_poll,
     bind_4k,
     bind_5k,
@@ -91,105 +96,109 @@ const Item = enum {
             .add_root, .clear_roots => .library,
             .add_table, .update_tables, .table_list => .tables,
             .volume, .bgm_volume, .bgm_set, .sfx_volume, .sound_set, .audio_rate, .audio_frames, .audio_device => .audio,
-            .fullscreen, .vsync, .reflex, .bga_upscale, .skin, .skin_slots => .display,
+            .fullscreen, .vsync, .reflex, .bga_upscale, .skin, .skin_slots, .language => .display,
             .green, .lift, .hidden, .judge_offset, .visual_offset => .timing,
             .import_beatoraja, .import_lr2 => .scores,
-            .ir_url, .ir_signup, .ir_signin, .ir_rename, .ir_upload, .ir_download, .download_url => .online,
+            .ir_url, .ir_signup, .ir_signin, .ir_rename, .ir_upload, .ir_download, .download_url, .update => .online,
             .input_poll, .bind_4k, .bind_5k, .bind_6k, .bind_7k, .bind_10k, .bind_14k, .bind_9k, .beatoraja_select, .bind_start => .controls,
         };
     }
 
     fn name(it: Item) []const u8 {
         return switch (it) {
-            .add_root => "Add folder",
-            .clear_roots => "Remove all folders",
-            .add_table => "Add by address",
-            .update_tables => "Update all",
-            .table_list => "Tables",
-            .volume => "Master volume",
-            .bgm_volume => "Menu music",
-            .bgm_set => "Music set",
-            .sound_set => "Sound set",
-            .sfx_volume => "Menu sounds",
-            .audio_rate => "Sample rate",
-            .audio_frames => "Buffer size",
-            .audio_device => "Output device",
-            .fullscreen => "Fullscreen",
-            .vsync => "VSync",
-            .reflex => "NVIDIA Reflex",
-            .bga_upscale => "BGA movie upscaling (FSRCNNX)",
-            .skin => "Skin",
-            .skin_slots => "Skins per screen",
-            .green => "Green number",
-            .lift => "Lift",
-            .hidden => "Hidden",
-            .judge_offset => "Judge offset",
-            .visual_offset => "Visual offset",
-            .import_beatoraja => "Import beatoraja scores",
-            .import_lr2 => "Import LR2 scores",
-            .ir_url => "IR server",
-            .ir_signup => "Create IR account",
-            .ir_signin => "Sign in to IR",
-            .ir_rename => "Change IR name",
-            .ir_upload => "Upload my scores to IR",
-            .ir_download => "Download my scores from IR",
-            .download_url => "Download URL",
-            .input_poll => "Key polling",
-            .bind_4k => "4 key",
-            .bind_5k => "5 key",
-            .bind_6k => "6 key",
-            .bind_7k => "7 key",
-            .bind_10k => "10 key",
-            .bind_14k => "14 key",
-            .bind_9k => "9 key (PMS)",
-            .beatoraja_select => "beatoraja controls",
-            .bind_start => "Start, Select",
+            .add_root => tr("Add folder"),
+            .clear_roots => tr("Remove all folders"),
+            .add_table => tr("Add by address"),
+            .update_tables => tr("Update all"),
+            .table_list => tr("Tables"),
+            .volume => tr("Master volume"),
+            .bgm_volume => tr("Menu music"),
+            .bgm_set => tr("Music set"),
+            .sound_set => tr("Sound set"),
+            .sfx_volume => tr("Menu sounds"),
+            .audio_rate => tr("Sample rate"),
+            .audio_frames => tr("Buffer size"),
+            .audio_device => tr("Output device"),
+            .fullscreen => tr("Fullscreen"),
+            .vsync => tr("VSync"),
+            .reflex => tr("NVIDIA Reflex"),
+            .bga_upscale => tr("BGA movie upscaling (FSRCNNX)"),
+            .skin => tr("Skin"),
+            .skin_slots => tr("Skins per screen"),
+            .language => tr("Language"),
+            .green => tr("Green number"),
+            .lift => tr("Lift"),
+            .hidden => tr("Hidden"),
+            .judge_offset => tr("Judge offset"),
+            .visual_offset => tr("Visual offset"),
+            .import_beatoraja => tr("Import beatoraja scores"),
+            .import_lr2 => tr("Import LR2 scores"),
+            .ir_url => tr("IR server"),
+            .ir_signup => tr("Create IR account"),
+            .ir_signin => tr("Sign in to IR"),
+            .ir_rename => tr("Change IR name"),
+            .ir_upload => tr("Upload my scores to IR"),
+            .ir_download => tr("Download my scores from IR"),
+            .download_url => tr("Download URL"),
+            .update => tr("Game version"),
+            .input_poll => tr("Key polling"),
+            .bind_4k => tr("4 key"),
+            .bind_5k => tr("5 key"),
+            .bind_6k => tr("6 key"),
+            .bind_7k => tr("7 key"),
+            .bind_10k => tr("10 key"),
+            .bind_14k => tr("14 key"),
+            .bind_9k => tr("9 key (PMS)"),
+            .beatoraja_select => tr("beatoraja controls"),
+            .bind_start => tr("Start, Select"),
         };
     }
 
     fn help(it: Item) []const u8 {
         return switch (it) {
-            .add_root => "Choose a folder. It is scanned for charts right away.",
-            .clear_roots => "Forgets the folder list. Scores and chart files stay.",
-            .add_table => "Paste a table's web address with Ctrl+V. It loads right away.",
-            .update_tables => "Downloads every added table again. F8 in song select does the same.",
-            .table_list => "Enter adds or removes the selected table. Removing keeps chart scores.",
-            .volume => "Everything the game plays.",
-            .sound_set => "Enter or click lists the sound sets, or picks a folder holding them. Left/Right steps through them.",
-            .bgm_set => "Enter or click lists select and decide music, or picks a folder holding it. Left/Right steps through them.",
-            .bgm_volume => "The loop behind song select and settings: the skin's own music if it has any.",
-            .sfx_volume => "Cursor, confirm and result sounds.",
-            .audio_rate => "Takes effect after a restart.",
-            .audio_frames => "Smaller is lower latency, too small crackles. Takes effect after a restart.",
-            .audio_device => "ALSA output, for Linux. Falls back to Default if it will not open. Applies when you leave settings.",
-            .fullscreen => "Applies at once.",
-            .vsync => "Applies at once. Off lowers input latency and may tear.",
-            .bga_upscale => "Cleaner, sharper movies when they are enlarged, for a little CPU and GPU time per movie frame. Applies to the next chart for deblocking.",
-            .reflex => "NVIDIA GPUs only. Boost holds GPU clocks high and uses more power.",
-            .skin_slots => "Enter picks a skin and its settings for each screen and key mode. The rest use the skin above.",
-            .skin => "Enter or click lists the skins folder, or picks a skin elsewhere. Left/Right steps through them.",
-            .green => "How long notes stay visible: higher is slower. Enter to type a number, 30 to 2000.",
-            .lift => "Raises the judge line. Home and End change it during play.",
-            .hidden => "Hides notes just above the judge line. Insert and Delete change it during play.",
-            .judge_offset => "Positive forgives a player who hits late.",
-            .visual_offset => "Moves the notes without moving the judgement.",
-            .import_beatoraja => "Choose score.db. Note: judging differs from beatoraja, so lr2oraja scores are recommended.",
-            .import_lr2 => "Choose the LR2 score database.",
-            .ir_url => "Base address of the internet ranking server.",
-            .ir_signup => "Makes an account on that server and signs in. Asks for a name, then a password.",
-            .ir_signin => "Signs in to an account you already have on that server.",
-            .ir_rename => "Changes the name shown in rankings. You then sign in with the new name. Scores stay.",
-            .ir_upload => "Sends saved replays the server does not have yet. Scores without a replay, like imported ones, rank as unverified.",
-            .ir_download => "Merges your scores on the server into this library. Better local scores stay.",
-            .download_url => "Where missing charts come from: an archive or a lookup service. {md5} becomes the chart's hash.",
-            .input_poll => "Key checks per second during play. Higher takes more CPU. Event uses OS key events. macOS always does.",
-            .bind_5k, .bind_10k => "Enter, then press each input in turn: 5 keys, scratch A, scratch B, per side.",
-            .bind_7k, .bind_14k => "Enter, then press each input in turn: 7 keys, scratch A, scratch B, per side.",
-            .bind_4k => "Enter, then press each of the 4 keys in turn.",
-            .bind_6k => "Enter, then press each of the 6 keys in turn.",
-            .bind_9k => "Enter, then press each of the 9 buttons in turn.",
-            .beatoraja_select => "Song select, result and play take the 7 key inputs and Start, Select as in beatoraja, on keyboard or controller.",
-            .bind_start => "Enter, then press Start, then Select. They open option panels in song select and change speed in play.",
+            .add_root => tr("Choose a folder. It is scanned for charts right away."),
+            .clear_roots => tr("Forgets the folder list. Scores and chart files stay."),
+            .add_table => tr("Paste a table's web address with Ctrl+V. It loads right away."),
+            .update_tables => tr("Downloads every added table again. F8 in song select does the same."),
+            .table_list => tr("Enter adds or removes the selected table. Removing keeps chart scores."),
+            .volume => tr("Everything the game plays."),
+            .sound_set => tr("Enter or click lists the sound sets, or picks a folder holding them. Left/Right steps through them."),
+            .bgm_set => tr("Enter or click lists select and decide music, or picks a folder holding it. Left/Right steps through them."),
+            .bgm_volume => tr("The loop behind song select and settings: the skin's own music if it has any."),
+            .sfx_volume => tr("Cursor, confirm and result sounds."),
+            .audio_rate => tr("Takes effect after a restart."),
+            .audio_frames => tr("Smaller is lower latency, too small crackles. Takes effect after a restart."),
+            .audio_device => tr("ALSA output, for Linux. Falls back to Default if it will not open. Applies when you leave settings."),
+            .fullscreen => tr("Applies at once."),
+            .vsync => tr("Applies at once. Off lowers input latency and may tear."),
+            .bga_upscale => tr("Cleaner, sharper movies when they are enlarged, for a little CPU and GPU time per movie frame. Applies to the next chart for deblocking."),
+            .reflex => tr("NVIDIA GPUs only. Boost holds GPU clocks high and uses more power."),
+            .skin_slots => tr("Enter picks a skin and its settings for each screen and key mode. The rest use the skin above."),
+            .language => tr("The game's language. Applies at once."),
+            .skin => tr("Enter or click lists the skins folder, or picks a skin elsewhere. Left/Right steps through them."),
+            .green => tr("How long notes stay visible: higher is slower. Enter to type a number, 30 to 2000."),
+            .lift => tr("Raises the judge line. Home and End change it during play."),
+            .hidden => tr("Hides notes just above the judge line. Insert and Delete change it during play."),
+            .judge_offset => tr("Positive forgives a player who hits late."),
+            .visual_offset => tr("Moves the notes without moving the judgement."),
+            .import_beatoraja => tr("Choose score.db. Note: judging differs from beatoraja, so lr2oraja scores are recommended."),
+            .import_lr2 => tr("Choose the LR2 score database."),
+            .ir_url => tr("Base address of the internet ranking server."),
+            .ir_signup => tr("Makes an account on that server and signs in. Asks for a name, then a password."),
+            .ir_signin => tr("Signs in to an account you already have on that server."),
+            .ir_rename => tr("Changes the name shown in rankings. You then sign in with the new name. Scores stay."),
+            .ir_upload => tr("Sends saved replays the server does not have yet. Scores without a replay, like imported ones, rank as unverified."),
+            .ir_download => tr("Merges your scores on the server into this library. Better local scores stay."),
+            .download_url => tr("Where missing charts come from: an archive or a lookup service. {md5} becomes the chart's hash."),
+            .update => tr("Checks GitHub at launch. Enter installs a new version for the next launch, or opens its page where the game cannot replace itself. Settings and scores stay."),
+            .input_poll => tr("Key checks per second during play. Higher takes more CPU. Event uses OS key events. macOS always does."),
+            .bind_5k, .bind_10k => tr("Enter, then press each input in turn: 5 keys, scratch A, scratch B, per side."),
+            .bind_7k, .bind_14k => tr("Enter, then press each input in turn: 7 keys, scratch A, scratch B, per side."),
+            .bind_4k => tr("Enter, then press each of the 4 keys in turn."),
+            .bind_6k => tr("Enter, then press each of the 6 keys in turn."),
+            .bind_9k => tr("Enter, then press each of the 9 buttons in turn."),
+            .beatoraja_select => tr("Song select, result and play take the 7 key inputs and Start, Select as in beatoraja, on keyboard or controller."),
+            .bind_start => tr("Enter, then press Start, then Select. They open option panels in song select and change speed in play."),
         };
     }
 };
@@ -202,7 +211,7 @@ pub const State = struct {
     /// Which button of which bind group is being captured.
     capture_slot: ?u8 = null,
     capture_group: Item = .bind_7k,
-    capture_buf: [64]u8 = undefined,
+    capture_buf: [128]u8 = undefined,
     /// False while choosing a tab; true once inside one.
     inside: bool = false,
     table_row: usize = 0,
@@ -219,11 +228,12 @@ pub const State = struct {
     account: ?*ir.Account = null,
     /// Set once the name is typed: the row then takes the password.
     account_name: ?[]const u8 = null,
+    update: ?*update.Job = null,
+    update_seen: update.Phase = .checking,
 };
 
 const items = std.enums.values(Item);
 const poll_rates = [_]u32{ 0, 1000, 2000, 4000, 8000 };
-const poll_labels = [_][]const u8{ "Event", "1000", "2000", "4000", "8000" };
 
 /// A rate typed into config.json shows as the nearest choice at or below it.
 fn pollIndex(hz: u32) usize {
@@ -251,9 +261,10 @@ fn pickerDone(ud: ?*anyopaque, files: [*c]const [*c]const u8, _: c_int) callconv
     s.picker_state.store(picker_chosen, .release);
 }
 
-const db_filter = [_]c.SDL_DialogFileFilter{
-    .{ .name = "Score database", .pattern = "db;sqlite;sqlite3" },
-    .{ .name = "All files", .pattern = "*" },
+// SDL reads the names until the dialog closes, so they live here, filled as it opens.
+var db_filter = [_]c.SDL_DialogFileFilter{
+    .{ .name = null, .pattern = "db;sqlite;sqlite3" },
+    .{ .name = null, .pattern = "*" },
 };
 
 fn usesPicker(it: Item) bool {
@@ -267,7 +278,11 @@ fn openPicker(a: *App, it: Item) void {
     s.picker_state.store(picker_open, .release);
     switch (it) {
         .add_root, .bgm_set, .sound_set => c.SDL_ShowOpenFolderDialog(pickerDone, s, a.g.win, null, false),
-        .import_beatoraja, .import_lr2 => c.SDL_ShowOpenFileDialog(pickerDone, s, a.g.win, &db_filter, db_filter.len, null, false),
+        .import_beatoraja, .import_lr2 => {
+            db_filter[0].name = tr("Score database").ptr;
+            db_filter[1].name = tr("All files").ptr;
+            c.SDL_ShowOpenFileDialog(pickerDone, s, a.g.win, &db_filter, db_filter.len, null, false);
+        },
         else => c.SDL_ShowOpenFileDialog(pickerDone, s, a.g.win, null, 0, null, false),
     }
 }
@@ -319,6 +334,51 @@ fn pollSync(a: *App) void {
     }
     s.destroy();
     a.set.sync = null;
+}
+
+/// Runs in every scene, so song select can announce a release.
+pub fn pollUpdate(a: *App) void {
+    const j = a.set.update orelse return;
+    const phase = j.phase.load(.acquire);
+    if (phase == a.set.update_seen) return;
+    a.set.update_seen = phase;
+    switch (phase) {
+        .available => a.sel.status = i18n.bufPrint(&a.sel.status_buf, "actuon {s} is out: see Settings, Online", .{j.release.?.version}) catch "",
+        .installed => say(a, "Updated to {s}. Restart to use it.", .{j.release.?.version}),
+        .failed => say(a, "Update failed: {t}", .{j.err}),
+        .checking, .current, .installing => {},
+    }
+}
+
+fn updateLabel(a: *App, buf: []u8) []const u8 {
+    const j = a.set.update orelse return update.current_version;
+    return switch (j.phase.load(.acquire)) {
+        .checking => tr("Checking..."),
+        .current => i18n.bufPrint(buf, "{s} (latest)", .{update.current_version}) catch "",
+        .available => i18n.bufPrint(buf, "{s}, {s} available", .{ update.current_version, j.release.?.version }) catch "",
+        .installing => blk: {
+            const total = j.progress.total.load(.acquire);
+            if (total == 0) break :blk tr("Downloading...");
+            break :blk i18n.bufPrint(buf, "Downloading {d}%", .{j.progress.done.load(.acquire) * 100 / total}) catch "";
+        },
+        .installed => tr("Restart to use the new version"),
+        .failed => i18n.bufPrint(buf, "{s}, update failed", .{update.current_version}) catch "",
+    };
+}
+
+fn activateUpdate(a: *App) void {
+    const j = a.set.update orelse {
+        a.set.update = update.start(a.gpa);
+        return;
+    };
+    switch (j.phase.load(.acquire)) {
+        .checking, .installing, .installed => {},
+        .current, .failed => j.check(),
+        .available => {
+            if (j.canInstall()) return j.install();
+            if (!c.SDL_OpenURL(update.releases_page)) say(a, "Could not open the browser", .{});
+        },
+    }
 }
 
 fn startAccount(a: *App, it: Item) void {
@@ -473,14 +533,15 @@ fn openDrop(a: *App, it: Item) void {
     fill: switch (it) {
         .audio_frames => {
             now = std.fmt.allocPrint(al, "{d}", .{a.cfg.audio_frames}) catch return;
+            var frames_buf: [32]u8 = undefined;
             for ([_]u32{ 32, 64, 128, 256, 512, 1024, 2048, 4096 }) |n| {
-                labels.append(al, std.fmt.allocPrint(al, "{d} frames", .{n}) catch return) catch return;
+                labels.append(al, al.dupe(u8, i18n.bufPrint(&frames_buf, "{d} frames", .{n}) catch return) catch return) catch return;
                 values.append(al, std.fmt.allocPrint(al, "{d}", .{n}) catch return) catch return;
             }
         },
         .audio_device => {
             now = a.cfg.audio_device;
-            labels.append(al, "Default") catch return;
+            labels.append(al, tr("Default")) catch return;
             values.append(al, "") catch return;
             for (a.engine.alsaDevices(al)) |n| {
                 labels.append(al, n) catch return;
@@ -489,8 +550,8 @@ fn openDrop(a: *App, it: Item) void {
         },
         .skin => {
             now = a.cfg.skin;
-            last = "Pick a skin elsewhere...";
-            labels.append(al, "Built-in") catch return;
+            last = tr("Pick a skin elsewhere...");
+            labels.append(al, tr("Built-in")) catch return;
             values.append(al, "") catch return;
             const root = skin_mod.skinsDir(al) catch break :fill;
             fs.mkdirs(root) catch {};
@@ -501,8 +562,8 @@ fn openDrop(a: *App, it: Item) void {
         },
         .bgm_set, .sound_set => {
             now = if (it == .bgm_set) a.cfg.bgm_path else a.cfg.sound_path;
-            last = "Pick a folder...";
-            labels.append(al, "From the skin") catch return;
+            last = tr("Pick a folder...");
+            labels.append(al, tr("From the skin")) catch return;
             values.append(al, "") catch return;
             const sets = if (it == .bgm_set) skin_sound.musicSets(al, a.cfg.bgm_root) else skin_sound.soundSets(al, a.cfg.sound_root);
             for (sets) |set| {
@@ -532,7 +593,7 @@ fn chooseDrop(a: *App, i: usize) void {
         .audio_frames => a.cfg.audio_frames = std.fmt.parseInt(u32, v, 10) catch return,
         .audio_device => {
             a.cfg.audio_device = v;
-            say(a, "{s}", .{if (v.len > 0) v else "Default"});
+            say(a, "{s}", .{if (v.len > 0) v else tr("Default")});
         },
         .skin => a.cfg.skin = v,
         .bgm_set, .sound_set => {
@@ -592,12 +653,12 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
         const fh = 30 * u;
         g.round(fx, y + (h - fh) / 2, right - fx, fh, 6 * u, gfx.well);
         switch (it) {
-            .ir_rename => g.fmt(fx + 10 * u, text_y, g.scaled(16), gfx.white, "New name: {s}_", .{a.text.items}),
+            .ir_rename => g.fmtTr(fx + 10 * u, text_y, g.scaled(16), gfx.white, "New name: {s}_", .{a.text.items}),
             .ir_signup, .ir_signin => if (a.set.account_name == null) {
-                g.fmt(fx + 10 * u, text_y, g.scaled(16), gfx.white, "Name: {s}_", .{a.text.items});
+                g.fmtTr(fx + 10 * u, text_y, g.scaled(16), gfx.white, "Name: {s}_", .{a.text.items});
             } else {
                 const stars: [64]u8 = @splat('*');
-                g.fmt(fx + 10 * u, text_y, g.scaled(16), gfx.white, "Password: {s}_", .{stars[0..@min(a.text.items.len, stars.len)]});
+                g.fmtTr(fx + 10 * u, text_y, g.scaled(16), gfx.white, "Password: {s}_", .{stars[0..@min(a.text.items.len, stars.len)]});
             },
             else => g.fmt(fx + 10 * u, text_y, g.scaled(16), gfx.white, "{s}_", .{a.text.items}),
         }
@@ -630,7 +691,7 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
         .fullscreen => drawToggle(g, right, y, h, cfg.fullscreen, on),
         .bga_upscale => drawToggle(g, right, y, h, cfg.bga_upscale, on),
         .beatoraja_select => drawToggle(g, right, y, h, cfg.beatoraja_select, on),
-        .vsync => if (drawChoices(g, right, y, h, &.{ "Off", "On", "Adaptive" }, if (cfg.vsync == 0) 0 else if (cfg.vsync == 1) 1 else 2, on)) |i| {
+        .vsync => if (drawChoices(g, right, y, h, &.{ tr("Off"), tr("On"), tr("Adaptive") }, if (cfg.vsync == 0) 0 else if (cfg.vsync == 1) 1 else 2, on)) |i| {
             a.sfx(.adjust);
             cfg.vsync = switch (i) {
                 0 => 0,
@@ -639,12 +700,16 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
             };
             g.setVsync(cfg.vsync);
         },
-        .reflex => if (drawChoices(g, right, y, h, &.{ "Off", "On", "On + Boost" }, @intCast(std.math.clamp(cfg.reflex, 0, 2)), on)) |i| {
+        .reflex => if (drawChoices(g, right, y, h, &.{ tr("Off"), tr("On"), tr("On + Boost") }, @intCast(std.math.clamp(cfg.reflex, 0, 2)), on)) |i| {
             a.sfx(.adjust);
             cfg.reflex = @intCast(i);
             g.setReflex(cfg.reflex);
         },
-        .input_poll => if (drawChoices(g, right, y, h, &poll_labels, pollIndex(cfg.input_poll_hz), on)) |i| {
+        .language => if (drawChoices(g, right, y, h, &i18n.names, @backingInt(i18n.current), on)) |i| {
+            a.sfx(.adjust);
+            setLanguage(a, @fromBackingInt(@intCast(i)));
+        },
+        .input_poll => if (drawChoices(g, right, y, h, &.{ tr("Event"), "1000", "2000", "4000", "8000" }, pollIndex(cfg.input_poll_hz), on)) |i| {
             a.sfx(.adjust);
             cfg.input_poll_hz = poll_rates[i];
         },
@@ -652,7 +717,7 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
             a.sfx(.adjust);
             cfg.audio_rate = if (i == 0) 44100 else 48000;
         },
-        .audio_frames => drawDropValue(a, it, x, right, y, h, std.fmt.bufPrint(&buf, "{d} frames", .{cfg.audio_frames}) catch "", on),
+        .audio_frames => drawDropValue(a, it, x, right, y, h, i18n.bufPrint(&buf, "{d} frames", .{cfg.audio_frames}) catch "", on),
         .green => {
             step(a, it, drawStepper(g, right, y, h, std.fmt.bufPrint(&buf, "{d}", .{greenShown(cfg.green_ms)}) catch "", on));
             g.textCentered(std.fmt.bufPrint(&buf, "{d} ms", .{cfg.green_ms}) catch "", right - 80 * u, y + h - 17 * u, g.scaled(12), if (on) gfx.white else gfx.dim);
@@ -660,11 +725,11 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
         .bgm_set, .sound_set => {
             const path = if (it == .bgm_set) cfg.bgm_path else cfg.sound_path;
             var name_buf: [512]u8 = undefined;
-            const name = if (path.len > 0) std.fmt.bufPrint(&name_buf, "{s}/{s}", .{ std.fs.path.basename(std.fs.path.dirname(path) orelse ""), std.fs.path.basename(path) }) catch std.fs.path.basename(path) else "From the skin";
+            const name = if (path.len > 0) std.fmt.bufPrint(&name_buf, "{s}/{s}", .{ std.fs.path.basename(std.fs.path.dirname(path) orelse ""), std.fs.path.basename(path) }) catch std.fs.path.basename(path) else tr("From the skin");
             drawDropValue(a, it, x, right, y, h, name, on);
         },
         .skin, .audio_device => {
-            const name = if (it == .audio_device) deviceLabel(cfg.audio_device) else if (cfg.skin.len > 0) std.fs.path.basename(cfg.skin) else "Built-in";
+            const name = if (it == .audio_device) deviceLabel(cfg.audio_device) else if (cfg.skin.len > 0) std.fs.path.basename(cfg.skin) else tr("Built-in");
             drawDropValue(a, it, x, right, y, h, name, on);
         },
         .lift => step(a, it, drawStepper(g, right, y, h, std.fmt.bufPrint(&buf, "{d}%", .{@as(u32, @intFromFloat(@round(cfg.lift * 100)))}) catch "", on)),
@@ -674,11 +739,12 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
         .bind_4k, .bind_5k, .bind_6k, .bind_7k, .bind_10k, .bind_14k, .bind_9k, .bind_start => drawKeys(a, it, right, y, h, on),
         else => {
             const value = switch (it) {
-                .add_root => std.fmt.bufPrint(&buf, "{d} configured", .{cfg.roots.len}) catch "",
-                .add_table => std.fmt.bufPrint(&buf, "{d} added", .{cfg.tables.len}) catch "",
-                .ir_url => if (cfg.ir_url.len > 0) cfg.ir_url else "Not set",
-                .ir_signin => if (cfg.ir_token.len > 0) "Signed in" else "Not signed in",
+                .add_root => i18n.bufPrint(&buf, "{d} configured", .{cfg.roots.len}) catch "",
+                .add_table => i18n.bufPrint(&buf, "{d} added", .{cfg.tables.len}) catch "",
+                .ir_url => if (cfg.ir_url.len > 0) cfg.ir_url else tr("Not set"),
+                .ir_signin => if (cfg.ir_token.len > 0) tr("Signed in") else tr("Not signed in"),
                 .download_url => cfg.download_url,
+                .update => updateLabel(a, &buf),
                 else => "",
             };
             const col = if (on) gfx.white else gfx.dim;
@@ -696,7 +762,7 @@ fn drawNav(a: *App, current: Section, nav_w: f32) void {
     const g = &a.g;
     const s = &a.set;
     const u = g.h / 720;
-    _ = g.text("Settings", 22 * u, 18 * u, g.scaled(32), gfx.white);
+    _ = g.text(tr("Settings"), 22 * u, 18 * u, g.scaled(32), gfx.white);
     var sy = 76 * u;
     for (std.enums.values(Section)) |sec| {
         const here = sec == current;
@@ -760,16 +826,16 @@ fn drawHelp(a: *App, px: f32, pw: f32, help_y: f32, help_h: f32) void {
     const u = g.h / 720;
     g.panel(px, help_y, pw, help_h, "");
     const help = if (s.picker_for != null)
-        "Waiting for the file dialog..."
+        tr("Waiting for the file dialog...")
     else if (s.capture_slot) |slot|
-        std.fmt.bufPrint(&s.capture_buf, "Press the input for button {d} of {d}. Esc cancels.", .{ slot + 1, bindsOf(a, s.capture_group).len }) catch ""
+        i18n.bufPrint(&s.capture_buf, "Press the input for button {d} of {d}. Esc cancels.", .{ slot + 1, bindsOf(a, s.capture_group).len }) catch ""
     else if (s.inside)
         items[s.cursor].help()
     else
-        "Enter or click to open this tab.";
+        tr("Enter or click to open this tab.");
     g.textClip(help, px + 18 * u, help_y + 8 * u, pw - 36 * u, g.scaled(14), gfx.sky);
     if (s.message.len > 0) g.textClip(s.message, px + 18 * u, help_y + 30 * u, pw - 36 * u, g.scaled(14), gfx.white);
-    const hint = if (s.inside) "Up/Down select    Left/Right change    Enter edit    Esc or right click back" else "Up/Down choose a tab    Enter open    Esc or right click leave";
+    const hint = if (s.inside) tr("Up/Down select    Left/Right change    Enter edit    Esc or right click back") else tr("Up/Down choose a tab    Enter open    Esc or right click leave");
     _ = g.text(hint, px, g.h - 26 * u, g.scaled(12), gfx.dim);
 }
 
@@ -801,7 +867,7 @@ pub fn draw(a: *App) void {
 fn rowActs(it: Item) bool {
     return switch (it) {
         // Lists open from their value or with Enter, not from anywhere on the row.
-        .volume, .bgm_volume, .sfx_volume, .audio_rate, .audio_frames, .audio_device, .vsync, .reflex, .input_poll, .lift, .hidden, .judge_offset, .visual_offset, .skin, .bgm_set, .sound_set => false,
+        .volume, .bgm_volume, .sfx_volume, .audio_rate, .audio_frames, .audio_device, .vsync, .reflex, .language, .input_poll, .lift, .hidden, .judge_offset, .visual_offset, .skin, .bgm_set, .sound_set => false,
         else => true,
     };
 }
@@ -837,6 +903,7 @@ fn adjust(a: *App, it: Item, dir: i32) void {
             cfg.reflex = @mod(cfg.reflex + dir, 3);
             a.g.setReflex(cfg.reflex);
         },
+        .language => setLanguage(a, @fromBackingInt(@intCast(@mod(@as(i32, @backingInt(i18n.current)) + dir, @as(i32, i18n.names.len))))),
         .beatoraja_select => cfg.beatoraja_select = !cfg.beatoraja_select,
         .bga_upscale => {
             cfg.bga_upscale = !cfg.bga_upscale;
@@ -862,9 +929,17 @@ fn adjust(a: *App, it: Item, dir: i32) void {
     }
 }
 
+/// Rows are labelled when they load, so the song list reloads with the new words.
+fn setLanguage(a: *App, lang: i18n.Lang) void {
+    i18n.current = lang;
+    a.cfg.language = @tagName(lang);
+    a.saveConfig();
+    select.reload(a);
+}
+
 /// ALSA names run long; the end, with its hw:N,N, is what tells them apart.
 fn deviceLabel(name: []const u8) []const u8 {
-    if (name.len == 0) return "Default";
+    if (name.len == 0) return tr("Default");
     return name[name.len - @min(name.len, 48) ..];
 }
 
@@ -875,7 +950,7 @@ fn cycleDevice(a: *App, dir: i32) void {
     if (names.len == 0) return say(a, "No ALSA outputs found", .{});
     a.cfg.audio_device = a.arena.allocator().dupe(u8, skin_sound.nextSet(a.cfg.audio_device, names, dir)) catch return;
     a.saveConfig();
-    say(a, "{s}", .{if (a.cfg.audio_device.len > 0) a.cfg.audio_device else "Default"});
+    say(a, "{s}", .{if (a.cfg.audio_device.len > 0) a.cfg.audio_device else tr("Default")});
 }
 
 const SetList = *const fn (std.mem.Allocator, []const u8) []const []const u8;
@@ -927,7 +1002,7 @@ fn cycleSkin(a: *App, dir: i32) void {
 }
 
 pub fn say(a: *App, comptime f: []const u8, args: anytype) void {
-    a.set.message = std.fmt.bufPrint(&a.set.message_buf, f, args) catch "";
+    a.set.message = i18n.bufPrint(&a.set.message_buf, f, args) catch "";
 }
 
 const green_min = 30;
@@ -1066,7 +1141,7 @@ fn drawTableList(a: *App, item_index: usize, x: f32, w: f32, top: f32, bottom: f
         const added = tableAdded(a, row.url);
         const name_y = y + (rh - 4 * u - 22 * u) / 2;
         g.textClip(row.name, x + 12 * u, name_y, w - 140 * u, g.scaled(16), if (added or on or hover) gfx.white else gfx.dim);
-        g.textRight(if (added) (if (on) "Remove" else "Added") else "Add", x + w - 14 * u, name_y + 2 * u, g.scaled(14), if (on) gfx.white else if (added) gfx.cyan else gfx.dim);
+        g.textRight(if (added) (if (on) tr("Remove") else tr("Added")) else tr("Add"), x + w - 14 * u, name_y + 2 * u, g.scaled(14), if (on) gfx.white else if (added) gfx.cyan else gfx.dim);
         if (hover and s.capture_slot == null and s.editing == null and g.clickIn(x, y, w, rh - 4 * u)) {
             s.cursor = item_index;
             s.table_row = i;
@@ -1232,6 +1307,7 @@ fn activate(a: *App, it: Item) void {
         .table_list => toggleTableRow(a),
         .ir_upload => startSync(a, true),
         .ir_download => startSync(a, false),
+        .update => activateUpdate(a),
         .skin_slots => skinslots.open(a),
         .bind_4k, .bind_5k, .bind_6k, .bind_7k, .bind_10k, .bind_14k, .bind_9k, .bind_start => {
             s.capture_group = it;
@@ -1535,6 +1611,21 @@ test "binding walks every button and escape stops it" {
     for (a.cfg.keys4, 0..) |_, i| captured(a, @intCast(200 + i));
     try std.testing.expect(a.set.capture_slot == null);
     try std.testing.expectEqual(@as(u16, 203), a.cfg.keys4[3]);
+}
+
+test "the language row steps through every language, wraps and is saved" {
+    const a = try testing.open();
+    defer testing.close(a);
+    defer i18n.current = .en;
+    openItem(a, .language);
+    key(a, c.SDL_SCANCODE_RIGHT);
+    try std.testing.expectEqual(.ko, i18n.current);
+    try std.testing.expectEqualStrings("ko", a.cfg.language);
+    try std.testing.expectEqualStrings("언어", Item.language.name());
+    key(a, c.SDL_SCANCODE_LEFT);
+    key(a, c.SDL_SCANCODE_LEFT);
+    try std.testing.expectEqual(.zh, i18n.current);
+    try std.testing.expectEqualStrings("zh", a.cfg.language);
 }
 
 test "clearing library folders empties the list" {

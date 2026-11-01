@@ -1,5 +1,6 @@
 //! Course (dan) play: chains charts, carrying the gauge and summing the score.
 const std = @import("std");
+const tr = @import("i18n.zig").tr;
 const c = @import("c");
 const core = @import("actuon_core");
 const app_mod = @import("app.zig");
@@ -43,7 +44,7 @@ fn lookup(a: *App, al: std.mem.Allocator, hash: []const u8) !?[]const u8 {
 pub fn start(a: *App, id: i64) void {
     startImpl(a, id) catch |e| {
         std.log.err("course: {t}", .{e});
-        a.sel.status = "Could not start course";
+        a.sel.status = tr("Could not start course");
     };
 }
 
@@ -62,7 +63,7 @@ fn startImpl(a: *App, id: i64) !void {
     while (it.next()) |h| {
         if (h.len < 3) continue;
         const p = (try lookup(a, al, h)) orelse {
-            a.sel.status = "Course has charts missing from the library";
+            a.sel.status = tr("Course has charts missing from the library");
             arena.deinit();
             return;
         };

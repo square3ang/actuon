@@ -7,10 +7,13 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:latest
     steps:
-      - run: pacman -Syu --noconfirm git zig sdl3 sdl3_ttf portaudio sqlite lua54 libarchive ffmpeg vulkan-icd-loader vulkan-headers rust python base-devel pkgconf rclone
+      - run: pacman -Syu --noconfirm git zig sdl3 sdl3_ttf portaudio sqlite lua54 libarchive ffmpeg vulkan-icd-loader vulkan-headers rust python nodejs base-devel pkgconf rclone
       - uses: actions/checkout@v4
+      # A tag the binary does not report would offer the same update forever.
+      - run: grep -qF ".version = \"${GITHUB_REF_NAME#v}\"" build.zig.zon
       - run: cargo install naga-cli --version 30.0.1 --locked && echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - run: zig build test
+      - run: node tests/site_lang.mjs
       - run: zig build tools -Doptimize=ReleaseSafe
       - run: python3 tests/golden_check.py "$PWD/zig-out/bin/chartdump"
       - name: Parser fuzz
@@ -26,19 +29,28 @@ jobs:
         working-directory: web
       - run: python3 tests/ir_e2e.py server/target/release/actuon-ir zig-out/bin/mkreplay tests/charts/stop.bms "$(mktemp -d)"
       - run: python3 tests/backup_check.py server/backup/backup.sh "$(mktemp -d)"
+      - run: |
+          curl -fsSLo /usr/local/bin/linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage
+          chmod +x /usr/local/bin/linuxdeploy
+          APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 packaging/linux/build-appimage.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: linux, path: actuon-x86_64.AppImage, if-no-files-found: error }
   macos:
     runs-on: macos-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with: { version: 0.17.0 }
-      - run: brew install sdl3 sdl3_ttf portaudio sqlite lua@5.4 libarchive ffmpeg pkgconf spirv-cross
+      - run: brew install sdl3 sdl3_ttf portaudio sqlite lua@5.4 libarchive ffmpeg pkgconf spirv-cross dylibbundler
+      # Homebrew keeps libarchive out of the default pkg-config path.
+      - run: echo "PKG_CONFIG_PATH=$(brew --prefix libarchive)/lib/pkgconfig" >> "$GITHUB_ENV"
       - run: cargo install naga-cli --version 30.0.1 --locked
       - run: zig build test
+      - run: packaging/macos/package.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: macos, path: zig-out/package/actuon.dmg, if-no-files-found: error }
   windows:
     runs-on: windows-latest
-    continue-on-error: true
     defaults: { run: { shell: 'msys2 {0}' } }
     steps:
       - uses: actions/checkout@v4
@@ -53,3 +65,15 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with: { version: 0.17.0 }
       - run: cargo install naga-cli --version 30.0.1 --locked && PATH="$HOME/.cargo/bin:$PATH" zig build test
+      - run: PATH="$HOME/.cargo/bin:$PATH" packaging/windows/package.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: windows, path: zig-out/actuon-windows.zip, if-no-files-found: error }
+  release:
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: assets, merge-multiple: true }
+      - run: gh release create "$GITHUB_REF_NAME" assets/* --repo "$GITHUB_REPOSITORY" --generate-notes
+        env: { GH_TOKEN: "${{ github.token }}" }

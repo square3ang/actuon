@@ -4,6 +4,8 @@ const select = @import("select.zig");
 const c = @import("c");
 const core = @import("actuon_core");
 const gfx = @import("gfx.zig");
+const i18n = @import("i18n.zig");
+const tr = i18n.tr;
 const app_mod = @import("app.zig");
 const play = @import("play.zig");
 const db_mod = @import("../db/db.zig");
@@ -128,9 +130,9 @@ pub fn rankOf(ex: u32, notes: u32) []const u8 {
 fn irLabel(r: *const State, buf: []u8) []const u8 {
     const b = r.board orelse return "";
     return switch (b.state.load(.acquire)) {
-        ir.Board.pending => "IR: uploading...",
+        ir.Board.pending => tr("IR: uploading..."),
         ir.Board.accepted => b.placeText(buf),
-        else => "IR: upload failed",
+        else => tr("IR: upload failed"),
     };
 }
 
@@ -212,10 +214,10 @@ fn drawExPanel(a: *App, ease: f32, ex: u32) void {
         const mag: u64 = @intCast(if (delta >= 0) delta else -delta);
         g.fmt(44 * u, 574 * u, g.scaled(14), if (delta >= 0) gfx.cyan else gfx.dim, "BEST {d}  {s}{d}", .{ r.prev_ex, if (delta >= 0) "+" else "-", mag });
     } else if (r.paused) {
-        _ = g.text("NOT RECORDED: PAUSED", 44 * u, 574 * u, g.scaled(14), gfx.amber);
+        _ = g.text(tr("NOT RECORDED: PAUSED"), 44 * u, 574 * u, g.scaled(14), gfx.amber);
     } else if (r.ln_unranked) {
-        _ = g.text("NOT RECORDED: LN MODE", 44 * u, 574 * u, g.scaled(14), gfx.amber);
-    } else _ = g.text("NOT RECORDED", 44 * u, 574 * u, g.scaled(14), gfx.dim);
+        _ = g.text(tr("NOT RECORDED: LN MODE"), 44 * u, 574 * u, g.scaled(14), gfx.amber);
+    } else _ = g.text(tr("NOT RECORDED"), 44 * u, 574 * u, g.scaled(14), gfx.dim);
     const lamp_y = 622 * u;
     if (r.recorded or r.ir_used) g.panel(30 * u, lamp_y, g.w * 0.48 - 44 * u, 48 * u, "");
     if (r.recorded) g.fmt(44 * u, lamp_y + 14 * u, g.scaled(14), gfx.dim, "BEST LAMP  {s}", .{clear_names[r.prev_clear]});
@@ -276,7 +278,7 @@ pub fn draw(a: *App) void {
     drawJudges(a, age_ms);
     var key_buf: [32]u8 = undefined;
     var hint_buf: [48]u8 = undefined;
-    g.textRight(std.fmt.bufPrint(&hint_buf, "{s}: BACK", .{select.guideKey(a, a.cfg.p1[0], "ENTER", &key_buf)}) catch "", g.w - 20 * u, g.h - 26 * u, g.scaled(14), gfx.dim);
+    g.textRight(i18n.bufPrint(&hint_buf, "{s}: BACK", .{select.guideKey(a, a.cfg.p1[0], "ENTER", &key_buf)}) catch "", g.w - 20 * u, g.h - 26 * u, g.scaled(14), gfx.dim);
 }
 
 pub fn key(a: *App, sc: u32) void {

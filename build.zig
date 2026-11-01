@@ -70,6 +70,9 @@ pub fn build(b: *std.Build) void {
     mod.addAnonymousImport("backdrop", .{ .root_source_file = b.path("assets/backgrounds/rogland_clear_night.jpg") });
     mod.addAnonymousImport("font_medium", .{ .root_source_file = b.path("assets/fonts/SUITE-Medium.ttf") });
     mod.addAnonymousImport("font_heavy", .{ .root_source_file = b.path("assets/fonts/SUITE-ExtraBold.ttf") });
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    mod.addOptions("build_options", build_options);
     const os = target.result.os.tag;
     // Shaders are WGSL. Vulkan reads naga's SPIR-V; spirv-cross turns that into what the other backends read.
     const shaders = [_][]const u8{ "sprite.vert", "sprite.frag", "upscale.vert", "upscale.frag", "fsrcnnx_unpack.frag", "fsrcnnx_0.frag", "fsrcnnx_1.frag", "fsrcnnx_2.frag", "fsrcnnx_3.frag", "fsrcnnx_4.frag", "fsrcnnx_5.frag", "fsrcnnx_6.frag", "fsrcnnx_7.frag", "fsrcnnx_8.frag", "fsrcnnx_9.frag", "fsrcnnx_10.frag", "fsrcnnx_11.frag", "fsrcnnx_12.frag" };

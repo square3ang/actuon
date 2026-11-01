@@ -78,6 +78,8 @@ pub const Config = struct {
     /// A folder of system sounds, ahead of the skin's. Empty for the skin's own.
     sound_path: []const u8 = "",
     sound_root: []const u8 = "",
+    /// An i18n language code. Empty follows the OS language.
+    language: []const u8 = "",
     ir_url: []const u8 = "https://ir.actuon.app",
     ir_token: []const u8 = "",
     /// Either a direct archive or a JSON answer naming one (see download.packageUrl).

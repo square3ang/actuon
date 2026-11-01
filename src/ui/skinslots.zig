@@ -2,6 +2,8 @@
 const std = @import("std");
 const c = @import("c");
 const gfx = @import("gfx.zig");
+const i18n = @import("i18n.zig");
+const tr = i18n.tr;
 const app_mod = @import("app.zig");
 const config = @import("../game/config.zig");
 const skinconf = @import("skinconf.zig");
@@ -22,16 +24,16 @@ pub const State = struct {
 
 fn slotName(slot: Slot) []const u8 {
     return switch (slot) {
-        .select => "Song select",
-        .decide => "Decide",
-        .result => "Result",
-        .beat7 => "Play 7 keys",
-        .beat5 => "Play 5 keys",
-        .beat14 => "Play 14 keys",
-        .beat10 => "Play 10 keys",
-        .popn9 => "Play 9 buttons",
-        .beat4 => "Play 4 keys",
-        .beat6 => "Play 6 keys",
+        .select => tr("Song select"),
+        .decide => tr("Decide"),
+        .result => tr("Result"),
+        .beat7 => tr("Play 7 keys"),
+        .beat5 => tr("Play 5 keys"),
+        .beat14 => tr("Play 14 keys"),
+        .beat10 => tr("Play 10 keys"),
+        .popn9 => tr("Play 9 buttons"),
+        .beat4 => tr("Play 4 keys"),
+        .beat6 => tr("Play 6 keys"),
     };
 }
 
@@ -78,10 +80,10 @@ fn openDrop(a: *App) void {
     const files = s.choices[s.cursor];
     const now = a.cfg.skins.get(slots[s.cursor]);
     const labels = al.alloc([]const u8, files.len + 2) catch return;
-    labels[0] = std.fmt.allocPrint(al, "Default ({s})", .{defaultName(a)}) catch return;
-    labels[1] = "Built-in";
-    var cursor: usize = if (std.mem.eql(u8, now, config.builtin_skin)) 1 else 0;
     var buf: [1024]u8 = undefined;
+    labels[0] = al.dupe(u8, i18n.bufPrint(&buf, "Default ({s})", .{defaultName(a)}) catch return) catch return;
+    labels[1] = tr("Built-in");
+    var cursor: usize = if (std.mem.eql(u8, now, config.builtin_skin)) 1 else 0;
     for (files, 2..) |f, i| {
         labels[i] = al.dupe(u8, shown(&buf, f)) catch return;
         if (std.mem.eql(u8, f, now)) cursor = i;
@@ -154,7 +156,7 @@ fn shown(buf: []u8, path: []const u8) []const u8 {
 }
 
 fn defaultName(a: *const App) []const u8 {
-    return if (a.cfg.skin.len > 0) std.fs.path.basename(a.cfg.skin) else "Built-in";
+    return if (a.cfg.skin.len > 0) std.fs.path.basename(a.cfg.skin) else tr("Built-in");
 }
 
 pub fn draw(a: *App) void {
@@ -167,7 +169,7 @@ pub fn draw(a: *App) void {
     }
     const drop_click = s.drop.open and g.clicked;
     if (drop_click) g.clicked = false;
-    _ = g.text("Skins per screen", 22 * u, 18 * u, g.scaled(32), gfx.white);
+    _ = g.text(tr("Skins per screen"), 22 * u, 18 * u, g.scaled(32), gfx.white);
     const top = 76 * u;
     const row_h = 44 * u;
     const rx = 14 * u;
@@ -184,7 +186,7 @@ pub fn draw(a: *App) void {
         } else if (g.hit(rx, y, rw, rh)) g.round(rx, y, rw, rh, 8 * u, gfx.rule);
         const ox = rx + rw - 8 * u - options_w;
         g.round(ox, y + 6 * u, options_w, rh - 12 * u, 6 * u, if (g.hit(ox, y, options_w, rh)) gfx.rule else gfx.well);
-        g.textCentered("Options", ox + options_w / 2, y + (rh - 18 * u) / 2, g.scaled(13), gfx.white);
+        g.textCentered(tr("Options"), ox + options_w / 2, y + (rh - 18 * u) / 2, g.scaled(13), gfx.white);
         if (g.clickIn(ox, y, options_w, rh)) {
             s.cursor = i;
             openOptions(a);
@@ -196,14 +198,14 @@ pub fn draw(a: *App) void {
         _ = g.text(slotName(slot), rx + 12 * u, ty, g.scaled(16), gfx.white);
         const v = a.cfg.skins.get(slot);
         const value = if (v.len == 0)
-            std.fmt.bufPrint(&buf, "Default ({s})", .{defaultName(a)}) catch "Default"
-        else if (std.mem.eql(u8, v, config.builtin_skin)) "Built-in" else shown(&buf, v);
+            i18n.bufPrint(&buf, "Default ({s})", .{defaultName(a)}) catch tr("Default")
+        else if (std.mem.eql(u8, v, config.builtin_skin)) tr("Built-in") else shown(&buf, v);
         g.textRight(value, right - 24 * u, ty, g.scaled(16), if (on) gfx.white else gfx.dim);
         g.textRight("v", right, ty, g.scaled(16), if (on) gfx.white else gfx.dim);
         if (s.drop.open and on) s.drop.anchor(y, rh, right);
     }
     const help_y = g.h - 44 * u;
-    _ = g.text("Enter or click: pick a skin   Left/Right: step   O: its options   Esc: back", 22 * u, help_y, g.scaled(14), gfx.dim);
+    _ = g.text(tr("Enter or click: pick a skin   Left/Right: step   O: its options   Esc: back"), 22 * u, help_y, g.scaled(14), gfx.dim);
     if (s.drop.open) {
         if (s.drop.draw(a, drop_click)) |i| choose(a, i);
     }

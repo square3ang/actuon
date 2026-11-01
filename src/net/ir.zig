@@ -1,5 +1,7 @@
 //! IR client: uploads replays and fetches rankings on background threads, never during play timing.
 const std = @import("std");
+const i18n = @import("../ui/i18n.zig");
+const tr = i18n.tr;
 const c = @import("c");
 const http = @import("../platform/http.zig");
 const fs = @import("../platform/fs.zig");
@@ -66,14 +68,14 @@ pub const Board = struct {
     /// The one line a built-in screen shows.
     pub fn placeText(b: *const Board, buf: []u8) []const u8 {
         return switch (b.state.load(.acquire)) {
-            pending => "IR: loading...",
-            failed => "IR: unavailable",
+            pending => tr("IR: loading..."),
+            failed => tr("IR: unavailable"),
             else => if (b.total == 0)
-                "IR: no scores yet"
+                tr("IR: no scores yet")
             else if (b.rank == 0)
-                std.fmt.bufPrint(buf, "IR: {d} players", .{b.total}) catch ""
+                i18n.bufPrint(buf, "IR: {d} players", .{b.total}) catch ""
             else
-                std.fmt.bufPrint(buf, "IR: #{d} of {d}", .{ b.rank, b.total }) catch "",
+                i18n.bufPrint(buf, "IR: #{d} of {d}", .{ b.rank, b.total }) catch "",
         };
     }
 
@@ -636,11 +638,11 @@ pub const AccountAction = enum { register, login, rename };
 
 pub fn accountRefusal(status: u16, action: AccountAction) []const u8 {
     return switch (status) {
-        400 => if (action == .rename) "Name must be 1-32 characters" else "Name must be 1-32 characters and password at least 8",
-        401 => if (action == .rename) "Sign in again first" else "Wrong name or password",
-        409 => "That name is taken",
-        429 => "Too many attempts, try again later",
-        else => "The IR server refused",
+        400 => if (action == .rename) tr("Name must be 1-32 characters") else tr("Name must be 1-32 characters and password at least 8"),
+        401 => if (action == .rename) tr("Sign in again first") else tr("Wrong name or password"),
+        409 => tr("That name is taken"),
+        429 => tr("Too many attempts, try again later"),
+        else => tr("The IR server refused"),
     };
 }
 

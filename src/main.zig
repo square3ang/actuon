@@ -156,6 +156,7 @@ test {
     _ = @import("audio/preview.zig");
     _ = @import("input/input.zig");
     _ = @import("db/db.zig");
+    _ = @import("net/update.zig");
     _ = @import("ui/play.zig");
     _ = @import("ui/pause.zig");
     _ = @import("ui/skinconf.zig");

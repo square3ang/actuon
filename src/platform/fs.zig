@@ -35,6 +35,33 @@ pub fn remove(path: []const u8) void {
     Dir.cwd().deleteFile(io, path) catch {};
 }
 
+pub fn removeTree(path: []const u8) void {
+    Dir.cwd().deleteTree(io, path) catch {};
+}
+
+pub fn rename(from: []const u8, to: []const u8) !void {
+    try Dir.cwd().rename(from, Dir.cwd(), to, io);
+}
+
+pub fn setExecutable(path: []const u8) !void {
+    if (@import("builtin").os.tag == .windows) return;
+    try Dir.cwd().setFilePermissions(io, path, .fromMode(0o755), .{});
+}
+
+pub fn sha256(path: []const u8) ![32]u8 {
+    const file = try Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    var buf: [1 << 16]u8 = undefined;
+    var r = file.reader(io, &buf);
+    var hash: std.crypto.hash.sha2.Sha256 = .init(.{});
+    var chunk: [1 << 16]u8 = undefined;
+    while (true) {
+        const n = try r.interface.readSliceShort(&chunk);
+        if (n == 0) return hash.finalResult();
+        hash.update(chunk[0..n]);
+    }
+}
+
 pub const Stat = struct { mtime: i64, size: u64, is_dir: bool };
 
 pub fn stat(path: []const u8) ?Stat {

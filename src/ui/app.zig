@@ -4,6 +4,8 @@ const c = @import("c");
 const core = @import("actuon_core");
 const fs = @import("../platform/fs.zig");
 const gfx = @import("gfx.zig");
+const i18n = @import("i18n.zig");
+const tr = i18n.tr;
 const input = @import("../input/input.zig");
 const config = @import("../game/config.zig");
 const session_mod = @import("../game/session.zig");
@@ -16,6 +18,7 @@ const play = @import("play.zig");
 const select = @import("select.zig");
 const result = @import("result.zig");
 const settings = @import("settings.zig");
+const update = @import("../net/update.zig");
 const skinconf = @import("skinconf.zig");
 const skinslots = @import("skinslots.zig");
 const course_mod = @import("course.zig");
@@ -517,7 +520,7 @@ pub const App = struct {
             skin_scene.drawLoading(g, a.play_skin.?, &a.skin_state, elapsed);
         } else {
             if (a.want_decide and a.load_skin_at == 0 and a.cfg.skinFor(.decide).len > 0) return;
-            g.textCentered("LOADING", g.w / 2, g.h * 0.42, 32, gfx.white);
+            g.textCentered(tr("LOADING"), g.w / 2, g.h * 0.42, 32, gfx.white);
             if (t > 0) {
                 g.rect(g.w * 0.3, g.h * 0.72, g.w * 0.4, 8, gfx.rule);
                 g.rect(g.w * 0.3, g.h * 0.72, g.w * 0.4 * frac, 8, gfx.white);
@@ -536,7 +539,7 @@ pub const App = struct {
                 a.running = false;
                 break :blk .select;
             } else .select;
-            a.sel.status = "Could not load that chart";
+            a.sel.status = tr("Could not load that chart");
             a.dropStagefile();
             return;
         };
@@ -671,11 +674,11 @@ pub const App = struct {
         else
             a.view.draw(&a.g, s, &a.cfg);
         if (a.pause.open) return pause.tick(a);
-        if (s.was_paused and a.record) a.g.textRight("NOT RECORDED: PAUSED", a.g.w - 22 * a.g.h / 720, 52 * a.g.h / 720, a.g.scaled(16), gfx.amber);
+        if (s.was_paused and a.record) a.g.textRight(tr("NOT RECORDED: PAUSED"), a.g.w - 22 * a.g.h / 720, 52 * a.g.h / 720, a.g.scaled(16), gfx.amber);
         if (s.canSkip(snap)) {
             var key_buf: [32]u8 = undefined;
             var hint_buf: [48]u8 = undefined;
-            a.g.textCentered(std.fmt.bufPrint(&hint_buf, "{s}: SKIP", .{select.guideKey(a, a.cfg.start_select[0], "ENTER", &key_buf)}) catch "", a.g.w / 2, a.g.h * 0.5, a.g.scaled(28), gfx.white);
+            a.g.textCentered(i18n.bufPrint(&hint_buf, "{s}: SKIP", .{select.guideKey(a, a.cfg.start_select[0], "ENTER", &key_buf)}) catch "", a.g.w / 2, a.g.h * 0.5, a.g.scaled(28), gfx.white);
         }
         if (s.done.load(.acquire)) a.finishPlay(snap, true);
     }
@@ -939,6 +942,7 @@ pub const App = struct {
             }
             a.tickBgm();
             a.pollEditor();
+            settings.pollUpdate(a);
             a.g.beginFrame();
             const scene_now = a.scene;
             switch (scene_now) {
@@ -1039,6 +1043,7 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const cfg = config.load(arena.allocator());
+    i18n.current = i18n.resolve(cfg.language);
     const flags: u64 = c.rb_window_flags() | c.SDL_WINDOW_RESIZABLE | c.SDL_WINDOW_HIGH_PIXEL_DENSITY | (if (cfg.fullscreen) @as(u64, c.SDL_WINDOW_FULLSCREEN) else 0);
     const win = c.SDL_CreateWindow("actuon", @intCast(cfg.width), @intCast(cfg.height), flags) orelse return error.SdlWindow;
     setWindowIcon(win);
@@ -1102,9 +1107,12 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
         }
         if (opts.decide) app.decidePlay(params, true) else app.startPlay(params, true);
     }
-    if (crash.takePrevious(arena.allocator())) app.sel.status = "The last run crashed: see crash-last.txt in the data folder";
+    if (crash.takePrevious(arena.allocator())) app.sel.status = tr("The last run crashed: see crash-last.txt in the data folder");
     if (opts.preview) |cmd| if (!cmd.stop) app.startPreview(cmd.file, cmd.measure);
+    // Captures stay offline, so every run draws the same version row.
+    if (app.shot_path == null) app.set.update = update.start(gpa);
     app.run();
+    if (app.set.update) |j| j.abandon();
     skinconf.close(app);
     skinslots.close(app);
     var hb = std.heap.ArenaAllocator.init(gpa);

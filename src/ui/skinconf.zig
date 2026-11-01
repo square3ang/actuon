@@ -3,6 +3,8 @@
 const std = @import("std");
 const c = @import("c");
 const gfx = @import("gfx.zig");
+const i18n = @import("i18n.zig");
+const tr = i18n.tr;
 const app_mod = @import("app.zig");
 const settings = @import("settings.zig");
 const skin_mod = @import("../skin/skin.zig");
@@ -106,7 +108,7 @@ pub fn draw(a: *App) void {
         a.scene = .settings;
         return;
     }
-    _ = g.text("Skin settings", 22 * u, 18 * u, g.scaled(32), gfx.white);
+    _ = g.text(tr("Skin settings"), 22 * u, 18 * u, g.scaled(32), gfx.white);
     g.textRight(std.fs.path.basename(s.root), g.w - 22 * u, 28 * u, g.scaled(16), gfx.dim);
 
     const top = 76 * u;
@@ -155,7 +157,7 @@ pub fn draw(a: *App) void {
             s.cursor = i;
         }
     }
-    _ = g.text("Left/Right changes the value. Changes show on song select and from the next play. Esc goes back.", 22 * u, help_y + 10 * u, g.scaled(14), gfx.dim);
+    _ = g.text(tr("Left/Right changes the value. Changes show on song select and from the next play. Esc goes back."), 22 * u, help_y + 10 * u, g.scaled(14), gfx.dim);
 }
 
 test "the cursor wraps and escape returns where it came from" {

@@ -3,6 +3,8 @@ const std = @import("std");
 const bga = @import("bga.zig");
 const core = @import("actuon_core");
 const gfx = @import("gfx.zig");
+const i18n = @import("i18n.zig");
+const tr = i18n.tr;
 const session_mod = @import("../game/session.zig");
 const config = @import("../game/config.zig");
 const Session = session_mod.Session;
@@ -571,8 +573,8 @@ fn drawTag(g: *gfx.Gfx, s: *Session, x: f32, w: f32, stage_y: f32) void {
     var buf: [64]u8 = undefined;
     if (s.params.autoplay or s.params.replay != null or s.load_warnings > 0) {
         const tag = if (s.load_warnings > 0)
-            std.fmt.bufPrint(&buf, "{d} SOUNDS MISSING", .{s.load_warnings}) catch ""
-        else if (s.params.autoplay) "AUTOPLAY" else "REPLAY";
+            i18n.bufPrint(&buf, "{d} SOUNDS MISSING", .{s.load_warnings}) catch ""
+        else if (s.params.autoplay) tr("AUTOPLAY") else tr("REPLAY");
         const tw = g.measure(tag, g.scaled(12)) + 18 * u;
         g.round(x + w - tw - 8 * u, stage_y + 8 * u, tw, 18 * u, 4 * u, gfx.accent);
         _ = g.text(tag, x + w - tw + 2 * u, stage_y + 9 * u, g.scaled(12), gfx.white);
