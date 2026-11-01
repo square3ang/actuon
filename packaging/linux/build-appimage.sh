@@ -8,4 +8,5 @@ zig build -Doptimize=ReleaseSafe --prefix "$appdir/usr"
 install -Dm644 packaging/linux/io.github.square3ang.actuon.desktop "$appdir/usr/share/applications/io.github.square3ang.actuon.desktop"
 install -Dm644 packaging/linux/io.github.square3ang.actuon.svg "$appdir/usr/share/icons/hicolor/scalable/apps/io.github.square3ang.actuon.svg"
 install -Dm644 LICENSE "$appdir/usr/share/licenses/actuon/LICENSE"
-linuxdeploy --appdir "$appdir" --output appimage
+# linuxdeploy's bundled strip cannot read the .relr.dyn sections of current distro libraries.
+NO_STRIP=1 linuxdeploy --appdir "$appdir" --output appimage

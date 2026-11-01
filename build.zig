@@ -109,7 +109,19 @@ pub fn build(b: *std.Build) void {
         mod.linkFramework("IOKit", .{});
         mod.linkFramework("CoreFoundation", .{});
     }
-    const libs = [_][]const u8{ "sdl3", "sdl3-ttf", "portaudio-2.0", "sqlite3", "lua5.4", "libarchive", "libavformat", "libavcodec", "libavutil", "libswscale", "libavfilter" };
+    // Homebrew's portaudio-2.0.pc lists -framework, which zig's pkg-config reader refuses.
+    if (os == .macos) {
+        const portaudio = std.mem.trim(u8, b.run(&.{ "pkg-config", "--variable=prefix", "portaudio-2.0" }), "\n");
+        const include: std.Build.LazyPath = .{ .cwd_relative = b.pathJoin(&.{ portaudio, "include" }) };
+        mod.addIncludePath(include);
+        translate.addIncludePath(include);
+        mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ portaudio, "lib" }) });
+        mod.linkSystemLibrary("portaudio", .{ .use_pkg_config = .no });
+    } else {
+        mod.linkSystemLibrary("portaudio-2.0", .{ .use_pkg_config = .force });
+        translate.linkSystemLibrary("portaudio-2.0", .{});
+    }
+    const libs = [_][]const u8{ "sdl3", "sdl3-ttf", "sqlite3", "lua5.4", "libarchive", "libavformat", "libavcodec", "libavutil", "libswscale", "libavfilter" };
     for (libs) |lib| mod.linkSystemLibrary(lib, .{ .use_pkg_config = .force });
     for (libs) |lib| translate.linkSystemLibrary(lib, .{});
 

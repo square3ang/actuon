@@ -42,8 +42,8 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with: { version: 0.17.0 }
       - run: brew install sdl3 sdl3_ttf portaudio sqlite lua@5.4 libarchive ffmpeg pkgconf spirv-cross dylibbundler
-      # Homebrew keeps libarchive out of the default pkg-config path.
-      - run: echo "PKG_CONFIG_PATH=$(brew --prefix libarchive)/lib/pkgconfig" >> "$GITHUB_ENV"
+      # Homebrew keeps these out of the default pkg-config path.
+      - run: echo "PKG_CONFIG_PATH=$(brew --prefix libarchive)/lib/pkgconfig:$(brew --prefix lua@5.4)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig" >> "$GITHUB_ENV"
       - run: cargo install naga-cli --version 30.0.1 --locked
       - run: zig build test
       - run: packaging/macos/package.sh
@@ -57,11 +57,14 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
+          # setup-zig puts zig on the runner's PATH, which MSYS2 hides by default.
+          path-type: inherit
           install: >-
             mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-sdl3 mingw-w64-ucrt-x86_64-sdl3-ttf
-            mingw-w64-ucrt-x86_64-portaudio mingw-w64-ucrt-x86_64-sqlite3 mingw-w64-ucrt-x86_64-lua
+            mingw-w64-ucrt-x86_64-portaudio-asio mingw-w64-ucrt-x86_64-sqlite3 mingw-w64-ucrt-x86_64-lua
             mingw-w64-ucrt-x86_64-libarchive mingw-w64-ucrt-x86_64-ffmpeg zip
             mingw-w64-ucrt-x86_64-rust mingw-w64-ucrt-x86_64-spirv-cross
+      - run: grep -qa PaAsio_ /ucrt64/bin/libportaudio*.dll
       - uses: mlugg/setup-zig@v2
         with: { version: 0.17.0 }
       - run: cargo install naga-cli --version 30.0.1 --locked && PATH="$HOME/.cargo/bin:$PATH" zig build test
