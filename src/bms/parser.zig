@@ -162,6 +162,11 @@ fn parseF(s: []const u8) ?f64 {
     return v;
 }
 
+/// Gimmick charts reach far past musical tempos, but the UI and timing turn BPM into integers.
+pub fn validBpm(bpm: f64) bool {
+    return bpm >= 1e-3 and bpm <= 1e9;
+}
+
 fn parseI(s: []const u8) ?i32 {
     return std.fmt.parseInt(i32, std.mem.trim(u8, s, " \t\r\n"), 10) catch null;
 }
@@ -392,12 +397,12 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8, opts: Options) Error!Char
             }
         } else if (reserve(line, "BPM")) {
             if (line.len > 4 and line[4] == ' ') {
-                if (parseF(line[5..])) |bpm| if (bpm > 0) {
+                if (parseF(line[5..])) |bpm| if (validBpm(bpm)) {
                     chart.bpm = bpm;
                 };
             } else if (line.len > 7) {
                 const key = d.idx(line, 4);
-                if (key >= 0) if (parseF(line[7..])) |bpm| if (bpm > 0) try d.bpm_table.put(a, key, bpm);
+                if (key >= 0) if (parseF(line[7..])) |bpm| if (validBpm(bpm)) try d.bpm_table.put(a, key, bpm);
             }
         } else if (reserve(line, "WAV")) {
             if (line.len >= 8) {
@@ -448,7 +453,7 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8, opts: Options) Error!Char
                 rank_type = .rank;
             };
         } else if (reserve(line, "DEFEXRANK") and line.len > 11) {
-            if (parseI(line[11..])) |r| if (r >= 1) {
+            if (parseI(line[11..])) |r| if (r >= 1 and r <= 1_000_000) {
                 rank = r;
                 rank_type = .defex;
             };
@@ -1044,6 +1049,23 @@ test "LN mode changes only LNs the chart leaves open, and CN ends count as notes
 
 test "no bpm is an error" {
     try std.testing.expectError(error.NoBpm, parse(std.testing.allocator, "#00111:01", .{}));
+}
+
+test "numbers past what timing can hold are ignored" {
+    const notes = "#WAV01 a.wav\n#00111:01\n";
+    var rank = try parse(std.testing.allocator, "#BPM 120\n#DEFEXRANK 2147483647\n" ++ notes, .{});
+    defer rank.deinit();
+    try std.testing.expectEqual(@as(i32, 75), rank.judgerank);
+    for ([_][]const u8{ "#BPM 1e300\n", "#BPM 1e-300\n" }) |line| {
+        var buf: [64]u8 = undefined;
+        const src = try std.fmt.bufPrint(&buf, "{s}#BPM 120\n{s}", .{ notes, line });
+        var c = try parse(std.testing.allocator, src, .{});
+        defer c.deinit();
+        try std.testing.expectEqual(@as(f64, 120), c.bpm);
+    }
+    var table = try parse(std.testing.allocator, "#BPM 120\n#BPM01 1e300\n#WAV01 a.wav\n#00108:01\n#00111:01\n", .{});
+    defer table.deinit();
+    try std.testing.expectEqual(@as(f64, 120), table.max_bpm);
 }
 
 test "only Qwilight's #4K and #6K headers make those modes" {

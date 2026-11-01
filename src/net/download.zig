@@ -4,8 +4,7 @@ const c = @import("c");
 const http = @import("../platform/http.zig");
 const fs = @import("../platform/fs.zig");
 
-const max_unpacked: u64 = 8 << 30;
-const max_entries: u32 = 200_000;
+const Limits = struct { bytes: u64 = 8 << 30, entries: u32 = 200_000 };
 
 /// libarchive converts archive names through the C locale, which drops anything non-ASCII by default.
 pub fn initLocale() void {
@@ -30,6 +29,10 @@ pub fn safeEntry(name: []const u8) bool {
 
 /// Extracts regular files and folders only: links and devices are skipped, never followed.
 pub fn extract(a: std.mem.Allocator, archive_path: []const u8, dest: []const u8) !u32 {
+    return extractWithin(a, archive_path, dest, .{});
+}
+
+fn extractWithin(a: std.mem.Allocator, archive_path: []const u8, dest: []const u8, limits: Limits) !u32 {
     const ar = c.archive_read_new() orelse return error.Archive;
     defer _ = c.archive_read_free(ar);
     _ = c.archive_read_support_filter_all(ar);
@@ -47,7 +50,7 @@ pub fn extract(a: std.mem.Allocator, archive_path: []const u8, dest: []const u8)
         // A name the locale cannot convert only warns; stopping there would truncate the package silently.
         if (rc != c.ARCHIVE_OK and rc != c.ARCHIVE_WARN) return error.Archive;
         seen += 1;
-        if (seen > max_entries) return error.TooManyEntries;
+        if (seen > limits.entries) return error.TooManyEntries;
         const raw = c.archive_entry_pathname_utf8(entry) orelse c.archive_entry_pathname(entry);
         if (raw == null) continue;
         const name = std.mem.span(raw);
@@ -67,7 +70,7 @@ pub fn extract(a: std.mem.Allocator, archive_path: []const u8, dest: []const u8)
             if (n < 0) return error.Archive;
             if (n == 0) break;
             written += @intCast(n);
-            if (written > max_unpacked) return error.TooLarge;
+            if (written > limits.bytes) return error.TooLarge;
             try w.interface.writeAll(buf[0..@intCast(n)]);
         }
         try w.interface.flush();
@@ -123,8 +126,9 @@ fn run(j: *Job) !void {
     var arena = std.heap.ArenaAllocator.init(j.gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const dest = try std.fs.path.join(a, &.{ j.root, "downloads", j.id });
-    try fs.mkdirs(dest);
+    const downloads = try std.fs.path.join(a, &.{ j.root, "downloads" });
+    try fs.mkdirs(downloads);
+    const dest = try std.fs.path.join(a, &.{ downloads, j.id });
     const archive = try std.fmt.allocPrint(a, "{s}.part", .{dest});
     defer fs.remove(archive);
     try http.download(j.gpa, j.url, archive, &j.progress);
@@ -136,7 +140,14 @@ fn run(j: *Job) !void {
         }
     } else |_| {}
     j.extracting.store(true, .release);
-    if ((try extract(a, archive, dest)) == 0) return error.EmptyArchive;
+    try unpack(a, archive, dest, .{});
+}
+
+/// A package that fails halfway leaves nothing, but a folder from an earlier download stays.
+fn unpack(a: std.mem.Allocator, archive: []const u8, dest: []const u8, limits: Limits) !void {
+    const fresh = !fs.exists(dest);
+    errdefer if (fresh) fs.removeTree(dest);
+    if ((try extractWithin(a, archive, dest, limits)) == 0) return error.EmptyArchive;
 }
 
 fn thread(ud: ?*anyopaque) callconv(.c) c_int {
@@ -269,6 +280,15 @@ test "extract keeps files and drops escapes and links" {
     try add(&tar, al, "link", '2', "");
     try tar.appendNTimes(al, 0, 1024);
     try fs.write(tar_path, tar.items);
+    const limited = dest ++ "_limits";
+    defer fs.removeTree(limited);
+    try std.testing.expectError(error.TooLarge, unpack(al, tar_path, limited, .{ .bytes = 4 }));
+    try std.testing.expect(!fs.exists(limited));
+    try std.testing.expectError(error.TooManyEntries, unpack(al, tar_path, limited, .{ .entries = 2 }));
+    try std.testing.expect(!fs.exists(limited));
+    try fs.mkdirs(limited ++ "/kept");
+    try std.testing.expectError(error.TooLarge, unpack(al, tar_path, limited, .{ .bytes = 4 }));
+    try std.testing.expect(fs.exists(limited ++ "/kept"));
     const n = try extract(al, tar_path, dest);
     try std.testing.expectEqual(@as(u32, 1), n);
     try std.testing.expect(fs.exists(dest ++ "/song/good.bms"));

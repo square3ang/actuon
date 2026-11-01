@@ -2,6 +2,7 @@
 const std = @import("std");
 const types = @import("../core/types.zig");
 const hash = @import("hash.zig");
+const validBpm = @import("parser.zig").validBpm;
 const Chart = types.Chart;
 const Mode = types.Mode;
 
@@ -113,7 +114,7 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
     chart.stagefile = info.eyecatch_image;
     chart.preview = info.preview_music;
     chart.bpm = info.init_bpm;
-    if (!(info.init_bpm > 0) or std.math.isInf(info.init_bpm)) return error.NoBpm;
+    if (!validBpm(info.init_bpm)) return error.NoBpm;
 
     const rank = info.judge_rank;
     if (rank >= 0 and rank < 5) {
@@ -175,7 +176,7 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
             (try tls.get(scy)).scroll = root.scroll_events[isc].rate;
             isc += 1;
         } else if (by <= sty) {
-            if (root.bpm_events[ib].bpm > 0) (try tls.get(by)).bpm = root.bpm_events[ib].bpm;
+            if (validBpm(root.bpm_events[ib].bpm)) (try tls.get(by)).bpm = root.bpm_events[ib].bpm;
             ib += 1;
         } else {
             const dur = root.stop_events[ist].duration;
@@ -224,6 +225,7 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
         std.mem.sort(JNote, sc.notes, {}, ByY.note);
         var start_time: i64 = 0;
         for (sc.notes, 0..) |n, i| {
+            _ = std.math.add(i64, n.y, n.l) catch continue;
             var next: ?JNote = null;
             for (sc.notes[i + 1 ..]) |m| if (m.y > n.y) {
                 next = m;
@@ -422,6 +424,21 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
     if (bga.items.len > 0) last = @max(last, bga.items[bga.items.len - 1].time_us);
     chart.last_time_us = last;
     return chart;
+}
+
+test "numbers past what timing can hold are refused or skipped" {
+    const a = std.testing.allocator;
+    try std.testing.expectError(error.NoBpm, parse(a,
+        \\{"info":{"init_bpm":1e300,"resolution":240,"mode_hint":"beat-7k"}}
+    ));
+    var c = try parse(a,
+        \\{"info":{"init_bpm":120,"resolution":240,"mode_hint":"beat-7k"},
+        \\ "bpm_events":[{"y":240,"bpm":1e300}],
+        \\ "sound_channels":[{"name":"a.wav","notes":[{"x":1,"y":9223372036854775807,"l":1},{"x":2,"y":0,"l":0}]}]}
+    );
+    defer c.deinit();
+    try std.testing.expectEqual(@as(u32, 1), c.total_notes);
+    try std.testing.expectEqual(@as(f64, 120), c.max_bpm);
 }
 
 test "bmson basic" {
