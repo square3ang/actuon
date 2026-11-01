@@ -148,8 +148,7 @@ pub fn draw(a: *App) void {
     const rcx = g.w * 0.24;
     const rcy = 300 * u;
 
-    // Title strip and the clear banner, which slides in.
-    g.panel(14 * u, 12 * u, g.w - 28 * u, 40 * u, "");
+    // Title and the clear banner, which slides in.
     g.textClip(r.title, 34 * u, 18 * u, g.w * 0.8, g.scaled(24), gfx.white);
     const banner_w = 360 * u;
     const bx = -banner_w + (banner_w + 30 * u) * ease;
@@ -162,7 +161,7 @@ pub fn draw(a: *App) void {
     // EX counts up while the banner lands.
     g.panel(30 * u, 500 * u, g.w * 0.48 - 44 * u, 110 * u, "EX SCORE");
     const shown_ex: u64 = @intFromFloat(@as(f32, @floatFromInt(ex)) * ease);
-    g.digits(g.w * 0.48 - 30 * u, 518 * u, g.scaled(72), 5, shown_ex, gfx.white);
+    g.digits(g.w * 0.48 - 30 * u, 527 * u, g.scaled(48), 5, shown_ex, gfx.white);
     g.fmt(44 * u, 536 * u, g.scaled(24), gfx.cyan, "{d:.2}%", .{rate});
     if (r.recorded) {
         const delta = @as(i64, ex) - @as(i64, r.prev_ex);

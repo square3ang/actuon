@@ -65,6 +65,8 @@ pub fn build(b: *std.Build) void {
     mod.addCSourceFile(.{ .file = b.path("third_party/impl.c"), .flags = &.{ "-O2", "-fno-sanitize=undefined" } });
     mod.addIncludePath(b.path("third_party"));
     mod.addIncludePath(b.path("src/ui"));
+    mod.addAnonymousImport("logo", .{ .root_source_file = b.path("assets/brand/logo.png") });
+    mod.addAnonymousImport("app_icon", .{ .root_source_file = b.path("assets/brand/icon.png") });
     mod.addAnonymousImport("backdrop", .{ .root_source_file = b.path("assets/backgrounds/rogland_clear_night.jpg") });
     mod.addAnonymousImport("font_medium", .{ .root_source_file = b.path("assets/fonts/SUITE-Medium.ttf") });
     mod.addAnonymousImport("font_heavy", .{ .root_source_file = b.path("assets/fonts/SUITE-ExtraBold.ttf") });

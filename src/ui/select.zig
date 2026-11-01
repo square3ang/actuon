@@ -67,6 +67,7 @@ pub const State = struct {
     jacket_tried: bool = false,
     /// The image being faded out, drawn under `jacket` until the fade ends.
     jacket_old: ?*gfx.Texture = null,
+    logo: ?*gfx.Texture = null,
     jacket_fade_at: u64 = 0,
     scroll_at_ns: u64 = 0,
     jacket_job: ?*JacketJob = null,
@@ -101,6 +102,7 @@ pub fn deinit(a: *App) void {
     if (s.jacket_job) |j| j.destroy();
     if (s.jacket) |t| a.g.destroyTexture(t);
     if (s.jacket_old) |t| a.g.destroyTexture(t);
+    if (s.logo) |t| a.g.destroyTexture(t);
     if (s.card_job) |j| j.destroy();
     for (s.card_art.items) |art| if (art.tex) |t| a.g.destroyTexture(t);
     s.card_art.deinit(a.gpa);
@@ -617,16 +619,8 @@ pub fn draw(a: *App) void {
     }
 
     // Header.
-    g.panel(10 * u, 8 * u, g.w - 20 * u, 40 * u, "");
-    _ = g.text("actuon", 26 * u, 12 * u, g.scaled(24), gfx.white);
-    g.textClip(switch (s.view) {
-        .root => "",
-        .library => "LIBRARY",
-        .folder => std.fs.path.basename(s.folder),
-        .table => "TABLE",
-        .level => s.level,
-        .courses => "COURSES",
-    }, 120 * u, 19 * u, 160 * u, g.scaled(14), gfx.dim);
+    if (s.logo == null) s.logo = gfx.loadTexture(g, "logo", @embedFile("logo"));
+    if (s.logo) |t| g.sprite(t, null, .{ .x = 26 * u, .y = 12 * u, .w = 32 * u * t.w / t.h, .h = 32 * u }, .{});
     if (s.searching) {
         g.fmt(290 * u, 18 * u, g.scaled(16), gfx.cyan, "SEARCH: {s}_", .{a.text.items});
     } else if (s.scan_thread != null) {

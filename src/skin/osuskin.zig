@@ -401,7 +401,7 @@ fn addScore(b: *Build, fonts: []const u8) !void {
 }
 
 /// LegacyHealthDisplay, at the top left. A marker image makes it the new style, placed a little differently.
-fn addGauge(b: *Build) !void {
+fn addGauge(b: *Build, conf: jsonskin.Conf) !void {
     const bg = try b.file("scorebar-bg", false) orelse return;
     try b.sprite(bg, 0, 0, bg.w / unit, bg.h / unit);
     const marker_new = try b.file("scorebar-marker", false);
@@ -410,7 +410,7 @@ fn addGauge(b: *Build) !void {
     const fill = try b.file("scorebar-colour", true) orelse return;
     const fw = fill.w / unit;
     const fh = fill.h / unit;
-    try b.objects.append(b.a, .{ .kind = .graph, .ref = m.gauge_value, .src = fill.src(), .keys = try b.fixed(fx, fy, fw, fh, white) });
+    try b.objects.append(b.a, .{ .kind = .graph, .ref = m.gauge_value, .gauge_tint = gaugeColorOn(conf), .src = fill.src(), .keys = try b.fixed(fx, fy, fw, fh, white) });
     const marker = marker_new orelse try b.file("scorebar-ki", false) orelse return;
     const mw = marker.w / unit;
     const mh = marker.h / unit;
@@ -455,10 +455,17 @@ fn addLighting(b: *Build, general: []const u8, mode: core.types.Mode, order: []c
 
 pub const bga_stretch_name = "BGA stretch";
 pub const bga_stretch_choices = [_][]const u8{ "Fit", "Fill", "Stretch" };
+pub const gauge_color_name = "Gauge color";
+pub const gauge_color_choices = [_][]const u8{ "On", "Off" };
 pub const bga_dim_name = "BGA dim";
 pub const bga_dim_choices = [_][]const u8{ "0%", "10%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "90%", "100%" };
 
 /// bga.fit's types: keep the shape and fit inside, keep it and crop, or fill the screen out of shape.
+fn gaugeColorOn(conf: jsonskin.Conf) bool {
+    const pick = conf.property.map.get(gauge_color_name) orelse return true;
+    return !std.mem.eql(u8, pick, "Off");
+}
+
 fn stretchOf(conf: jsonskin.Conf) i32 {
     const pick = conf.property.map.get(bga_stretch_name) orelse return 1;
     if (std.mem.eql(u8, pick, "Fill")) return 3;
@@ -527,7 +534,7 @@ fn build(b: *Build, skin: *m.Skin, general: []const u8, fonts: []const u8, mode:
     try addJudge(b, &l);
     try addCombo(b, fonts, &l);
     try addScore(b, fonts);
-    try addGauge(b);
+    try addGauge(b, conf);
 }
 
 /// A key count the ini has no section for takes every default, as in lazer.
@@ -643,6 +650,9 @@ test "the BGA options read back from a saved pick" {
     try conf.property.map.put(a, bga_dim_name, "100%");
     try std.testing.expectEqual(@as(i32, 3), stretchOf(conf));
     try std.testing.expectEqual(@as(f32, 255), dimAlpha(conf));
+    try std.testing.expect(gaugeColorOn(conf));
+    try conf.property.map.put(a, gauge_color_name, "Off");
+    try std.testing.expect(!gaugeColorOn(conf));
     try conf.property.map.put(a, bga_dim_name, "33%");
     try std.testing.expectEqual(@as(f32, 0), dimAlpha(conf));
 }

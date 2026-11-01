@@ -14,16 +14,16 @@ pub const Color = struct {
 };
 
 pub const white: Color = .{ .r = 236, .g = 240, .b = 248 };
-pub const dim: Color = .{ .r = 134, .g = 148, .b = 176 };
+pub const dim: Color = .{ .r = 168, .g = 180, .b = 206 };
 pub const bg: Color = .{ .r = 10, .g = 15, .b = 28 };
 pub const well: Color = .{ .r = 5, .g = 8, .b = 16 };
-pub const rule: Color = .{ .r = 34, .g = 46, .b = 72 };
+pub const rule: Color = .{ .r = 52, .g = 68, .b = 104 };
 pub const accent: Color = .{ .r = 38, .g = 92, .b = 240 };
 pub const slab: Color = .{ .r = 22, .g = 40, .b = 88 };
 pub const slab_fail: Color = .{ .r = 92, .g = 30, .b = 32 };
 pub const cyan: Color = .{ .r = 176, .g = 212, .b = 255 };
 pub const steel: Color = .{ .r = 92, .g = 106, .b = 134 };
-pub const plate: Color = .{ .r = 15, .g = 22, .b = 40 };
+pub const plate: Color = .{ .r = 26, .g = 36, .b = 64 };
 pub const sky: Color = .{ .r = 130, .g = 190, .b = 255 };
 pub const on_accent_dim: Color = .{ .r = 196, .g = 212, .b = 252 };
 pub const danger: Color = .{ .r = 214, .g = 62, .b = 54 };
@@ -841,7 +841,7 @@ pub const Gfx = struct {
         const tex = g.backdrop_tex orelse return g.vgrad(0, 0, g.w, g.h, .{ .r = 22, .g = 36, .b = 78 }, well);
         const k = @min(tex.w / g.w, tex.h / g.h);
         g.sprite(tex, .{ .x = (tex.w - g.w * k) / 2, .y = (tex.h - g.h * k) / 2, .w = g.w * k, .h = g.h * k }, .{ .x = 0, .y = 0, .w = g.w, .h = g.h }, .{});
-        g.rect(0, 0, g.w, g.h, .{ .r = 0, .g = 0, .b = 0, .a = 200 });
+        g.rect(0, 0, g.w, g.h, .{ .r = 0, .g = 0, .b = 0, .a = 215 });
     }
 
     pub fn vgrad(g: *Gfx, x: f32, y: f32, w: f32, h: f32, top: Color, bottom: Color) void {

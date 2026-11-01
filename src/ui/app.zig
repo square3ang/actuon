@@ -77,6 +77,7 @@ pub const App = struct {
     skinconf: skinconf.State = .{},
     skinslots: skinslots.State = .{},
     session: ?*Session = null,
+    cursor_hidden: bool = false,
     view: play.View = .{ .render_state = &.{} },
     record: bool = true,
     load_progress: std.atomic.Value(usize) = .init(0),
@@ -770,6 +771,15 @@ pub const App = struct {
     }
 
     /// Clicking anywhere jumps to that fraction of the song, in autoplay.
+    /// Hidden while playing. The pause menu and autoplay's click-to-seek still need it.
+    fn applyCursor(a: *App) void {
+        const autoplay = if (a.session) |s| s.params.autoplay else false;
+        const hide = a.scene == .play and !a.pause.open and !autoplay;
+        if (hide == a.cursor_hidden) return;
+        a.cursor_hidden = hide;
+        _ = if (hide) c.SDL_HideCursor() else c.SDL_ShowCursor();
+    }
+
     fn applyMouse(a: *App) void {
         const g = &a.g;
         defer {
@@ -934,6 +944,7 @@ pub const App = struct {
             }
             a.last_scene = scene_now;
             a.applyMouse();
+            a.applyCursor();
             if (a.shot_path != null and c.SDL_GetTicks() - a.start_ms >= a.shot_after_ms) a.shot();
             a.g.present();
         }
@@ -980,6 +991,18 @@ pub const Options = struct {
     preview: ?editor.Command = null,
 };
 
+fn setWindowIcon(win: *c.SDL_Window) void {
+    const png = @embedFile("app_icon");
+    var w: c_int = 0;
+    var h: c_int = 0;
+    var n: c_int = 0;
+    const px = c.stbi_load_from_memory(png.ptr, png.len, &w, &h, &n, 4) orelse return;
+    defer c.stbi_image_free(px);
+    const surf = c.SDL_CreateSurfaceFrom(w, h, c.SDL_PIXELFORMAT_RGBA32, px, w * 4) orelse return;
+    defer c.SDL_DestroySurface(surf);
+    _ = c.SDL_SetWindowIcon(win, surf);
+}
+
 pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
     // Vsync under Wayland stays well below the refresh rate; SDL_VIDEODRIVER still picks another.
     if (@import("builtin").os.tag == .linux and c.SDL_getenv("SDL_VIDEODRIVER") == null) _ = c.SDL_SetHint(c.SDL_HINT_VIDEO_DRIVER, "x11,wayland");
@@ -990,6 +1013,7 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
     const cfg = config.load(arena.allocator());
     const flags: u64 = c.rb_window_flags() | c.SDL_WINDOW_RESIZABLE | c.SDL_WINDOW_HIGH_PIXEL_DENSITY | (if (cfg.fullscreen) @as(u64, c.SDL_WINDOW_FULLSCREEN) else 0);
     const win = c.SDL_CreateWindow("actuon", @intCast(cfg.width), @intCast(cfg.height), flags) orelse return error.SdlWindow;
+    setWindowIcon(win);
 
     const engine = try engine_mod.Engine.create(gpa);
     defer engine.destroy();

@@ -56,7 +56,7 @@ pub const Config = struct {
     judge_offset_ms: i32 = 0,
     visual_offset_ms: i32 = 0,
     /// Index into the gauge types up to hazard; `gas` means auto shift from EX HARD.
-    gauge: u8 = 2,
+    gauge: u8 = gas,
     random: u8 = 0,
     /// 0 start BPM, 1 max BPM, 2 main BPM (mode of the chart), 3 off (classic HS).
     hs_fix: u8 = 2,

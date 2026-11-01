@@ -85,6 +85,8 @@ pub const Object = struct {
     digit_srcs: []const Src = &.{},
     /// How far each digit overlaps the last, in skin pixels (an osu! font's overlap).
     digit_gap: f32 = 0,
+    /// graph: in BMS gauge colors (an osu! gauge).
+    gauge_tint: bool = false,
     /// Moves up with the judge line (beatoraja's offset 3).
     lifted: bool = false,
     /// hidden_cover, lift_cover: skin y below which it is cut, bottom-up; negative never cuts.
@@ -424,6 +426,28 @@ pub const Renderer = struct {
         r.g.textClip(s, k.x * r.sx, k.y * r.sy, k.w * r.sx, @intFromFloat(@max(k.h * r.sy, 8)), col);
     }
 
+    /// A horizontal fill in BMS gauge colors: green below the border, red from it up.
+    fn drawTintedFill(r: *const Renderer, o: *const Object, k: Key, v: f32) void {
+        const border = std.math.clamp(r.ctx.float(r.ctx.ud, gauge_border), 0, 1); // 0 when all red
+        const split = @min(v, border);
+        var kk = k;
+        if (split > 0) {
+            kk.w = k.w * split;
+            kk.r = 40;
+            kk.g = 220;
+            kk.b = 70;
+            r.blit(&o.src, r.frameOf(&o.src), kk, o.blend, o.center, .{ 0, 0, split, 1 });
+        }
+        if (v > split) {
+            kk.x = k.x + k.w * split;
+            kk.w = k.w * (v - split);
+            kk.r = 235;
+            kk.g = 40;
+            kk.b = 40;
+            r.blit(&o.src, r.frameOf(&o.src), kk, o.blend, o.center, .{ split, 0, v - split, 1 });
+        }
+    }
+
     fn drawGauge(r: *const Renderer, o: *const Object, k: Key) void {
         if (o.nodes.len < 4) return;
         const pct = r.ctx.float(r.ctx.ud, gauge_value); // 0..1
@@ -486,6 +510,7 @@ pub const Renderer = struct {
             .gauge => r.drawGauge(o, k),
             .graph => {
                 const v = std.math.clamp(r.ctx.float(r.ctx.ud, o.ref), 0, 1);
+                if (o.gauge_tint) return r.drawTintedFill(o, k, v);
                 var kk = k;
                 if (o.dir == 1) {
                     kk.h = k.h * v;
