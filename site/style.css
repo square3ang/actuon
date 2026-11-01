@@ -1,0 +1,66 @@
+/* Hallmark · v2.0.0 · theme: actuon design system (by request) · copy: verbatim · posture: restrained · genre: atmospheric · job: try · hero: split, head beside the play screen · nav: edge-aligned · footer: one line of links · signature: the game's own play screen, captured from the build */
+/* critique: the charts are generated demos with stand-in photographs, so a real pack's art would show the game's world better. */
+:root {
+  --well: #050810; --plate: #0f1628; --rule: #222e48; --white: #ecf0f8; --cyan: #b0d4ff; --sky: #82beff; --accent: #265cf0;
+  --suite: "SUITE", "Noto Sans CJK JP", "Hiragino Sans GB", "Apple SD Gothic Neo", "Yu Gothic", "Microsoft YaHei", Meiryo, sans-serif;
+  --text-14: 14px; --text-16: 16px; --text-20: 20px; --head-32: 32px; --num-48: 48px; --num-72: 72px;
+  --space-6: 6px; --space-10: 10px; --space-14: 14px; --space-18: 18px; --space-30: 30px; --gap: 96px;
+  --radius-6: 6px; --radius-8: 8px; --radius-10: 10px;
+  color-scheme: dark;
+}
+@font-face { font-family: "SUITE"; font-weight: 500; font-display: swap; src: url(/fonts/SUITE-Medium.ttf) format("truetype"); }
+@font-face { font-family: "SUITE"; font-weight: 800; font-display: swap; src: url(/fonts/SUITE-ExtraBold.ttf) format("truetype"); }
+html, body { margin: 0; overflow-x: clip; background: var(--well); color: var(--white); font: 500 var(--text-16)/1.5 var(--suite); }
+html { scroll-behavior: smooth; }
+header, main, footer { box-sizing: border-box; max-width: 1280px; margin: 0 auto; padding: 0 var(--space-30); }
+header { display: flex; align-items: center; justify-content: space-between; height: 72px; }
+.logo img { display: block; height: 40px; width: auto; }
+nav { display: flex; gap: var(--space-6); }
+a { color: var(--sky); border-radius: var(--radius-6); }
+a:hover { color: var(--white); }
+a:active { color: var(--cyan); }
+a:focus-visible { outline: none; background: var(--accent); color: var(--white); }
+nav a { padding: var(--space-6) var(--space-14); text-decoration: none; }
+nav a:hover { background: var(--rule); }
+h1, h2 { margin: 0; font-weight: 800; overflow-wrap: break-word; min-width: 0; text-wrap: balance; }
+h1 { font-size: var(--num-72); line-height: 1.05; }
+h2 { font-size: var(--num-48); line-height: 1.1; }
+p { margin: var(--space-18) 0 0; font-size: var(--text-20); }
+.sky { color: var(--sky); }
+code { font-family: var(--suite); color: var(--cyan); }
+main { display: flex; flex-direction: column; gap: var(--gap); padding-bottom: var(--gap); }
+.hero, .moment { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); align-items: center; gap: var(--space-30); }
+.hero { padding-top: var(--space-30); }
+.moment.flip { grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); }
+.screen { display: block; width: 100%; height: auto; border-radius: var(--radius-10); background: var(--plate); }
+.actions { display: flex; flex-wrap: wrap; gap: var(--space-10); margin-top: var(--space-30); }
+.button { display: inline-block; margin-top: 0; padding: var(--space-10) var(--space-18); border-radius: var(--radius-8); background: var(--accent); color: var(--white); font-size: var(--text-16); text-decoration: none; }
+.button:hover { background: var(--white); color: var(--accent); }
+.button:active { background: var(--cyan); color: var(--well); }
+.button:focus-visible { background: var(--white); color: var(--accent); }
+.link { align-self: center; padding: var(--space-10); }
+.pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-30); margin-top: var(--space-30); }
+.credits { flex-basis: 100%; margin: 0; font-size: var(--text-14); }
+.start { text-align: center; }
+.start p { margin-left: auto; margin-right: auto; max-width: 40rem; }
+.start .button { margin-top: var(--space-30); }
+.text-link { display: inline-block; margin-top: var(--space-18); font-size: var(--text-20); }
+.switch { background: var(--plate); border-radius: var(--radius-10); padding: var(--space-30); }
+dl { margin: var(--space-18) 0 0; }
+dl div { display: grid; grid-template-columns: 200px minmax(0, 1fr); align-items: center; min-height: 54px; padding: var(--space-6) var(--space-14); border-radius: var(--radius-8); }
+dl div:nth-child(odd) { background: var(--well); }
+dt { color: var(--sky); font-size: var(--text-20); font-weight: 800; }
+dd { margin: 0; font-size: var(--text-20); }
+footer { display: flex; flex-wrap: wrap; gap: var(--space-18); padding-bottom: var(--space-30); font-size: var(--text-14); }
+@media (max-width: 60rem) {
+  :root { --gap: 64px; }
+  header, main, footer { padding-left: var(--space-14); padding-right: var(--space-14); }
+  .pair { grid-template-columns: minmax(0, 1fr); gap: var(--space-14); }
+  .hero, .moment, .moment.flip { grid-template-columns: minmax(0, 1fr); }
+  .moment.flip .screen { order: 1; }
+  h1 { font-size: var(--num-48); }
+  h2 { font-size: var(--head-32); }
+  dl div { grid-template-columns: minmax(0, 1fr); padding: var(--space-10) var(--space-14); }
+  .switch { padding: var(--space-18); }
+}
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }

@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>actuon - the next-generation BMS player</title>
+<meta name="description" content="actuon is an open-source BMS player for BMS, BME, BML, PMS and BMSON charts, with verified online rankings.">
+<link rel="icon" href="/icon.svg">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <a class="logo" href="/"><img src="/logo.svg" alt="actuon" width="948" height="364"></a>
+  <nav>
+    <a href="https://ir.actuon.app">Rankings</a>
+    <a href="https://github.com/square3ang/actuon">Source</a>
+  </nav>
+</header>
+<main>
+  <section class="hero">
+    <div>
+      <h1>Nothing between you and the note.</h1>
+      <p>The next-generation BMS player. Bring your scores, skins and tables. Keep your timing honest.</p>
+      <div class="actions">
+        <a class="button" href="https://github.com/square3ang/actuon/releases/latest">Download actuon</a>
+        <a class="link" href="https://ir.actuon.app">See rankings</a>
+      </div>
+    </div>
+    <img class="screen" src="/screens/select.webp" width="1280" height="720" alt="actuon song select: a chart’s artwork fills the screen behind its data and the song wheel">
+  </section>
+
+  <section class="art">
+    <h2>Every song brings its own art.</h2>
+    <div class="pair">
+      <img class="screen" src="/screens/select2.webp" width="1280" height="720" loading="lazy" alt="Song select on a chart with a misty lake as its artwork">
+      <img class="screen" src="/screens/select3.webp" width="1280" height="720" loading="lazy" alt="Song select on a chart with a mountain lake as its artwork">
+    </div>
+  </section>
+
+  <section class="moment">
+    <div>
+      <h2>Judged when you pressed. Not when the frame ran.</h2>
+      <p>Notes run on a tick clock, apart from the frame rate. On Linux, judging can read the kernel’s own input timestamps.</p>
+      <p class="sky"><code>actuon latency</code> measures your setup.</p>
+    </div>
+    <img class="screen" src="/screens/play.webp" width="1280" height="720" loading="lazy" alt="Autoplay partway through a chart, with its BGA running beside the lanes">
+  </section>
+
+  <section class="switch">
+    <h2>Switch without starting over.</h2>
+    <dl>
+      <div><dt>Your scores</dt><dd>Imports beatoraja and LR2 score databases.</dd></div>
+      <div><dt>Your skins</dt><dd>Runs beatoraja, LR2 and osu! mania skins, per screen and key mode.</dd></div>
+      <div><dt>Your tables</dt><dd>Difficulty tables and courses, with chart downloads built in.</dd></div>
+      <div><dt>Your charts</dt><dd>BMS, BME, BML, PMS and BMSON, from 4K to 14K, in Shift-JIS, EUC-KR or UTF-8.</dd></div>
+      <div><dt>Your BGA</dt><dd>Images and FFmpeg video, with optional deblocking and FSRCNNX upscaling.</dd></div>
+    </dl>
+  </section>
+
+  <section class="moment flip">
+    <img class="screen" src="/screens/result.webp" width="1280" height="720" loading="lazy" alt="The result screen after autoplay: rank AAA and a MAX lamp">
+    <div>
+      <h2>A score on the board really happened.</h2>
+      <p>The IR server replays every upload through the same judging code and works out the score itself. Clients never get to name their own.</p>
+      <a class="text-link" href="https://ir.actuon.app">Open the rankings</a>
+    </div>
+  </section>
+
+  <section id="start" class="start">
+    <h2>Play it.</h2>
+    <p>Free and open source under GPLv3. Developed and tested on Linux. Windows and macOS code exists but has never been run.</p>
+    <a class="button" href="https://github.com/square3ang/actuon/releases/latest">Download actuon</a>
+  </section>
+</main>
+<footer>
+  <a href="https://github.com/square3ang/actuon/blob/main/LICENSE">GPLv3</a>
+  <a href="https://github.com/square3ang/actuon/blob/main/docs/compat.md">Compatibility</a>
+  <a href="https://github.com/square3ang/actuon/blob/main/docs/skin.md">Skins</a>
+  <a href="https://github.com/square3ang/actuon/blob/main/docs/ir.md">IR server</a>
+  <p class="credits" data-credits>Screens show demo charts. Photographs, cropped: <a href="https://commons.wikimedia.org/wiki/File:Pumori,_Nepal,_Asia.jpg">Vyacheslav Argenberg</a> (CC BY 4.0), <a href="https://commons.wikimedia.org/wiki/File:Olkhon_Island,_Capes,_cliffs_at_sunset,_Lake_Baikal,_Russia.jpg">Vyacheslav Argenberg</a> (CC BY 4.0), <a href="https://commons.wikimedia.org/wiki/File:Herbert_Lake_beim_Icefields_Parkway.jpg">Florian Fuchs</a> (CC BY 3.0), <a href="https://commons.wikimedia.org/wiki/File:Lake_Kinney_mit_Mount_Whitehorn.jpg">Florian Fuchs</a> (CC BY 3.0), <a href="https://commons.wikimedia.org/wiki/File:Winter_in_Tatry_Mountains_-_Poland.jpg">Radek Kucharski</a> (CC BY 4.0), <a href="https://commons.wikimedia.org/wiki/File:Utah_Dunes_Landscape_-_West_Desert_District.jpg">Bureau of Land Management</a> (public domain), via Wikimedia Commons.</p>
+</footer>
+</body>
+</html>

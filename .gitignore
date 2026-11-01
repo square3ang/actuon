@@ -4,3 +4,4 @@ server/target/
 *.AppImage
 server/.env
 web/target/
+.wrangler/
