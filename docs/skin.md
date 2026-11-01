@@ -6,7 +6,7 @@ when they change, including during play.
 | Format | Files | Reference |
 | --- | --- | --- |
 | LR2 | `.lr2skin` (CSV) | `#INFORMATION` type, LR2 numeric ids |
-| beatoraja JSON | `.json` | lr2oraja `JsonSkinLoader` |
+| beatoraja JSON | `.json` | lr2oraja-endlessdream `JsonSkinLoader` |
 | beatoraja Lua | `.luaskin` | same objects, returned from a script |
 
 **Writing a new skin:** there is no separate actuon format. Use the beatoraja JSON format for declarations and Lua for logic:

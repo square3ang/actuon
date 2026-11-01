@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# Excludes #LNMODE, #BASE 62 and negative #xxx02: the installed lr2oraja jar predates the jbms-parser master behaviour we follow there.
-# Excludes #LNMODE and negative #xxx02: the shipped lr2oraja jar predates the jbms-parser master behaviour we follow there.
+# Excludes #LNMODE, #BASE 62 and negative #xxx02: the installed lr2oraja-endlessdream jar predates the jbms-parser master behaviour we follow there.
+# Excludes #LNMODE and negative #xxx02: the shipped lr2oraja-endlessdream jar predates the jbms-parser master behaviour we follow there.
 """Builds a mutated chart corpus for parser parity: mutate.py <list-file> <out-dir> <count>."""
 import random, sys, os
 files = [l.strip() for l in open(sys.argv[1]) if l.strip() and not l.strip().endswith('.bmson')]

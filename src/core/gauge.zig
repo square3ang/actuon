@@ -1,4 +1,4 @@
-//! LR2 gauges. Port of GaugeProperty.LR2 / GrooveGauge from lr2oraja (GPLv3). f32 on purpose:
+//! LR2 gauges. Port of GaugeProperty.LR2 / GrooveGauge from lr2oraja-endlessdream (GPLv3). f32 on purpose:
 //! the accumulated rounding is part of the behaviour being matched.
 const std = @import("std");
 const types = @import("types.zig");

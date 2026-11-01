@@ -13,7 +13,7 @@
 
 ## Skins
 
-Select, decide, play and result skins load in all three formats. Tested with lr2oraja's `default` and `ModernChic`, and KCOOL for LR2. osu! mania `skin.ini` works for play.
+Select, decide, play and result skins load in all three formats. Tested with lr2oraja-endlessdream's `default` and `ModernChic`, and KCOOL for LR2. osu! mania `skin.ini` works for play.
 
 Not implemented, so skins using them look incomplete:
 

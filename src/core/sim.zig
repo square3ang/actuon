@@ -1,4 +1,4 @@
-//! Deterministic judge simulation: a port of lr2oraja's JudgeManager (GPLv3) under the LR2 rule.
+//! Deterministic judge simulation: a port of lr2oraja-endlessdream's JudgeManager (GPLv3) under the LR2 rule.
 //! It never reads a clock. Input is timestamped events in, results in a ring out, stepped on an
 //! absolute 1 ms grid, so frame rate and call cadence cannot change the outcome and replays and
 //! the IR verifier reproduce a play exactly. No allocation after init.
@@ -373,7 +373,7 @@ pub const Sim = struct {
             if (st != 0) {
                 judge = if (dm >= w[4][0] and dm <= w[4][1]) 5 else 6;
             } else if (n.kind == .ln_start and dm < w[2][0]) {
-                judge = 6; // lr2oraja: no late BAD on LN heads
+                judge = 6; // lr2oraja-endlessdream: no late BAD on LN heads
             } else {
                 var j: u8 = 0;
                 while (j < 5 and !(dm >= w[j][0] and dm <= w[j][1])) j += 1;
