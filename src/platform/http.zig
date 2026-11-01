@@ -14,7 +14,10 @@ pub fn request(gpa: std.mem.Allocator, method: std.http.Method, url: []const u8,
         .method = method,
         .payload = payload,
         .response_writer = &body.writer,
-        .privileged_headers = headers, // a redirect to another host must not carry the IR token
+        // Not privileged_headers: Zig 0.17 never sends those. Extra headers follow a redirect to any
+        // host, so a request carrying the IR token does not follow one and sees it as a status.
+        .extra_headers = headers,
+        .redirect_behavior = if (headers.len > 0) .unhandled else null,
     });
     return .{ .status = @backingInt(res.status), .body = try body.toOwnedSlice() };
 }
@@ -78,6 +81,43 @@ pub fn join(a: std.mem.Allocator, base: []const u8, ref: []const u8) ![]u8 {
     var rest = ref;
     while (std.mem.startsWith(u8, rest, "./")) rest = rest[2..];
     return std.fmt.allocPrint(a, "{s}/{s}", .{ base[0..dir_end], rest });
+}
+
+test "a request sends its headers and does not follow a redirect with them" {
+    const a = std.testing.allocator;
+    const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    var server = try address.listen(fs.io, .{ .reuse_address = true });
+    defer server.deinit(fs.io);
+    const Peer = struct {
+        fn run(s: *std.Io.net.Server, seen: *[1024]u8, len: *usize, accepted: *usize) void {
+            const stream = s.accept(fs.io) catch return;
+            defer stream.close(fs.io);
+            accepted.* += 1;
+            var in_buf: [1024]u8 = undefined;
+            var reader = stream.reader(fs.io, &in_buf);
+            while (!std.mem.endsWith(u8, seen[0..len.*], "\r\n\r\n")) {
+                const line = reader.interface.takeDelimiterInclusive('\n') catch return;
+                @memcpy(seen[len.*..][0..line.len], line);
+                len.* += line.len;
+            }
+            var out_buf: [256]u8 = undefined;
+            var writer = stream.writer(fs.io, &out_buf);
+            writer.interface.writeAll("HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:1/x\r\ncontent-length: 0\r\nconnection: close\r\n\r\n") catch return;
+            writer.interface.flush() catch return;
+        }
+    };
+    var seen: [1024]u8 = undefined;
+    var len: usize = 0;
+    var accepted: usize = 0;
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{ &server, &seen, &len, &accepted });
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{server.socket.address.getPort()});
+    const r = try request(a, .GET, url, null, &.{.{ .name = "Authorization", .value = "Bearer t" }});
+    defer a.free(r.body);
+    thread.join();
+    try std.testing.expectEqual(@as(u16, 302), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, seen[0..len], "Authorization: Bearer t\r\n") != null);
+    try std.testing.expectEqual(@as(usize, 1), accepted);
 }
 
 test "url join" {
