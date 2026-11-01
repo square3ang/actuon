@@ -13,14 +13,10 @@
 
 ## Skins
 
-Play and result skins load in all three formats. Tested with lr2oraja's `default` and `ModernChic`, and KCOOL for LR2.
+Select, decide, play and result skins load in all three formats. Tested with lr2oraja's `default` and `ModernChic`, and KCOOL for LR2. osu! mania `skin.ini` works for play.
 
 Not implemented, so skins using them look incomplete:
 
-- Select and decide screens: these still use the built-in UI.
 - LR2 bitmap fonts.
 - Runtime images with `gr` ≥ 100.
-- The skin's custom option chooser.
-- `#SPEED` and hidden or lift covers.
-- BPM and judge graphs.
 - Pop-up and rarely used beatoraja Lua API: stubs return defaults.

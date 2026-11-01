@@ -5,7 +5,9 @@
   <img src="assets/brand/actuon_widelogo_light.svg" alt="actuon" width="360">
 </picture>
 
-**Frame rate never touches your judgment.** A BMS player timed by your input hardware and audio clock.
+**Off to on.**
+
+A BMS player.
 
 [![CI](https://github.com/square3ang/actuon/actions/workflows/ci.yml/badge.svg)](https://github.com/square3ang/actuon/actions/workflows/ci.yml)
 [![License: GPLv3](https://img.shields.io/badge/license-GPLv3-489CFF)](LICENSE)
