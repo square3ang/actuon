@@ -5,7 +5,7 @@
   <img src="assets/brand/actuon_widelogo_light.svg" alt="actuon" width="360">
 </picture>
 
-**Off to on.**
+**Every pulse counts.**
 
 A BMS player.
 
