@@ -248,13 +248,18 @@ pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: 
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     var batch: std.ArrayList(ScanJob) = .empty;
     var stack: std.ArrayList([]const u8) = .empty;
+    var unread: std.ArrayList([]const u8) = .empty;
     for (roots) |r| try stack.append(arena.allocator(), try arena.allocator().dupe(u8, r));
     while (stack.pop()) |dir| {
         var it = std.heap.ArenaAllocator.init(gpa);
         defer it.deinit();
         const a = it.allocator();
         stats.dirs += 1;
-        const entries = try fs.list(a, dir);
+        const entries = fs.listChecked(a, dir) catch |e| {
+            std.log.warn("cannot read {s}: {t}", .{ dir, e });
+            try unread.append(arena.allocator(), dir);
+            continue;
+        };
         for (entries) |e| {
             const full = try std.fs.path.join(arena.allocator(), &.{ dir, e.name });
             if (e.is_dir) {
@@ -280,9 +285,8 @@ pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: 
     try d.exec("BEGIN IMMEDIATE");
     errdefer d.exec("ROLLBACK") catch {};
     // Drop rows only under the scanned roots: an unplugged library must not vanish because
-    // its root is gone, so an unreachable root keeps its rows.
+    // its root is gone, so a folder that could not be read keeps its rows.
     for (roots) |r| {
-        if (!fs.exists(r)) continue;
         const sel = try d.prepare("SELECT path FROM song WHERE path LIKE ?1 ESCAPE '\\'");
         defer sel.deinit();
         const del = try d.prepare("DELETE FROM song WHERE path=?1");
@@ -291,7 +295,10 @@ pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: 
         sel.bindText(1, pat);
         while (try sel.step()) {
             const path = sel.text(0);
-            if (!seen.contains(path)) {
+            if (!isUnder(path, r) or seen.contains(path)) continue;
+            for (unread.items) |dir| {
+                if (isUnder(path, dir)) break;
+            } else {
                 del.bindText(1, path);
                 _ = try del.step();
                 del.reset();
@@ -301,6 +308,12 @@ pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: 
     }
     try d.exec("COMMIT");
     return stats;
+}
+
+/// A whole folder name must match: /mnt/bms does not hold /mnt/bms2/a.bms.
+fn isUnder(path: []const u8, dir: []const u8) bool {
+    if (dir.len == 0 or path.len <= dir.len or !std.mem.startsWith(u8, path, dir)) return false;
+    return std.fs.path.isSep(dir[dir.len - 1]) or std.fs.path.isSep(path[dir.len]);
 }
 
 fn likePrefix(a: std.mem.Allocator, prefix: []const u8) ![]u8 {
@@ -388,6 +401,22 @@ pub fn readSong(a: std.mem.Allocator, st: Stmt) !Song {
     };
 }
 
+/// Replays offered per chart, as beatoraja's slots.
+pub const max_replays = 4;
+
+/// Drops replays nothing can reach: the song select's newest ones, and the best one IR sync uploads.
+pub fn pruneReplays(d: Db, sha256: []const u8) !void {
+    const st = try d.prepare(
+        \\DELETE FROM replay WHERE sha256=?1
+        \\ AND id NOT IN (SELECT id FROM replay WHERE sha256=?1 ORDER BY date DESC, id DESC LIMIT ?2)
+        \\ AND id NOT IN (SELECT id FROM replay WHERE sha256=?1 ORDER BY ex DESC, clear DESC LIMIT 1)
+    );
+    defer st.deinit();
+    st.bindText(1, sha256);
+    st.bindInt(2, max_replays);
+    _ = try st.step();
+}
+
 pub const ScoreIn = struct {
     sha256: []const u8,
     clear: u8,
@@ -401,7 +430,9 @@ pub const ScoreIn = struct {
     source: []const u8 = "",
 };
 
-/// Keeps per-field bests, like beatoraja's ScoreData.update; play counts add up.
+/// Keeps per-field bests, like beatoraja's ScoreData.update. Local plays add to the play counts; an import
+/// of a source already taken in repeats its totals, so it only raises them.
+// shortcut: a row remembers one source, so alternating two imports still adds up, keep counts per source if that is reported.
 pub fn recordScore(d: Db, s: ScoreIn) !void {
     const st = try d.prepare(
         \\INSERT INTO score(sha256,clear,ex,pg,gr,gd,bd,pr,ms,max_combo,min_bp,playcount,clearcount,date,source)
@@ -417,8 +448,9 @@ pub fn recordScore(d: Db, s: ScoreIn) !void {
         \\ ex=MAX(ex,excluded.ex),
         \\ max_combo=MAX(max_combo,excluded.max_combo),
         \\ min_bp=MIN(min_bp,excluded.min_bp),
-        \\ playcount=playcount+excluded.playcount,
-        \\ clearcount=clearcount+excluded.clearcount,
+        \\ playcount=CASE WHEN excluded.source='' OR source<>excluded.source THEN playcount+excluded.playcount ELSE MAX(playcount,excluded.playcount) END,
+        \\ clearcount=CASE WHEN excluded.source='' OR source<>excluded.source THEN clearcount+excluded.clearcount ELSE MAX(clearcount,excluded.clearcount) END,
+        \\ source=CASE WHEN excluded.source='' THEN source ELSE excluded.source END,
         \\ date=MAX(date,excluded.date)
     );
     defer st.deinit();
@@ -579,6 +611,59 @@ test "scan parses in parallel, stores every chart and skips them next time" {
     try std.testing.expect(try count.step());
     try std.testing.expectEqual(@as(i64, first.parsed), count.int(0));
     try std.testing.expectEqual(@as(u32, 0), (try scan(gpa, d, &roots, null)).parsed);
+}
+
+test "a scan drops gone charts only in folders it could read" {
+    const gpa = std.testing.allocator;
+    fs.io = std.testing.io;
+    const root = "actuon_test_roots";
+    fs.removeTree(root);
+    defer fs.removeTree(root);
+    try fs.mkdirs(root ++ "/bms");
+    try fs.mkdirs(root ++ "/bms2");
+    try fs.write(root ++ "/file", "not a folder");
+    const d = try Db.open(":memory:", gpa, false);
+    defer d.close();
+    try initSchema(d);
+    try d.exec("INSERT INTO song(path,folder,sha256,md5,mtime,size) VALUES('" ++ root ++ "/bms/gone.bms','','a','a',0,0),('" ++ root ++ "/bms2/kept.bms','','b','b',0,0),('" ++ root ++ "/file/kept.bms','','c','c',0,0)");
+    const roots = [_][]const u8{ root ++ "/bms", root ++ "/file" };
+    try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, d, &roots, null)).removed);
+    const st = try d.prepare("SELECT COUNT(*) FROM song WHERE path LIKE '%kept.bms'");
+    defer st.deinit();
+    try std.testing.expect(try st.step());
+    try std.testing.expectEqual(@as(i64, 2), st.int(0));
+}
+
+test "importing the same scores twice does not double the play counts, local plays still add" {
+    const d = try Db.open(":memory:", std.testing.allocator, false);
+    defer d.close();
+    try initSchema(d);
+    const imported: ScoreIn = .{ .sha256 = "a", .clear = 1, .ex = 1, .counts = @splat(0), .max_combo = 0, .miss = 0, .played = 5, .cleared = 2, .date = 1, .source = "LR2" };
+    try recordScore(d, imported);
+    try recordScore(d, imported);
+    var local = imported;
+    local.played = 1;
+    local.cleared = 1;
+    local.source = "";
+    try recordScore(d, local);
+    const st = try d.prepare("SELECT playcount,clearcount,source FROM score");
+    defer st.deinit();
+    try std.testing.expect(try st.step());
+    try std.testing.expectEqual(@as(i64, 6), st.int(0));
+    try std.testing.expectEqual(@as(i64, 3), st.int(1));
+    try std.testing.expectEqualStrings("LR2", st.text(2));
+}
+
+test "pruning keeps the newest replays and the best one" {
+    const d = try Db.open(":memory:", std.testing.allocator, false);
+    defer d.close();
+    try initSchema(d);
+    try d.exec("INSERT INTO replay(id,sha256,date,ex,clear) VALUES(1,'a',1,1,1),(2,'a',2,99,1),(3,'a',3,1,1),(4,'a',4,1,1),(5,'a',5,1,1),(6,'a',6,1,1),(7,'a',7,1,1),(8,'b',1,1,1)");
+    try pruneReplays(d, "a");
+    const st = try d.prepare("SELECT group_concat(id) FROM (SELECT id FROM replay ORDER BY id)");
+    defer st.deinit();
+    try std.testing.expect(try st.step());
+    try std.testing.expectEqualStrings("2,4,5,6,7,8", st.text(0));
 }
 
 test "a scan leaves the database free for other writers between batches" {

@@ -89,7 +89,6 @@ pub const Sim = struct {
     judge_end: i64,
     prev_t: i64 = -1,
     grid_t: i64 = 0,
-    now_t: i64 = 0,
     gauges: [gauge_mod.count]gauge_mod.Gauge,
     gauge_type: gauge_mod.Type,
     gas_top: ?gauge_mod.Type,
@@ -207,7 +206,6 @@ pub const Sim = struct {
             s.grid_t += 1000;
             s.step(s.grid_t);
         }
-        if (t > s.now_t) s.now_t = t;
     }
 
     /// Applies one input event. Events must arrive in time order; late ones are clamped forward
@@ -255,7 +253,7 @@ pub const Sim = struct {
                 },
                 .normal => {},
             }
-            if (s.autoplay) s.autoNote(lane, idx, t);
+            if (s.autoplay) s.autoNote(lane, idx);
         }
         ls.increase = ls.passing >= 0 and (down or s.autoplay or endHeld(s, ls));
     }
@@ -267,13 +265,13 @@ pub const Sim = struct {
         return st > 0 and st <= 3;
     }
 
-    fn autoNote(s: *Sim, lane: u8, idx: u32, t: i64) void {
+    fn autoNote(s: *Sim, lane: u8, idx: u32) void {
         const n = s.notes[idx];
         const ls = &s.lanes[lane];
         switch (n.kind) {
             .normal => if (s.state[idx] == 0) {
                 s.sound(@intCast(idx));
-                s.judgeNote(lane, @intCast(idx), 0, 0, true, false);
+                s.judgeNote(lane, @intCast(idx), 0, 0, true);
                 s.emit(.{ .kind = .press_empty, .lane = lane });
             },
             .ln_start => if (s.state[idx] == 0 and ls.processing < 0) {
@@ -281,18 +279,17 @@ pub const Sim = struct {
                 if (n.ln_type == .ln) {
                     ls.ln_start_judge = 0;
                     ls.ln_start_dur = 0;
-                } else s.judgeNote(lane, @intCast(idx), 0, 0, true, false);
+                } else s.judgeNote(lane, @intCast(idx), 0, 0, true);
                 ls.processing = n.pair;
                 s.emit(.{ .kind = .hold_start, .lane = lane });
             },
             .ln_end => if (s.state[idx] == 0 and n.ln_type != .ln) {
-                s.judgeNote(lane, @intCast(idx), 0, 0, true, false);
+                s.judgeNote(lane, @intCast(idx), 0, 0, true);
                 ls.processing = -1;
                 s.emit(.{ .kind = .hold_end, .lane = lane });
             },
             .mine => {},
         }
-        _ = t;
     }
 
     fn hcnPhase(s: *Sim, t: i64) void {
@@ -332,7 +329,7 @@ pub const Sim = struct {
                 const dm = proc.time_us - pt;
                 const j = windowJudge(&s.end_w, dm);
                 s.sound(ls.processing);
-                s.judgeNote(lane, ls.processing, j, dm, true, false);
+                s.judgeNote(lane, ls.processing, j, dm, true);
                 ls.processing = -1;
                 ls.release_time = no_time;
                 ls.ln_end_judge = -1;
@@ -375,8 +372,7 @@ pub const Sim = struct {
             } else if (n.kind == .ln_start and dm < w[2][0]) {
                 judge = 6; // lr2oraja-endlessdream: no late BAD on LN heads
             } else {
-                var j: u8 = 0;
-                while (j < 5 and !(dm >= w[j][0] and dm <= w[j][1])) j += 1;
+                const j = windowJudge(w, dm);
                 judge = if (j >= 4) j + 1 else j;
             }
             if (judge < 6) {
@@ -406,7 +402,7 @@ pub const Sim = struct {
                         ls.ln_end_judge = -1;
                         if (sc >= 0) s.sckey[@intCast(sc)] = @as(u8, key) + 1;
                         s.emit(.{ .kind = .hold_start, .lane = lane });
-                    } else s.judgeNote(lane, tnote, judge, tdm, false, false);
+                    } else s.judgeNote(lane, tnote, judge, tdm, false);
                 } else {
                     if (vanish) {
                         ls.processing = tn.pair;
@@ -415,11 +411,11 @@ pub const Sim = struct {
                         if (sc >= 0) s.sckey[@intCast(sc)] = @as(u8, key) + 1;
                         s.emit(.{ .kind = .hold_start, .lane = lane });
                     }
-                    s.judgeNote(lane, tnote, judge, tdm, vanish, false);
+                    s.judgeNote(lane, tnote, judge, tdm, vanish);
                 }
             } else {
                 s.sound(tnote);
-                s.judgeNote(lane, tnote, judge, tdm, vanish, false);
+                s.judgeNote(lane, tnote, judge, tdm, vanish);
             }
         } else {
             // no judgment: replay the nearest earlier keysound on this lane
@@ -471,7 +467,7 @@ pub const Sim = struct {
                 break;
             }
         }
-        for (start..size) |k| s.judgeNote(lane, notes[k], 3, times[k], true, true);
+        for (start..size) |k| s.judgeNote(lane, notes[k], 3, times[k], true);
     }
 
     fn onRelease(s: *Sim, lane: u8, key: u1, pt: i64) void {
@@ -491,7 +487,7 @@ pub const Sim = struct {
                 ls.release_time = pt;
                 ls.ln_end_judge = j;
             } else {
-                s.judgeNote(lane, ls.processing, j, dm, true, false);
+                s.judgeNote(lane, ls.processing, j, dm, true);
                 s.endHold(lane);
             }
         } else {
@@ -505,7 +501,7 @@ pub const Sim = struct {
                 ls.release_time = pt;
                 ls.ln_end_judge = 3;
             } else {
-                s.judgeNote(lane, proc.pair, @min(j, 3), dm, true, false);
+                s.judgeNote(lane, proc.pair, @min(j, 3), dm, true);
                 s.endHold(lane);
             }
         }
@@ -539,15 +535,15 @@ pub const Sim = struct {
                 if (proc.ln_type == .ln) {
                     if (ls.release_time != no_time and ls.release_time <= t) {
                         s.emit(.{ .kind = .stop_sound, .lane = lane, .wav = s.notes[@intCast(proc.pair)].wav });
-                        s.judgeNote(lane, proc.pair, @intCast(ls.ln_end_judge), proc.time_us - ls.release_time, true, false);
+                        s.judgeNote(lane, proc.pair, @intCast(ls.ln_end_judge), proc.time_us - ls.release_time, true);
                         s.endHold(lane);
                     } else if (proc.time_us < t) {
-                        s.judgeNote(lane, proc.pair, ls.ln_start_judge, ls.ln_start_dur, true, false);
+                        s.judgeNote(lane, proc.pair, ls.ln_start_judge, ls.ln_start_dur, true);
                         s.endHold(lane);
                     }
                 } else if (ls.release_time != no_time and ls.release_time <= t) {
                     if (ls.ln_end_judge >= 3) s.emit(.{ .kind = .stop_sound, .lane = lane, .wav = s.notes[@intCast(proc.pair)].wav });
-                    s.judgeNote(lane, ls.processing, @intCast(ls.ln_end_judge), proc.time_us - ls.release_time, true, false);
+                    s.judgeNote(lane, ls.processing, @intCast(ls.ln_end_judge), proc.time_us - ls.release_time, true);
                     s.endHold(lane);
                 }
             }
@@ -562,17 +558,18 @@ pub const Sim = struct {
                 const mj = n.time_us - t;
                 const st = s.state[@intCast(idx)];
                 switch (n.kind) {
-                    .normal => if (st == 0) s.judgeNote(lane, idx, 4, mj, true, false),
+                    .normal => if (st == 0) s.judgeNote(lane, idx, 4, mj, true),
                     .ln_start => if (st == 0) {
                         if (n.ln_type != .ln) {
-                            s.judgeNote(lane, idx, 4, mj, true, false);
-                            s.judgeNote(lane, n.pair, 4, mj, true, false);
+                            s.judgeNote(lane, idx, 4, mj, true);
+                            // A head whose end was dropped has no pair.
+                            if (n.pair >= 0) s.judgeNote(lane, n.pair, 4, mj, true);
                         } else if (ls.processing != n.pair) {
-                            s.judgeNote(lane, idx, 4, mj, true, false);
+                            s.judgeNote(lane, idx, 4, mj, true);
                         }
                     },
                     .ln_end => if (st == 0 and n.ln_type != .ln) {
-                        s.judgeNote(lane, idx, 4, mj, true, false);
+                        s.judgeNote(lane, idx, 4, mj, true);
                         ls.processing = -1;
                         ls.release_time = no_time;
                         ls.ln_end_judge = -1;
@@ -585,8 +582,7 @@ pub const Sim = struct {
     }
 
     /// JudgeManager.updateMicro with the LR2 rule's combo table {PG,GR,GD,MS keep; BD,PR break}.
-    fn judgeNote(s: *Sim, lane: u8, idx: i32, judge: u8, fast: i64, vanish: bool, multi: bool) void {
-        _ = multi;
+    fn judgeNote(s: *Sim, lane: u8, idx: i32, judge: u8, fast: i64, vanish: bool) void {
         if (vanish) {
             s.state[@intCast(idx)] = judge + 1;
             s.score.passed += 1;
@@ -773,6 +769,20 @@ test "a held plain long note names its end note and leaves the head's state alon
     // Renderers rely on this: the head has no state yet, so only `processing` says it was hit.
     try testing.expectEqual(@as(u8, 0), s.state[0]);
     try testing.expectEqual(c.notes[0].pair, s.lanes[0].processing);
+}
+
+test "a charge note head without an end survives a miss and a hit" {
+    const src = "#BPM 120\n#LNMODE 2\n#WAV01 a.wav\n#00151:0101\n#00111:0001\n";
+    var c = try chartFrom(src);
+    defer c.deinit();
+    try testing.expectEqual(@as(i32, -1), c.notes[0].pair);
+    const missed = try Sim.create(testing.allocator, &c, .{});
+    defer missed.destroy();
+    missed.advance(c.notes[c.notes.len - 1].time_us + 2_000_000);
+    const hit = try Sim.create(testing.allocator, &c, .{});
+    defer hit.destroy();
+    for (c.notes) |n| hit.input(.{ .time_us = n.time_us, .lane = n.lane, .down = true });
+    hit.advance(c.notes[c.notes.len - 1].time_us + 2_000_000);
 }
 
 test "multi-bad judges skipped notes in BAD range" {

@@ -18,7 +18,12 @@ pub fn write(path: []const u8, data: []const u8) !void {
 pub fn writeAtomic(gpa: std.mem.Allocator, path: []const u8, data: []const u8) !void {
     const tmp = try std.fmt.allocPrint(gpa, "{s}.tmp", .{path});
     defer gpa.free(tmp);
-    try write(tmp, data);
+    errdefer remove(tmp);
+    const f = try Dir.cwd().createFile(io, tmp, .{});
+    defer f.close(io);
+    try f.writeStreamingAll(io, data);
+    // Rename can reach the disk before the data does, and a power cut would then leave an empty file.
+    try f.sync(io);
     try Dir.cwd().rename(tmp, Dir.cwd(), path, io);
 }
 
@@ -77,11 +82,19 @@ pub const Entry = struct { name: []const u8, is_dir: bool };
 
 /// Lists one directory; names live in `a`. Missing or unreadable directories list as empty.
 pub fn list(a: std.mem.Allocator, path: []const u8) ![]Entry {
+    return listChecked(a, path) catch |e| switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => &.{},
+    };
+}
+
+/// `list` for callers that must tell an empty directory from one they could not read.
+pub fn listChecked(a: std.mem.Allocator, path: []const u8) ![]Entry {
     var out: std.ArrayList(Entry) = .empty;
-    var dir = Dir.cwd().openDir(io, path, .{ .iterate = true }) catch return out.toOwnedSlice(a);
+    var dir = try Dir.cwd().openDir(io, path, .{ .iterate = true });
     defer dir.close(io);
     var it = dir.iterate();
-    while (it.next(io) catch null) |e| {
+    while (try it.next(io)) |e| {
         var is_dir = e.kind == .directory;
         if (e.kind == .sym_link) {
             const full = try std.fs.path.join(a, &.{ path, e.name });
@@ -153,6 +166,32 @@ pub fn climbs(path: []const u8) bool {
     var it = std.mem.tokenizeAny(u8, path, "/\\");
     while (it.next()) |seg| if (std.mem.eql(u8, seg, "..")) return true;
     return false;
+}
+
+test "an asset path cannot leave the chart folder" {
+    io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // These all exist, so only the escape check can turn them down.
+    try std.testing.expect(try resolveAsset(a, "tests/charts", "stop.bms", &.{}) != null);
+    try std.testing.expectEqual(null, try resolveAsset(a, "tests/charts", "../charts/stop.bms", &.{}));
+    try std.testing.expectEqual(null, try resolveAsset(a, "tests/charts", "sub/../../charts/stop.bms", &.{}));
+    const absolute = try Dir.cwd().realPathFileAlloc(io, "tests/charts/stop.bms", a);
+    try std.testing.expectEqual(null, try resolveAsset(a, "tests/charts", absolute, &.{}));
+}
+
+test "writeAtomic replaces the file and leaves no temporary" {
+    io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const p = "actuon_test_atomic.txt";
+    defer remove(p);
+    try writeAtomic(gpa, p, "one");
+    try writeAtomic(gpa, p, "two");
+    const back = try readAlloc(gpa, p, 16);
+    defer gpa.free(back);
+    try std.testing.expectEqualStrings("two", back);
+    try std.testing.expect(!exists(p ++ ".tmp"));
 }
 
 test "only a whole .. segment climbs" {

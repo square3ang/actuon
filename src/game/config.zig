@@ -189,10 +189,27 @@ test "a slot overrides the default skin, and can ask for the built-in look" {
     try std.testing.expectEqualStrings("", cfg.skinFor(.result));
 }
 
+/// Set when `load` could not read the file, so the game can tell the player.
+pub var set_aside = false;
+
+/// The defaults are saved on exit: keep the player's settings out of their way.
+fn setAside(a: std.mem.Allocator, p: []const u8, why: anyerror) void {
+    std.log.warn("config unreadable: {t}", .{why});
+    set_aside = true;
+    const bad = std.fmt.allocPrint(a, "{s}.bad", .{p}) catch return;
+    fs.rename(p, bad) catch |e| std.log.warn("could not move {s}: {t}", .{ p, e });
+}
+
 pub fn load(a: std.mem.Allocator) Config {
     const p = path(a) catch return .{};
-    const bytes = fs.readAlloc(a, p, 1 << 20) catch return .{};
-    var cfg = std.json.parseFromSliceLeaky(Config, a, bytes, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return .{};
+    const bytes = fs.readAlloc(a, p, 1 << 20) catch |e| {
+        if (e != error.FileNotFound) setAside(a, p, e);
+        return .{};
+    };
+    var cfg = std.json.parseFromSliceLeaky(Config, a, bytes, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch |e| {
+        setAside(a, p, e);
+        return .{};
+    };
     cfg.clampCovers();
     cfg.download_url = migrateDownloadUrl(cfg.download_url);
     return cfg;
@@ -265,6 +282,25 @@ test "each mode keeps its own keys, and old configs carry over" {
     try std.testing.expect(bindings(&cfg, .beat7)[200] == null);
     try std.testing.expectEqual(@as(u8, 0), bindings(&cfg, .beat7)[100].?.lane);
     try std.testing.expect(bindings(&cfg, .beat5)[100] == null);
+}
+
+test "a broken config is kept aside instead of being overwritten" {
+    fs.io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try fs.mkdirs(fs.test_data_dir);
+    const p = try path(a);
+    const bad = try std.fmt.allocPrint(a, "{s}.bad", .{p});
+    defer fs.remove(bad);
+    defer fs.remove(p);
+    defer set_aside = false;
+    try fs.write(p, "{ not json");
+    const cfg = load(a);
+    try std.testing.expectEqual(@as(Config, .{}).green_ms, cfg.green_ms);
+    try std.testing.expect(set_aside);
+    try std.testing.expect(!fs.exists(p));
+    try std.testing.expectEqualStrings("{ not json", try fs.readAlloc(a, bad, 64));
 }
 
 test "the dead download default is replaced, custom ones stay" {

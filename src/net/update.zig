@@ -195,7 +195,7 @@ pub const Job = struct {
     }
 
     /// At exit. A read blocked on a dead connection cannot be interrupted, so the thread may stay behind with its job.
-    pub fn abandon(j: *Job) void {
+    pub fn abandon(j: *Job) bool {
         j.progress.cancel.store(true, .release);
         for (0..60) |_| {
             const phase = j.phase.load(.acquire);
@@ -203,11 +203,12 @@ pub const Job = struct {
                 if (j.thread) |t| c.SDL_WaitThread(t, null);
                 j.arena.deinit();
                 j.gpa.destroy(j);
-                return;
+                return true;
             }
             c.SDL_Delay(50);
         }
         if (j.thread) |t| c.SDL_DetachThread(t);
+        return false;
     }
 };
 

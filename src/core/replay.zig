@@ -201,6 +201,27 @@ test "the LN mode survives the round trip and a bad one is rejected" {
     try std.testing.expectError(error.BadField, decode(a, bytes));
 }
 
+test "the size limits reject a replay" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const good = try encode(a, .{});
+    _ = try decode(a, good);
+    // magic, version, hash, gauge, random, then a one-byte seed
+    const counts = 4 + 1 + 64 + 2 + 1;
+    const with = struct {
+        fn make(al: std.mem.Allocator, head: []const u8, tail: []const u8) ![]u8 {
+            return std.mem.concat(al, u8, &.{ head[0..counts], tail });
+        }
+    }.make;
+    // 4097 random values
+    try std.testing.expectError(error.BadField, decode(a, try with(a, good, &.{ 0x81, 0x20 })));
+    // no random values, then more events than bytes
+    try std.testing.expectError(error.BadField, decode(a, try with(a, good, &.{ 0, 0xFF, 0x7F })));
+    // a varint that never ends
+    try std.testing.expectError(error.BadVarint, decode(a, try with(a, good, &@as([12]u8, @splat(0xFF)))));
+}
+
 test "a key pressed before the song starts survives the round trip" {
     const parser = @import("../bms/parser.zig");
     const gpa = std.testing.allocator;

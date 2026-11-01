@@ -66,11 +66,12 @@ pub const Engine = struct {
     ui_voices: [ui_slots]UiVoice = @splat(.{}),
     /// Song position of the first sample of the next buffer.
     frame: std.atomic.Value(i64) = .init(0),
-    running: std.atomic.Value(bool) = .init(false),
     paused: bool = false,
     cmd_buf: [4096]Cmd = undefined,
     cmd_head: std.atomic.Value(u32) = .init(0),
     cmd_tail: std.atomic.Value(u32) = .init(0),
+    /// The sim and UI threads both send commands, and the ring takes one producer at a time.
+    cmd_lock: std.atomic.Value(bool) = .init(false),
     gain: f32 = 1,
     /// Tick clock (song µs - monotonic µs), fixed once settled; the writer thread is the only writer.
     clock_offset_us: std.atomic.Value(i64) = .init(0),
@@ -235,7 +236,6 @@ pub const Engine = struct {
         const n = nameOf(ty);
         @memcpy(e.host.name[0..n.len], n);
         e.feed_quit.store(false, .release);
-        e.running.store(true, .release);
         e.feed_thread = c.SDL_CreateThread(writeThread, "audio-write", e);
         return true;
     }
@@ -261,7 +261,6 @@ pub const Engine = struct {
         @memcpy(e.host.name[0..n.len], n);
         e.feed_quit.store(false, .release);
         e.feed_thread = c.SDL_CreateThread(nullThread, "audio-null", e);
-        e.running.store(true, .release);
     }
 
     fn nullThread(ud: ?*anyopaque) callconv(.c) c_int {
@@ -282,7 +281,6 @@ pub const Engine = struct {
     }
 
     pub fn close(e: *Engine) void {
-        e.running.store(false, .release);
         // The writer uses the stream, so it stops first.
         if (e.feed_thread) |t| {
             e.feed_quit.store(true, .release);
@@ -322,6 +320,8 @@ pub const Engine = struct {
     }
 
     fn push(e: *Engine, cmd: Cmd) void {
+        while (e.cmd_lock.swap(true, .acquire)) std.atomic.spinLoopHint();
+        defer e.cmd_lock.store(false, .release);
         const h = e.cmd_head.load(.monotonic);
         if (h -% e.cmd_tail.load(.acquire) >= e.cmd_buf.len) return;
         e.cmd_buf[h % e.cmd_buf.len] = cmd;

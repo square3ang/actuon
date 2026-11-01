@@ -105,6 +105,9 @@ pub const Session = struct {
     vis: []u8,
 
     const no_seek = std.math.minInt(i64);
+    /// Judged time stays this far behind the clock, so a press that took a while to get here is still judged when it happened.
+    // shortcut: an event later than this counts from when it arrived, raise it if SDL input on a slow frame loses timing.
+    const input_grace_us = 20_000;
 
     pub fn parseFile(gpa: std.mem.Allocator, path: []const u8, selected: ?[]const i32, seed: u64) !Chart {
         const data = try fs.readAlloc(gpa, path, 1 << 28);
@@ -263,7 +266,8 @@ pub const Session = struct {
 
     fn applyInput(s: *Session, t_in: i64, lane: u8, key: u8, down: bool) void {
         // keep the stream ordered: replays and the sim both depend on it
-        const t = @max(t_in, s.last_event_t);
+        // Nor may it fall behind judged time: a replay judges every event before stepping past it.
+        const t = @max(t_in, s.last_event_t, s.sim.grid_t);
         s.last_event_t = t;
         const ev: core.sim.Event = .{ .time_us = t, .lane = lane, .key = key, .down = down };
         s.events.appendAssumeCapacity(ev);
@@ -301,7 +305,8 @@ pub const Session = struct {
                     snap.held[e.lane] = s.sim.lanes[e.lane].down[0] or s.sim.lanes[e.lane].down[1];
                 }
             }
-            s.sim.advance(now);
+            // Replays and autoplay have no late events, and their keysounds must not lag.
+            s.sim.advance(if (s.params.replay != null or s.params.autoplay) now else now - input_grace_us);
 
             const n = s.sim.drain(&out);
             for (out[0..n]) |o| switch (o.kind) {
@@ -393,10 +398,6 @@ pub const Session = struct {
         return snap.time_us > s.chart.last_note_us + 1_000_000;
     }
 
-    pub fn clear(s: *Session) core.types.Clear {
-        return s.sim.clear(s.snapshot().finished and !s.sim.failed);
-    }
-
     pub fn replayBytes(s: *Session) ![]u8 {
         return core.replay.encode(s.gpa, .{
             .sha256 = s.chart.sha256,
@@ -440,6 +441,30 @@ fn chartAudioEnd(chart: *const Chart, samples: []const decode.Sample, rate: u32)
     for (chart.bg) |b| end = @max(end, soundEnd(b.time_us, b.wav, b.wav_start_us, b.wav_dur_us, samples, rate));
     for (chart.notes) |n| end = @max(end, soundEnd(n.time_us, n.wav, n.wav_start_us, n.wav_dur_us, samples, rate));
     return end;
+}
+
+test "an input older than judged time scores the same when resimulated" {
+    const gpa = std.testing.allocator;
+    var chart = try core.bms.parse(gpa, "#BPM 120\n#TOTAL 300\n#WAV01 a.wav\n#00111:01\n", .{});
+    defer chart.deinit();
+    var s: Session = undefined;
+    s.params = .{ .path = "" };
+    s.last_event_t = 0;
+    s.sim = try Sim.create(gpa, &chart, .{});
+    defer s.sim.destroy();
+    s.events = try .initCapacity(gpa, 4);
+    defer s.events.deinit(gpa);
+    const note_t = chart.notes[0].time_us;
+    // The note has become a miss when the press, stamped right on it, arrives.
+    s.sim.advance(note_t + 1_000_000);
+    s.applyInput(note_t, chart.notes[0].lane, 0, true);
+    try std.testing.expectEqual(note_t + 1_000_000, s.events.items[0].time_us);
+    const again = try Sim.create(gpa, &chart, .{});
+    defer again.destroy();
+    for (s.events.items) |e| again.input(e);
+    try std.testing.expectEqual(s.sim.score.exScore(), again.score.exScore());
+    try std.testing.expectEqual(s.sim.score.count(.pr), again.score.count(.pr));
+    try std.testing.expectEqual(s.sim.score.count(.ms), again.score.count(.ms));
 }
 
 test "sound end honours slices and missing samples" {

@@ -19,6 +19,7 @@ const select = @import("select.zig");
 const result = @import("result.zig");
 const settings = @import("settings.zig");
 const update = @import("../net/update.zig");
+const ir = @import("../net/ir.zig");
 const skinconf = @import("skinconf.zig");
 const skinslots = @import("skinslots.zig");
 const course_mod = @import("course.zig");
@@ -540,6 +541,11 @@ pub const App = struct {
                 break :blk .select;
             } else .select;
             a.sel.status = tr("Could not load that chart");
+            // A course without this stage is over, or the next play would count as its next stage.
+            if (a.course) |*r| {
+                r.arena.deinit();
+                a.course = null;
+            }
             a.dropStagefile();
             return;
         };
@@ -680,7 +686,8 @@ pub const App = struct {
             var hint_buf: [48]u8 = undefined;
             a.g.textCentered(i18n.bufPrint(&hint_buf, "{s}: SKIP", .{select.guideKey(a, a.cfg.start_select[0], "ENTER", &key_buf)}) catch "", a.g.w / 2, a.g.h * 0.5, a.g.scaled(28), gfx.white);
         }
-        if (s.done.load(.acquire)) a.finishPlay(snap, true);
+        // The drawn snapshot can be a tick older than the end, and would lose the last judgements.
+        if (s.done.load(.acquire)) a.finishPlay(s.snapshot(), true);
     }
 
     /// Throws the current play away, unrecorded, and loads the same chart again.
@@ -977,6 +984,12 @@ pub const App = struct {
             if (a.shot_path != null and c.SDL_GetTicks() - a.start_ms >= a.shot_after_ms) a.shot();
             a.g.present();
         }
+        // Closing the window past the last note keeps the clear, like leaving with Esc there.
+        if (a.scene == .play) if (a.session) |s| {
+            a.exit_after_play = true;
+            const snap = s.snapshot();
+            a.finishPlay(snap, s.canSkip(snap));
+        };
         if (a.view.bga) |b| b.destroy();
         a.view.bga = null;
         if (a.session) |s| s.destroy();
@@ -1107,12 +1120,15 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
         }
         if (opts.decide) app.decidePlay(params, true) else app.startPlay(params, true);
     }
+    if (config.set_aside) app.sel.status = tr("Settings could not be read: moved to config.json.bad");
     if (crash.takePrevious(arena.allocator())) app.sel.status = tr("The last run crashed: see crash-last.txt in the data folder");
     if (opts.preview) |cmd| if (!cmd.stop) app.startPreview(cmd.file, cmd.measure);
     // Captures stay offline, so every run draws the same version row.
     if (app.shot_path == null) app.set.update = update.start(gpa);
     app.run();
-    if (app.set.update) |j| j.abandon();
+    const update_ended = if (app.set.update) |j| j.abandon() else true;
+    // A thread stuck on a dead connection still allocates, and the allocator's shutdown check would crash it.
+    if (!ir.waitForThreads() or !update_ended) std.process.exit(0);
     skinconf.close(app);
     skinslots.close(app);
     var hb = std.heap.ArenaAllocator.init(gpa);

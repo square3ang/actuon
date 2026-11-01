@@ -225,7 +225,29 @@ fn uploadThread(ud: ?*anyopaque) callconv(.c) c_int {
     gpa.free(u.chart_path);
     gpa.free(u.replay);
     gpa.destroy(u);
+    _ = detached_threads.fetchSub(1, .acq_rel);
     return 0;
+}
+
+var detached_threads: std.atomic.Value(u32) = .init(0);
+
+fn runDetached(entry: *const fn (?*anyopaque) callconv(.c) c_int, name: [*:0]const u8, ud: ?*anyopaque) bool {
+    _ = detached_threads.fetchAdd(1, .acq_rel);
+    const t = c.SDL_CreateThread(entry, name, ud) orelse {
+        _ = detached_threads.fetchSub(1, .acq_rel);
+        return false;
+    };
+    c.SDL_DetachThread(t);
+    return true;
+}
+
+/// At exit, because these threads allocate until they end. False when one is still stuck on a connection.
+pub fn waitForThreads() bool {
+    for (0..60) |_| {
+        if (detached_threads.load(.acquire) == 0) return true;
+        c.SDL_Delay(50);
+    }
+    return false;
 }
 
 const RankingFetch = struct { base: []u8, token: []u8, sha: []u8, board: *Board };
@@ -247,6 +269,7 @@ fn rankingThread(ud: ?*anyopaque) callconv(.c) c_int {
     gpa.free(f.token);
     gpa.free(f.sha);
     gpa.destroy(f);
+    _ = detached_threads.fetchSub(1, .acq_rel);
     return 0;
 }
 
@@ -261,9 +284,7 @@ pub fn startRanking(gpa: std.mem.Allocator, base: []const u8, token: []const u8,
         .sha = gpa.dupe(u8, sha) catch return null,
         .board = board,
     };
-    if (c.SDL_CreateThread(rankingThread, "ir-ranking", f)) |t| {
-        c.SDL_DetachThread(t);
-    } else {
+    if (!runDetached(rankingThread, "ir-ranking", f)) {
         board.state.store(Board.failed, .release);
         board.release();
     }
@@ -284,9 +305,7 @@ pub fn startUpload(gpa: std.mem.Allocator, base: []const u8, token: []const u8, 
         .replay = gpa.dupe(u8, replay) catch return null,
         .board = board,
     };
-    if (c.SDL_CreateThread(uploadThread, "ir-upload", u)) |t| {
-        c.SDL_DetachThread(t);
-    } else {
+    if (!runDetached(uploadThread, "ir-upload", u)) {
         board.state.store(Board.failed, .release);
         board.release();
     }
@@ -342,6 +361,7 @@ fn queryThread(ud: ?*anyopaque) callconv(.c) c_int {
     };
     q.done.store(true, .release);
     q.destroy();
+    _ = detached_threads.fetchSub(1, .acq_rel);
     return 0;
 }
 
@@ -367,9 +387,7 @@ pub fn startQuery(gpa: std.mem.Allocator, url: []const u8, token: []const u8, bo
         .token = gpa.dupe(u8, token) catch return null,
         .body = if (body) |b| gpa.dupe(u8, b) catch return null else null,
     };
-    if (c.SDL_CreateThread(queryThread, "ir-query", q)) |t| {
-        c.SDL_DetachThread(t);
-    } else {
+    if (!runDetached(queryThread, "ir-query", q)) {
         q.failed = true;
         q.done.store(true, .release);
         q.destroy();
@@ -508,8 +526,8 @@ pub const Sync = struct {
     }
 };
 
-/// Below the server's 4 checks at once, so that one player's sync leaves room for a score just played.
-const push_workers = 3;
+/// The server checks one replay per player at a time and answers 503 to a second.
+const push_workers = 1;
 const push_tries = 3;
 
 const Push = struct {
@@ -736,6 +754,7 @@ test "a ranking that cannot be fetched fails instead of hanging" {
     defer b.release();
     while (!b.ready()) c.SDL_Delay(5);
     try std.testing.expectEqual(@as(u8, Board.failed), b.state.load(.acquire));
+    try std.testing.expect(waitForThreads());
 }
 
 test "every refusal explains itself" {

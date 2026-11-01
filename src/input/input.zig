@@ -191,6 +191,7 @@ const evdev = if (builtin.os.tag == .linux) struct {
         return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
     }
 
+    // shortcut: devices are listed once, so a keyboard plugged in later is dead during play until restart, rescan on SDL_EVENT_KEYBOARD_ADDED when players report it.
     fn start() void {
         var path_buf: [32]u8 = undefined;
         for (0..64) |i| {
@@ -222,6 +223,12 @@ const evdev = if (builtin.os.tag == .linux) struct {
             // SDL's tick clock and CLOCK_MONOTONIC share a rate, so a fresh delta per wake is exact enough.
             const delta = @as(i128, c.SDL_GetTicksNS()) - monoNs();
             for (fds[0..n]) |*f| {
+                // An unplugged device reports HUP forever: without dropping it this loop would spin.
+                if (f.revents & (linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL) != 0) {
+                    _ = linux.close(f.fd);
+                    f.fd = -1;
+                    continue;
+                }
                 if (f.revents & linux.POLL.IN == 0) continue;
                 const rc = linux.read(f.fd, @ptrCast(&evs), @sizeOf(@TypeOf(evs)));
                 if (linux.errno(rc) != .SUCCESS) continue;

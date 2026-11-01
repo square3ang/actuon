@@ -130,20 +130,42 @@ pub fn finish(a: *App) void {
     res.snap.score = r.total;
     res.notes = r.notes;
     res.recorded = false;
+    res.save_failed = false;
+    res.prev_ex = 0;
+    res.prev_clear = 0;
     const n = @min(r.name.len, res.title_buf.len);
     @memcpy(res.title_buf[0..n], r.name[0..n]);
     res.title = res.title_buf[0..n];
     res.paused = r.paused;
     if (r.paused) return;
-    const st = a.db.prepare(
+    save(a, r.id, r.total.exScore()) catch |e| {
+        std.log.err("course save failed: {t}", .{e});
+        res.save_failed = true;
+        return;
+    };
+    res.recorded = true;
+}
+
+fn save(a: *App, id: i64, ex: u32) !void {
+    const res = &a.res;
+    {
+        const look = try a.db.prepare("SELECT ex, clear FROM course_score WHERE course_id=?1");
+        defer look.deinit();
+        look.bindInt(1, id);
+        if (try look.step()) {
+            res.prev_ex = @intCast(look.int(0));
+            res.prev_clear = @intCast(look.int(1));
+        }
+    }
+    const st = try a.db.prepare(
         \\INSERT INTO course_score(course_id,clear,ex,date) VALUES(?1,?2,?3,strftime('%s','now'))
         \\ON CONFLICT(course_id) DO UPDATE SET clear=MAX(clear,excluded.clear), ex=MAX(ex,excluded.ex), date=excluded.date
-    ) catch return;
+    );
     defer st.deinit();
-    st.bindInt(1, r.id);
+    st.bindInt(1, id);
     st.bindInt(2, @backingInt(res.clear));
-    st.bindInt(3, r.total.exScore());
-    _ = st.step() catch {};
+    st.bindInt(3, ex);
+    _ = try st.step();
 }
 
 test "stage scores add up" {

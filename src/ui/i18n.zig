@@ -313,6 +313,8 @@ const rows = [_]Row{
     .{ "Could not load that chart", "채보를 불러오지 못했어요", "その譜面を読み込めません", "无法加载该谱面" },
     .{ "NOT RECORDED", "기록되지 않음", "記録なし", "未记录" },
     .{ "NOT RECORDED: PAUSED", "기록되지 않음: 일시정지", "記録なし: 一時停止", "未记录：已暂停" },
+    .{ "NOT RECORDED: SAVE FAILED", "기록되지 않음: 저장 실패", "記録なし: 保存失敗", "未记录：保存失败" },
+    .{ "Settings could not be read: moved to config.json.bad", "설정을 읽지 못했어요: config.json.bad로 옮겼어요", "設定を読めませんでした: config.json.bad に移しました", "无法读取设置：已移至 config.json.bad" },
     .{ "NOT RECORDED: LN MODE", "기록되지 않음: LN MODE", "記録なし: LN MODE", "未记录：LN MODE" },
     .{ "{s}: SKIP", "{s}: 건너뛰기", "{s}: スキップ", "{s}：跳过" },
     .{ "{s}: BACK", "{s}: 뒤로", "{s}: 戻る", "{s}：返回" },

@@ -410,7 +410,7 @@ fn levelRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
 }
 
 fn courseRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
-    const st = try a.db.prepare("SELECT c.id,c.name,t.name,COALESCE(s.clear,0) FROM course c LEFT JOIN bms_table t ON t.url=c.table_url LEFT JOIN course_score s ON s.course_id=c.id ORDER BY t.name,c.id");
+    const st = try a.db.prepare("SELECT c.id,c.name,t.name FROM course c LEFT JOIN bms_table t ON t.url=c.table_url ORDER BY t.name,c.id");
     defer st.deinit();
     while (try st.step()) {
         try rows.append(al, .{
@@ -1387,7 +1387,7 @@ fn tableName(a: *App, song: db_mod.Song) usize {
     return n;
 }
 
-const max_replays = 4;
+const max_replays = db_mod.max_replays;
 
 fn selectedSong(s: *const State) ?db_mod.Song {
     return if (s.cursor < s.rows.len) s.rows[s.cursor].song else null;
