@@ -18,24 +18,25 @@ The next-generation BMS player.
 </div>
 
 > [!NOTE]
-> **Public beta preparation.** Developed and tested on Linux. Windows and macOS code paths exist but have never
-> been run. See [docs/compat.md](docs/compat.md) for what works and what does not yet.
+> **Public beta preparation.** See [docs/compat.md](docs/compat.md) for what works and what does not yet.
 
 ## Features
 
 | | |
 | --- | --- |
+| **Platforms** | Windows, macOS, Linux |
+| **Input** | Key presses are timed on their own thread: RawInput, IOKit HID, evdev |
 | **Formats** | BMS, BME, BML, PMS, BMSON; Shift-JIS, EUC-KR, UTF-8 |
 | **Modes** | 4K, 5K, 6K, 7K, 10K, 14K, 9K |
 | **Your data** | Imports beatoraja and LR2 score databases |
 | **Tables** | Difficulty tables and courses, with chart downloads |
 | **Skins** | beatoraja, LR2 and osu! mania skins, chosen per screen and key mode |
 | **BGA** | Still images and FFmpeg video, with optional deblocking and FSRCNNX upscaling |
-| **Online** | A self-hosted IR server in [`server/`](server) |
+| **Online** | Verified rankings at [ir.actuon.app](https://ir.actuon.app), with sign-up in the game. Host your own with [`server/`](server) |
 
 ```mermaid
 flowchart LR
-    I[Input hardware timestamps] --> S[Judge]
+    I[Input thread timestamps] --> S[Judge]
     A[Tick clock] --> S
     C[Chart] --> S
     S --> D[(Scores and replays)]
@@ -44,19 +45,22 @@ flowchart LR
 
 ## Quick start
 
-Needs Zig 0.17.x and these libraries, found through pkg-config: SDL3, SDL3_ttf, PortAudio, SQLite, Lua 5.4,
+Download the package for your OS from [Releases](https://github.com/square3ang/actuon/releases/latest): a zip for Windows, a dmg for macOS, an AppImage for Linux.
+
+1. Press <kbd>F10</kbd> for settings and add a library folder. Charts are scanned in the background.
+2. <kbd>Enter</kbd> opens a folder or starts a chart. <kbd>Esc</kbd> leaves play.
+
+To build from source, you need Zig 0.17.x and these libraries, found through pkg-config: SDL3, SDL3_ttf, PortAudio, SQLite, Lua 5.4,
 libarchive and FFmpeg (avformat, avcodec, avfilter, avutil, swscale). Linux also needs Vulkan.
 Shaders build from WGSL with `naga` (`cargo install naga-cli`); Windows and macOS also need `spirv-cross`.
+With Homebrew, add `$(brew --prefix libarchive)/lib/pkgconfig` to `PKG_CONFIG_PATH`.
 
 ```sh
 zig build -Doptimize=ReleaseSafe
 ./zig-out/bin/actuon
 ```
 
-1. Press <kbd>F10</kbd> for settings and add a library folder. Charts are scanned in the background.
-2. <kbd>Enter</kbd> opens a folder or starts a chart. <kbd>Esc</kbd> leaves play.
-
-Packaging scripts for each OS are in [`packaging/`](packaging).
+Packaging scripts for each OS are in [`packaging/`](packaging). To release, set `.version` in `build.zig.zon` and push the tag `v` plus that version: CI publishes the packages, and the game offers them under Settings, Online.
 
 ## Controls
 
@@ -77,16 +81,17 @@ Packaging scripts for each OS are in [`packaging/`](packaging).
 Key bindings and audio devices are in settings. `actuon latency` measures your setup.
 
 <details>
-<summary><b>Linux: kernel input timestamps</b></summary>
+<summary><b>Input setup</b></summary>
 
-Without extra setup the player uses SDL's keyboard events. For kernel timestamps it needs to read `/dev/input`:
+Windows needs no setup. macOS asks for the Input Monitoring permission; if you refuse, the player uses SDL's keyboard events.
+
+Linux also uses SDL's keyboard events until the player can read `/dev/input`, which gives it kernel timestamps:
 
 ```sh
 sudo install -m644 packaging/linux/70-actuon-input.rules /etc/udev/rules.d/
 ```
 
-> [!WARNING]
-> This lets any program of the logged-in user read all keystrokes. Install it only on a machine you trust.
+> **Warning:** this lets any program of the logged-in user read all keystrokes. Install it only on a machine you trust.
 
 </details>
 

@@ -7,9 +7,9 @@
 | Scores | beatoraja and LR2 import, see the gaps in [spec.md](spec.md) |
 | Difficulty tables and courses | Works; fetched a real table (Stella: 2379 songs, 26 courses) |
 | BGA | Still images and FFmpeg video. Layer video has no transparency |
-| Windows (RawInput, WASAPI, ASIO) | Written, never built or run |
-| macOS (IOKit HID, CoreAudio) | Written, never built or run |
-| Linux (evdev, JACK, PipeWire, ALSA) | Developed here |
+| Windows | RawInput, WASAPI, ASIO |
+| macOS | IOKit HID, CoreAudio |
+| Linux | evdev, JACK, PipeWire, ALSA |
 
 ## Skins
 

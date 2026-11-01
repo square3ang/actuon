@@ -27,9 +27,12 @@ New branches, parsers, data writes and security rules get one test that fails wh
 ```sh
 zig fmt --exclude src/bms/enc_tables.zig src tools build.zig
 zig build test
+zig build
 zig build tools -Doptimize=ReleaseSafe
 python3 tests/golden_check.py "$PWD/zig-out/bin/chartdump"
 ```
+
+For changes to `site/`, also run `node tests/site_lang.mjs`. A new string in the game needs a row in `src/ui/i18n.zig`, and new site copy goes in all four pages.
 
 For drawing changes, render every screen on the old build, then compare on the new one. This needs `xvfb-run` and Vulkan,
 and the images are not committed because they differ between GPUs:
