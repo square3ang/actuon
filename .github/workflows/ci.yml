@@ -5,7 +5,7 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:latest
     steps:
-      - run: pacman -Syu --noconfirm git zig sdl3 sdl3_ttf portaudio sqlite lua54 libarchive ffmpeg rust python base-devel pkgconf
+      - run: pacman -Syu --noconfirm git zig sdl3 sdl3_ttf portaudio sqlite lua54 libarchive ffmpeg vulkan-icd-loader vulkan-headers rust python base-devel pkgconf
       - uses: actions/checkout@v4
       - run: zig build test
       - run: zig build tools -Doptimize=ReleaseSafe
