@@ -27,7 +27,8 @@ actuon learned from these players. Ported code is noted per file.
 | Project | License | Use |
 | --- | --- | --- |
 | [beatoraja](https://github.com/exch-bms2/beatoraja) | GPLv3 | behaviour, skin and score formats, controls |
-| [lr2oraja](https://github.com/wcko87/lr2oraja), jbms-parser | GPLv3 | lr2oraja is the base of lr2oraja-endlessdream; chart parsing follows jbms-parser |
+| [lr2oraja](https://github.com/wcko87/lr2oraja) | GPLv3 | the base of lr2oraja-endlessdream |
+| [jbms-parser](https://github.com/seraxis/jbms-parser) | no license file of its own; built as a submodule of lr2oraja-endlessdream (GPLv3) | chart parsing follows it |
 | [lr2oraja-endlessdream](https://github.com/seraxis/lr2oraja-endlessdream) | GPLv3 | rules and test reference; the judge, gauges and judge windows are ported |
 | [Qwilight](https://vcs.taehui.net/root/qwilight/) | Microsoft Reference Source License | Format compatibility only: `#4K` and `#6K` chart headers and their lane mapping. No Qwilight code is included |
 | [osu!](https://github.com/ppy/osu) | MIT for code; its resources have their own terms | osu! mania skin format, behaviour reference |

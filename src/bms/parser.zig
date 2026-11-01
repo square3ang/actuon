@@ -1,5 +1,5 @@
-//! BMS decoder. Note layout, timing and LN pairing follow jbms-parser (GPLv3), the parser beatoraja
-//! uses, so note counts and times match it; see docs/spec.md for deliberate differences.
+//! BMS decoder. Note layout, timing and LN pairing follow jbms-parser, the parser beatoraja
+//! uses and lr2oraja-endlessdream (GPLv3) builds as a submodule, so note counts and times match it; see docs/spec.md for deliberate differences.
 const std = @import("std");
 const types = @import("../core/types.zig");
 const encoding = @import("encoding.zig");
