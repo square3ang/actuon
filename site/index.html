@@ -4,9 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>actuon - the next-generation BMS player</title>
-<meta name="description" content="actuon is an open-source BMS player for BMS, BME, BML, PMS and BMSON charts, with verified online rankings.">
+<meta name="description" content="actuon is an open-source BMS player for Windows, macOS and Linux, with verified online rankings.">
 <link rel="icon" href="/icon.svg">
 <link rel="stylesheet" href="/style.css">
+<link rel="alternate" hreflang="en" href="https://actuon.app/">
+<link rel="alternate" hreflang="ko" href="https://actuon.app/ko/">
+<link rel="alternate" hreflang="ja" href="https://actuon.app/ja/">
+<link rel="alternate" hreflang="zh-Hans" href="https://actuon.app/zh/">
+<link rel="alternate" hreflang="x-default" href="https://actuon.app/">
+<script src="/lang.js"></script>
 </head>
 <body>
 <header>
@@ -14,6 +20,12 @@
   <nav>
     <a href="https://ir.actuon.app">Rankings</a>
     <a href="https://github.com/square3ang/actuon">Source</a>
+  </nav>
+  <nav class="langs" aria-label="Language">
+    <a href="/?lang=en" hreflang="en" lang="en" aria-current="page">English</a>
+    <a href="/ko/" hreflang="ko" lang="ko">한국어</a>
+    <a href="/ja/" hreflang="ja" lang="ja">日本語</a>
+    <a href="/zh/" hreflang="zh" lang="zh-Hans">简体中文</a>
   </nav>
 </header>
 <main>
@@ -40,7 +52,7 @@
   <section class="moment">
     <div>
       <h2>Judged when you pressed. Not when the frame ran.</h2>
-      <p>Notes run on a tick clock, apart from the frame rate. On Linux, judging can read the kernel’s own input timestamps.</p>
+      <p>Notes run on a tick clock, apart from the frame rate. Key presses are timed on their own thread on Windows, macOS and Linux.</p>
       <p class="sky"><code>actuon latency</code> measures your setup.</p>
     </div>
     <img class="screen" src="/screens/play.webp" width="1280" height="720" loading="lazy" alt="Autoplay partway through a chart, with its BGA running beside the lanes">
@@ -68,7 +80,7 @@
 
   <section id="start" class="start">
     <h2>Play it.</h2>
-    <p>Free and open source under GPLv3. Developed and tested on Linux. Windows and macOS code exists but has never been run.</p>
+    <p>Free and open source under GPLv3, for Windows, macOS and Linux.</p>
     <a class="button" href="https://github.com/square3ang/actuon/releases/latest">Download actuon</a>
   </section>
 </main>

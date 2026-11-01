@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>actuon - 차세대 BMS 플레이어</title>
+<meta name="description" content="Windows, macOS, Linux에서 돌아가는 오픈소스 BMS 플레이어예요. 검증된 온라인 랭킹도 있어요.">
+<link rel="icon" href="/icon.svg">
+<link rel="stylesheet" href="/style.css">
+<link rel="alternate" hreflang="en" href="https://actuon.app/">
+<link rel="alternate" hreflang="ko" href="https://actuon.app/ko/">
+<link rel="alternate" hreflang="ja" href="https://actuon.app/ja/">
+<link rel="alternate" hreflang="zh-Hans" href="https://actuon.app/zh/">
+<link rel="alternate" hreflang="x-default" href="https://actuon.app/">
+<script src="/lang.js"></script>
+</head>
+<body>
+<header>
+  <a class="logo" href="/ko/"><img src="/logo.svg" alt="actuon" width="948" height="364"></a>
+  <nav>
+    <a href="https://ir.actuon.app">랭킹</a>
+    <a href="https://github.com/square3ang/actuon">소스</a>
+  </nav>
+  <nav class="langs" aria-label="Language">
+    <a href="/?lang=en" hreflang="en" lang="en">English</a>
+    <a href="/ko/" hreflang="ko" lang="ko" aria-current="page">한국어</a>
+    <a href="/ja/" hreflang="ja" lang="ja">日本語</a>
+    <a href="/zh/" hreflang="zh" lang="zh-Hans">简体中文</a>
+  </nav>
+</header>
+<main>
+  <section class="hero">
+    <div>
+      <h1>노트와 나 사이, 아무것도 없게.</h1>
+      <p>차세대 BMS 플레이어예요. 점수, 스킨, 난이도표를 그대로 가져오고, 타이밍은 정직하게 재요.</p>
+      <div class="actions">
+        <a class="button" href="https://github.com/square3ang/actuon/releases/latest">actuon 다운로드</a>
+        <a class="link" href="https://ir.actuon.app">랭킹 보기</a>
+      </div>
+    </div>
+    <img class="screen" src="/screens/select.webp" width="1280" height="720" alt="actuon 곡 선택 화면: 채보 아트워크가 정보와 곡 휠 뒤로 화면을 채운다">
+  </section>
+
+  <section class="art">
+    <h2>곡마다 그 곡만의 아트가 있어요.</h2>
+    <div class="pair">
+      <img class="screen" src="/screens/select2.webp" width="1280" height="720" loading="lazy" alt="안개 낀 호수 아트워크 채보의 곡 선택 화면">
+      <img class="screen" src="/screens/select3.webp" width="1280" height="720" loading="lazy" alt="산속 호수 아트워크 채보의 곡 선택 화면">
+    </div>
+  </section>
+
+  <section class="moment">
+    <div>
+      <h2>프레임이 아니라, 누른 순간으로 판정해요.</h2>
+      <p>노트는 프레임 레이트와 상관없이 틱 클럭으로 움직여요. Windows, macOS, Linux 모두 키 입력 시각을 전용 스레드에서 재요.</p>
+      <p class="sky"><code>actuon latency</code>로 내 환경의 지연을 잴 수 있어요.</p>
+    </div>
+    <img class="screen" src="/screens/play.webp" width="1280" height="720" loading="lazy" alt="채보를 오토플레이하는 중, 레인 옆에서 BGA가 재생된다">
+  </section>
+
+  <section class="switch">
+    <h2>처음부터 다시 시작할 필요 없어요.</h2>
+    <dl>
+      <div><dt>내 점수</dt><dd>beatoraja와 LR2 점수 DB를 가져올 수 있어요.</dd></div>
+      <div><dt>내 스킨</dt><dd>beatoraja, LR2, osu! mania 스킨을 화면과 키 모드마다 골라 쓸 수 있어요.</dd></div>
+      <div><dt>내 난이도표</dt><dd>난이도표와 코스는 물론 채보 다운로드까지 들어 있어요.</dd></div>
+      <div><dt>내 채보</dt><dd>BMS, BME, BML, PMS, BMSON을 4K부터 14K까지 돌릴 수 있어요. 인코딩은 Shift-JIS, EUC-KR, UTF-8을 지원해요.</dd></div>
+      <div><dt>내 BGA</dt><dd>이미지와 FFmpeg 영상을 틀어요. 디블로킹과 FSRCNNX 업스케일은 켜고 끌 수 있어요.</dd></div>
+    </dl>
+  </section>
+
+  <section class="moment flip">
+    <img class="screen" src="/screens/result.webp" width="1280" height="720" loading="lazy" alt="오토플레이 후 결과 화면: 랭크 AAA, MAX 램프">
+    <div>
+      <h2>랭킹에 오른 점수는 진짜로 낸 점수예요.</h2>
+      <p>IR 서버가 올라온 리플레이를 같은 판정 코드로 다시 돌려 점수를 직접 계산해요. 클라이언트가 점수를 정할 수 없어요.</p>
+      <a class="text-link" href="https://ir.actuon.app">랭킹 열기</a>
+    </div>
+  </section>
+
+  <section id="start" class="start">
+    <h2>지금 해 보세요.</h2>
+    <p>GPLv3 기반 무료 오픈소스예요. Windows, macOS, Linux에서 쓸 수 있어요.</p>
+    <a class="button" href="https://github.com/square3ang/actuon/releases/latest">actuon 다운로드</a>
+  </section>
+</main>
+<footer>
+  <a href="https://github.com/square3ang/actuon/blob/main/LICENSE">GPLv3</a>
+  <a href="https://github.com/square3ang/actuon/blob/main/docs/compat.md">호환성</a>
+  <a href="https://github.com/square3ang/actuon/blob/main/docs/skin.md">스킨</a>
+  <a href="https://github.com/square3ang/actuon/blob/main/docs/ir.md">IR 서버</a>
+  <p class="credits" data-credits>화면은 데모 채보예요. 사진(일부 잘림): <a href="https://commons.wikimedia.org/wiki/File:Pumori,_Nepal,_Asia.jpg">Vyacheslav Argenberg</a> (CC BY 4.0), <a href="https://commons.wikimedia.org/wiki/File:Olkhon_Island,_Capes,_cliffs_at_sunset,_Lake_Baikal,_Russia.jpg">Vyacheslav Argenberg</a> (CC BY 4.0), <a href="https://commons.wikimedia.org/wiki/File:Herbert_Lake_beim_Icefields_Parkway.jpg">Florian Fuchs</a> (CC BY 3.0), <a href="https://commons.wikimedia.org/wiki/File:Lake_Kinney_mit_Mount_Whitehorn.jpg">Florian Fuchs</a> (CC BY 3.0), <a href="https://commons.wikimedia.org/wiki/File:Winter_in_Tatry_Mountains_-_Poland.jpg">Radek Kucharski</a> (CC BY 4.0), <a href="https://commons.wikimedia.org/wiki/File:Utah_Dunes_Landscape_-_West_Desert_District.jpg">Bureau of Land Management</a> (퍼블릭 도메인), 출처: Wikimedia Commons.</p>
+</footer>
+</body>
+</html>

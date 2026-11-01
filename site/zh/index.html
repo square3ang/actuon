@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>actuon - 新一代 BMS 播放器</title>
+<meta name="description" content="actuon 是一款面向 Windows、macOS 和 Linux 的开源 BMS 播放器，提供经过验证的在线排名。">
+<link rel="icon" href="/icon.svg">
+<link rel="stylesheet" href="/style.css">
+<link rel="alternate" hreflang="en" href="https://actuon.app/">
+<link rel="alternate" hreflang="ko" href="https://actuon.app/ko/">
+<link rel="alternate" hreflang="ja" href="https://actuon.app/ja/">
+<link rel="alternate" hreflang="zh-Hans" href="https://actuon.app/zh/">
+<link rel="alternate" hreflang="x-default" href="https://actuon.app/">
+<script src="/lang.js"></script>
+</head>
+<body>
+<header>
+  <a class="logo" href="/zh/"><img src="/logo.svg" alt="actuon" width="948" height="364"></a>
+  <nav>
+    <a href="https://ir.actuon.app">排名</a>
+    <a href="https://github.com/square3ang/actuon">源代码</a>
+  </nav>
+  <nav class="langs" aria-label="Language">
+    <a href="/?lang=en" hreflang="en" lang="en">English</a>
+    <a href="/ko/" hreflang="ko" lang="ko">한국어</a>
+    <a href="/ja/" hreflang="ja" lang="ja">日本語</a>
+    <a href="/zh/" hreflang="zh" lang="zh-Hans" aria-current="page">简体中文</a>
+  </nav>
+</header>
+<main>
+  <section class="hero">
+    <div>
+      <h1>你与音符之间，别无他物。</h1>
+      <p>新一代 BMS 播放器。成绩、皮肤和难度表都能带来，判定始终诚实。</p>
+      <div class="actions">
+        <a class="button" href="https://github.com/square3ang/actuon/releases/latest">下载 actuon</a>
+        <a class="link" href="https://ir.actuon.app">查看排名</a>
+      </div>
+    </div>
+    <img class="screen" src="/screens/select.webp" width="1280" height="720" alt="actuon 选曲界面：谱面插画铺满屏幕，衬在谱面信息和歌曲轮盘之后">
+  </section>
+
+  <section class="art">
+    <h2>每首歌都有自己的画面。</h2>
+    <div class="pair">
+      <img class="screen" src="/screens/select2.webp" width="1280" height="720" loading="lazy" alt="选曲界面，谱面插画是雾中的湖">
+      <img class="screen" src="/screens/select3.webp" width="1280" height="720" loading="lazy" alt="选曲界面，谱面插画是山间的湖">
+    </div>
+  </section>
+
+  <section class="moment">
+    <div>
+      <h2>判定看你按下的那一刻，而不是帧何时运行。</h2>
+      <p>音符按独立于帧率的 tick 时钟运行。在 Windows、macOS 和 Linux 上，按键时刻都由专用线程记录。</p>
+      <p class="sky"><code>actuon latency</code> 可测量你的设备环境。</p>
+    </div>
+    <img class="screen" src="/screens/play.webp" width="1280" height="720" loading="lazy" alt="谱面自动游玩中，BGA 在轨道旁播放">
+  </section>
+
+  <section class="switch">
+    <h2>换过来，不必从头开始。</h2>
+    <dl>
+      <div><dt>你的成绩</dt><dd>导入 beatoraja 和 LR2 成绩数据库。</dd></div>
+      <div><dt>你的皮肤</dt><dd>支持 beatoraja、LR2 和 osu! mania 皮肤，可按界面和键位模式分别设置。</dd></div>
+      <div><dt>你的难度表</dt><dd>内置难度表、课程和谱面下载。</dd></div>
+      <div><dt>你的谱面</dt><dd>支持 BMS、BME、BML、PMS 和 BMSON，4K 到 14K，Shift-JIS、EUC-KR 或 UTF-8 编码。</dd></div>
+      <div><dt>你的 BGA</dt><dd>支持图片和 FFmpeg 视频，可选去块和 FSRCNNX 放大。</dd></div>
+    </dl>
+  </section>
+
+  <section class="moment flip">
+    <img class="screen" src="/screens/result.webp" width="1280" height="720" loading="lazy" alt="自动游玩后的结算界面：AAA 评级和 MAX 灯">
+    <div>
+      <h2>榜上的成绩，都真实发生过。</h2>
+      <p>IR 服务器用同一套判定代码重放每份上传，并自行算出成绩。客户端无法自报成绩。</p>
+      <a class="text-link" href="https://ir.actuon.app">打开排名</a>
+    </div>
+  </section>
+
+  <section id="start" class="start">
+    <h2>开始游玩。</h2>
+    <p>基于 GPLv3 免费开源，支持 Windows、macOS 和 Linux。</p>
+    <a class="button" href="https://github.com/square3ang/actuon/releases/latest">下载 actuon</a>
+  </section>
+</main>
+<footer>
+  <a href="https://github.com/square3ang/actuon/blob/main/LICENSE">GPLv3</a>
+  <a href="https://github.com/square3ang/actuon/blob/main/docs/compat.md">兼容性</a>
+  <a href="https://github.com/square3ang/actuon/blob/main/docs/skin.md">皮肤</a>
+  <a href="https://github.com/square3ang/actuon/blob/main/docs/ir.md">IR 服务器</a>
+  <p class="credits" data-credits>画面为演示谱面。照片（经裁剪）： <a href="https://commons.wikimedia.org/wiki/File:Pumori,_Nepal,_Asia.jpg">Vyacheslav Argenberg</a> (CC BY 4.0), <a href="https://commons.wikimedia.org/wiki/File:Olkhon_Island,_Capes,_cliffs_at_sunset,_Lake_Baikal,_Russia.jpg">Vyacheslav Argenberg</a> (CC BY 4.0), <a href="https://commons.wikimedia.org/wiki/File:Herbert_Lake_beim_Icefields_Parkway.jpg">Florian Fuchs</a> (CC BY 3.0), <a href="https://commons.wikimedia.org/wiki/File:Lake_Kinney_mit_Mount_Whitehorn.jpg">Florian Fuchs</a> (CC BY 3.0), <a href="https://commons.wikimedia.org/wiki/File:Winter_in_Tatry_Mountains_-_Poland.jpg">Radek Kucharski</a> (CC BY 4.0), <a href="https://commons.wikimedia.org/wiki/File:Utah_Dunes_Landscape_-_West_Desert_District.jpg">Bureau of Land Management</a> （公有领域），来自 Wikimedia Commons。</p>
+</footer>
+</body>
+</html>

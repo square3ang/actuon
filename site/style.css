@@ -13,7 +13,8 @@
 html, body { margin: 0; overflow-x: clip; background: var(--well); color: var(--white); font: 500 var(--text-16)/1.5 var(--suite); }
 html { scroll-behavior: smooth; }
 header, main, footer { box-sizing: border-box; max-width: 1280px; margin: 0 auto; padding: 0 var(--space-30); }
-header { display: flex; align-items: center; justify-content: space-between; height: 72px; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 0 var(--space-18); min-height: 72px; padding-block: var(--space-14); }
+.logo { margin-right: auto; }
 .logo img { display: block; height: 40px; width: auto; }
 nav { display: flex; gap: var(--space-6); }
 a { color: var(--sky); border-radius: var(--radius-6); }
@@ -22,6 +23,9 @@ a:active { color: var(--cyan); }
 a:focus-visible { outline: none; background: var(--accent); color: var(--white); }
 nav a { padding: var(--space-6) var(--space-14); text-decoration: none; }
 nav a:hover { background: var(--rule); }
+.langs a { font-size: var(--text-14); padding: var(--space-6) var(--space-10); }
+.langs a[aria-current] { color: var(--white); }
+:lang(ko) { word-break: keep-all; }
 h1, h2 { margin: 0; font-weight: 800; overflow-wrap: break-word; min-width: 0; text-wrap: balance; }
 h1 { font-size: var(--num-72); line-height: 1.05; }
 h2 { font-size: var(--num-48); line-height: 1.1; }

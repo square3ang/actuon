@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>actuon - 次世代BMSプレイヤー</title>
+<meta name="description" content="actuonはWindows、macOS、Linux向けのオープンソースBMSプレイヤーで、検証済みのオンラインランキングを備えています。">
+<link rel="icon" href="/icon.svg">
+<link rel="stylesheet" href="/style.css">
+<link rel="alternate" hreflang="en" href="https://actuon.app/">
+<link rel="alternate" hreflang="ko" href="https://actuon.app/ko/">
+<link rel="alternate" hreflang="ja" href="https://actuon.app/ja/">
+<link rel="alternate" hreflang="zh-Hans" href="https://actuon.app/zh/">
+<link rel="alternate" hreflang="x-default" href="https://actuon.app/">
+<script src="/lang.js"></script>
+</head>
+<body>
+<header>
+  <a class="logo" href="/ja/"><img src="/logo.svg" alt="actuon" width="948" height="364"></a>
+  <nav>
+    <a href="https://ir.actuon.app">ランキング</a>
+    <a href="https://github.com/square3ang/actuon">ソース</a>
+  </nav>
+  <nav class="langs" aria-label="Language">
+    <a href="/?lang=en" hreflang="en" lang="en">English</a>
+    <a href="/ko/" hreflang="ko" lang="ko">한국어</a>
+    <a href="/ja/" hreflang="ja" lang="ja" aria-current="page">日本語</a>
+    <a href="/zh/" hreflang="zh" lang="zh-Hans">简体中文</a>
+  </nav>
+</header>
+<main>
+  <section class="hero">
+    <div>
+      <h1>あなたとノーツの間に、何も置かない。</h1>
+      <p>次世代BMSプレイヤー。スコアもスキンも難易度表もそのままに、タイミングは正直に。</p>
+      <div class="actions">
+        <a class="button" href="https://github.com/square3ang/actuon/releases/latest">actuonをダウンロード</a>
+        <a class="link" href="https://ir.actuon.app">ランキングを見る</a>
+      </div>
+    </div>
+    <img class="screen" src="/screens/select.webp" width="1280" height="720" alt="actuonの選曲画面: 譜面のアートワークが情報と曲ホイールの背後に広がる">
+  </section>
+
+  <section class="art">
+    <h2>曲ごとに、それぞれのアートを。</h2>
+    <div class="pair">
+      <img class="screen" src="/screens/select2.webp" width="1280" height="720" loading="lazy" alt="霧の湖をアートワークにした譜面の選曲画面">
+      <img class="screen" src="/screens/select3.webp" width="1280" height="720" loading="lazy" alt="山の湖をアートワークにした譜面の選曲画面">
+    </div>
+  </section>
+
+  <section class="moment">
+    <div>
+      <h2>判定は、フレームではなく押した瞬間で。</h2>
+      <p>ノーツはフレームレートと独立したティッククロックで動きます。Windows、macOS、Linuxのいずれでも、キー入力の時刻を専用スレッドで計ります。</p>
+      <p class="sky"><code>actuon latency</code>で環境を測定できます。</p>
+    </div>
+    <img class="screen" src="/screens/play.webp" width="1280" height="720" loading="lazy" alt="譜面をオートプレイ中、レーンの横でBGAが流れている">
+  </section>
+
+  <section class="switch">
+    <h2>一から始めずに乗り換えられます。</h2>
+    <dl>
+      <div><dt>スコア</dt><dd>beatorajaとLR2のスコアデータベースを取り込みます。</dd></div>
+      <div><dt>スキン</dt><dd>beatoraja、LR2、osu! maniaのスキンを画面とキーモードごとに使えます。</dd></div>
+      <div><dt>難易度表</dt><dd>難易度表とコース、譜面ダウンロードを内蔵しています。</dd></div>
+      <div><dt>譜面</dt><dd>BMS、BME、BML、PMS、BMSON。4Kから14Kまで、Shift-JIS、EUC-KR、UTF-8に対応。</dd></div>
+      <div><dt>BGA</dt><dd>画像とFFmpeg動画。デブロックとFSRCNNXアップスケールは任意です。</dd></div>
+    </dl>
+  </section>
+
+  <section class="moment flip">
+    <img class="screen" src="/screens/result.webp" width="1280" height="720" loading="lazy" alt="オートプレイ後のリザルト画面: ランクAAA、MAXランプ">
+    <div>
+      <h2>ランキングのスコアは、本当に出たスコアです。</h2>
+      <p>IRサーバーはアップロードされたリプレイを同じ判定コードで再生し、スコアを自ら計算します。クライアントがスコアを申告することはできません。</p>
+      <a class="text-link" href="https://ir.actuon.app">ランキングを開く</a>
+    </div>
+  </section>
+
+  <section id="start" class="start">
+    <h2>プレイしよう。</h2>
+    <p>GPLv3の無料オープンソース。Windows、macOS、Linux向け。</p>
+    <a class="button" href="https://github.com/square3ang/actuon/releases/latest">actuonをダウンロード</a>
+  </section>
+</main>
+<footer>
+  <a href="https://github.com/square3ang/actuon/blob/main/LICENSE">GPLv3</a>
+  <a href="https://github.com/square3ang/actuon/blob/main/docs/compat.md">互換性</a>
+  <a href="https://github.com/square3ang/actuon/blob/main/docs/skin.md">スキン</a>
+  <a href="https://github.com/square3ang/actuon/blob/main/docs/ir.md">IRサーバー</a>
+  <p class="credits" data-credits>画面はデモ譜面です。写真(トリミング): <a href="https://commons.wikimedia.org/wiki/File:Pumori,_Nepal,_Asia.jpg">Vyacheslav Argenberg</a> (CC BY 4.0), <a href="https://commons.wikimedia.org/wiki/File:Olkhon_Island,_Capes,_cliffs_at_sunset,_Lake_Baikal,_Russia.jpg">Vyacheslav Argenberg</a> (CC BY 4.0), <a href="https://commons.wikimedia.org/wiki/File:Herbert_Lake_beim_Icefields_Parkway.jpg">Florian Fuchs</a> (CC BY 3.0), <a href="https://commons.wikimedia.org/wiki/File:Lake_Kinney_mit_Mount_Whitehorn.jpg">Florian Fuchs</a> (CC BY 3.0), <a href="https://commons.wikimedia.org/wiki/File:Winter_in_Tatry_Mountains_-_Poland.jpg">Radek Kucharski</a> (CC BY 4.0), <a href="https://commons.wikimedia.org/wiki/File:Utah_Dunes_Landscape_-_West_Desert_District.jpg">Bureau of Land Management</a> (パブリックドメイン)、Wikimedia Commonsより。</p>
+</footer>
+</body>
+</html>
