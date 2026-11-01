@@ -113,11 +113,10 @@ pub fn build(b: *std.Build) void {
     if (os == .windows) {
         const prefix = std.mem.trim(u8, b.run(&.{ "pkg-config", "--variable=prefix", "sdl3" }), "\r\n");
         const include: std.Build.LazyPath = .{ .cwd_relative = b.pathJoin(&.{ prefix, "include" }) };
-        const lib = b.pathJoin(&.{ prefix, "lib" });
         mod.addIncludePath(include);
         translate.addIncludePath(include);
-        mod.addLibraryPath(.{ .cwd_relative = lib });
-        translate.addCFlags(&.{b.fmt("-L{s}", .{lib})});
+        translate.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "include", "lua5.4" }) });
+        mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
     }
     // Homebrew's portaudio-2.0.pc lists -framework, which zig's pkg-config reader refuses.
     if (os == .macos) {
@@ -129,12 +128,13 @@ pub fn build(b: *std.Build) void {
         mod.linkSystemLibrary("portaudio", .{ .use_pkg_config = .no });
     } else {
         mod.linkSystemLibrary("portaudio-2.0", .{ .use_pkg_config = .force });
-        translate.linkSystemLibrary("portaudio-2.0", .{});
+        // On Windows translate-c fails on -l with "coff does not support linking multiple objects", so it gets include paths only.
+        if (os != .windows) translate.linkSystemLibrary("portaudio-2.0", .{});
     }
     // sdl3-ttf also brings SDL3; naming both links it twice, which macOS refuses at startup.
     const libs = [_][]const u8{ "sdl3-ttf", "sqlite3", "lua5.4", "libarchive", "libavformat", "libavcodec", "libavutil", "libswscale", "libavfilter" };
     for (libs) |lib| mod.linkSystemLibrary(lib, .{ .use_pkg_config = .force });
-    for (libs) |lib| translate.linkSystemLibrary(lib, .{});
+    if (os != .windows) for (libs) |lib| translate.linkSystemLibrary(lib, .{});
 
     const exe = b.addExecutable(.{ .name = "actuon", .root_module = mod });
     b.installArtifact(exe);
