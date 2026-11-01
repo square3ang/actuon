@@ -12,7 +12,7 @@ pub const VerifyInput = extern struct {
     format: u8,
 };
 
-/// Returns 0 on success; negative codes: -1 malformed replay, -2 malformed chart, -3 hash mismatch.
+/// Returns 0 on success; negative codes: -1 malformed replay, -2 malformed chart or one PMS parsing cuts notes from, -3 hash mismatch.
 export fn actuon_verify(input: *const VerifyInput, out: *replay.Result) callconv(.c) i32 {
     const gpa = std.heap.c_allocator;
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -28,6 +28,13 @@ export fn actuon_verify(input: *const VerifyInput, out: *replay.Result) callconv
         core.bms.parse(gpa, chart_bytes, .{ .is_pms = input.format == 2, .selected_random = r.bms_random })) catch return -2;
     defer chart.deinit();
     if (!std.mem.eql(u8, &chart.sha256, &r.sha256)) return -3;
+    // PMS drops channels it has no lane for, so a client naming PMS for a BMS chart could score a MAX on what is left.
+    // A real PMS chart loses nothing when read as BMS. Parsed here because #RANDOM changes a chart's note count per replay.
+    if (input.format == 2) {
+        var whole = core.bms.parse(gpa, chart_bytes, .{ .selected_random = r.bms_random }) catch return -2;
+        defer whole.deinit();
+        if (whole.total_notes != chart.total_notes) return -2;
+    }
     out.* = replay.resimulate(gpa, &chart, r) catch return -2;
     return 0;
 }

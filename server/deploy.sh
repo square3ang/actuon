@@ -47,4 +47,4 @@ done
 # Not podman-compose exec: it prints the S3 secret and puts it on the command line.
 podman exec server_backup_1 sh /usr/local/bin/backup.sh once
 REMOTE
-echo "deployed to $target, and a backup reached the bucket"
+echo "deployed to $target; the backup line above says whether one reached the bucket"

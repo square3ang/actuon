@@ -24,8 +24,8 @@ const CLEAR_NAMES: [&str; 11] = [
     "PERFECT",
     "MAX",
 ];
-/// NO PLAY and FAILED come before it.
-const FIRST_CLEAR: usize = 2;
+/// EASY in beatoraja's numbering, as the server counts clears: NO PLAY, FAILED and the assist lamps come before it.
+const FIRST_CLEAR: usize = 4;
 const WORKERS: usize = 4;
 
 #[derive(Deserialize)]
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn the_ir_ranking_answer_parses() {
-        let answer = r#"{"clears":[0,1,0,0,0,1,1,0,0,0,1],"rank":0,"total":4,"scores":[{"clear":10,"date":1,"ex":16,"max_combo":8,"miss":0,"name":"a","verified":true,"you":false}]}"#;
+        let answer = r#"{"clears":[0,1,1,1,0,1,1,0,0,0,1],"rank":0,"total":4,"scores":[{"clear":10,"date":1,"ex":16,"max_combo":8,"miss":0,"name":"a","verified":true,"you":false}]}"#;
         let r: Ranking = serde_json_from(answer);
         assert_eq!(r.clears[FIRST_CLEAR..].iter().sum::<u32>(), 3);
     }

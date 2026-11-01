@@ -24,7 +24,7 @@ typedef struct {
     float gauge_value;
 } ActuonResult;
 
-/* 0 on success; -1 malformed replay, -2 malformed chart, -3 chart hash differs from the replay's. */
+/* 0 on success; -1 malformed replay, -2 malformed chart or one PMS parsing cuts notes from, -3 chart hash differs from the replay's. */
 int32_t actuon_verify(const ActuonVerifyInput *input, ActuonResult *out);
 typedef struct {
     char title[256]; /* UTF-8, NUL-terminated, cut short when longer */

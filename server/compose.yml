@@ -5,6 +5,10 @@ services:
       context: ..
       dockerfile: server/Dockerfile
     restart: always
+    # The server and two checks at their 1 GiB limit.
+    mem_limit: 3g
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     ports:
       # Plain HTTP: put a TLS proxy in front before opening this to the internet.
       - "127.0.0.1:${IR_PORT:-8730}:8730"

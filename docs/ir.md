@@ -14,9 +14,11 @@ It listens on `127.0.0.1:8730` over plain HTTP, so put a TLS proxy in front befo
 that buffers request bodies, as nginx does by default: a worker waits for the whole body, so a few very slow clients could
 otherwise hold all eight.
 
-Registration allows 60 accounts an hour across the server. Each account can store 512 MiB of charts, and an upload must
-parse as a chart with notes. Four chart or replay checks run at once, and the next gets a 503 until one ends. Each check
-runs in a child process with a 4 GiB address space limit.
+Registration allows 10 accounts an hour per client address, and login 10 tries a minute per address and name. Each account
+can store 64 MiB of charts and 50,000 unverified claims, the server 20 GiB of charts, and an upload must parse as a chart
+with notes. Two chart or replay checks run at once, one per player, and four password hashes: the next gets a 503 until
+one ends. Each check runs in a child process with a 1 GiB address space limit, a 30 s CPU limit and no way to open files.
+A PMS score is refused when reading the chart as BMS finds more notes, because PMS parsing drops channels it has no lane for.
 
 To run it without Docker:
 
@@ -51,7 +53,10 @@ docker compose logs backup
 A failed backup is only logged, as `backup failed`, and tried again in 6 hours. Backups hold password and token hashes
 and are not encrypted, so keep the bucket private.
 
-To restore the newest copy, stop the server first. The database it replaces stays as `ir.db.before-restore`.
+A database with no accounts is not uploaded, so an empty one cannot become the newest copy.
+
+To restore the newest copy, stop the server first. Add a name from the bucket's `db/` folder after `restore` to pick an
+older one. The database it replaces stays as `ir.db.before-restore-TIME`, even when it is corrupt.
 
 ```sh
 docker compose stop ir
@@ -95,7 +100,7 @@ Replays played in CN or HCN mode on a chart that leaves its LN type open are ref
 web/target/release/actuon-web 127.0.0.1:8731 http://127.0.0.1:8730
 ```
 
-The server names a chart when it checks the upload, and names older charts at startup.
+The server names a chart when it checks the upload. Older charts get named once, in the background, after the first start.
 
 To share the API's host name, send the page's paths to it and leave everything else on the API. `PUT /charts/{sha}` stays on the API, so split that path by method:
 
@@ -104,5 +109,16 @@ map $request_method $ir_charts { GET 127.0.0.1:8731; default 127.0.0.1:8730; }
 # Inside the server block:
 location = / { proxy_pass http://127.0.0.1:8731; }
 location ~ ^/(style\.css|logo\.svg|icon\.svg|fonts/) { proxy_pass http://127.0.0.1:8731; }
-location /charts/ { proxy_pass http://$ir_charts; proxy_set_header Host $host; }
+location /charts/ { proxy_pass http://$ir_charts; proxy_set_header Host $host; proxy_set_header X-Real-IP $http_cf_connecting_ip; }
 ```
+
+Register and login attempts count per client, so the proxy must name the client in `X-Real-IP`. Without it, every player
+shares the proxy's count, and ten signups an hour lock out everyone. Set it in the server block, and again in any location
+with its own `proxy_set_header`, because nginx does not inherit into those:
+
+```nginx
+# Behind Cloudflare, where the firewall admits nothing else. Without Cloudflare, use $remote_addr.
+proxy_set_header X-Real-IP $http_cf_connecting_ip;
+```
+
+Keep port 8730 closed to everything but the proxy: anyone reaching it directly can name any address.

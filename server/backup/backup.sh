@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copies the IR data directory to the rclone remote "backup". With no argument it repeats every 6 hours.
-# Usage: backup.sh [once|restore]
+# Usage: backup.sh [once|restore [NAME]]
 set -eu
 data=${DATA_DIR:-/data}
 remote=backup:${S3_BUCKET:?set S3_BUCKET}
@@ -19,6 +19,11 @@ once() {
 	# .backup, because a plain copy of ir.db misses what is still in ir.db-wal.
 	sqlite3 "$data/ir.db" ".backup '$work/ir.db'"
 	check_db "$work/ir.db"
+	# A database that lost its accounts must not become the newest copy, which restore would pick.
+	if [ "$(sqlite3 "$work/ir.db" 'SELECT EXISTS(SELECT 1 FROM user)' 2>/dev/null || echo 0)" != 1 ]; then
+		echo "no accounts in $data/ir.db, nothing to back up"
+		return
+	fi
 	gzip -c "$work/ir.db" >"$work/$name"
 	rclone copyto "$work/$name" "$remote/db/$name"
 	# After the database, so every chart it names is included. Names are hashes, so a held chart never changes.
@@ -28,24 +33,29 @@ once() {
 	echo "backed up $name"
 }
 
-# The server must be stopped: it would keep writing to the database this replaces.
+# The newest copy, or the one named. The server must be stopped: it would keep writing to the database this replaces.
 restore() {
-	name=$(rclone lsf "$remote/db" | sort | tail -n 1)
+	name=${1:-$(rclone lsf "$remote/db" | sort | tail -n 1)}
 	[ -n "$name" ] || { echo "no backup in $remote/db" >&2; exit 1; }
 	rclone copyto "$remote/db/$name" "$work/ir.db.gz"
 	gzip -d "$work/ir.db.gz"
 	check_db "$work/ir.db"
 	mkdir -p "$data/charts"
 	rclone copy "$remote/charts" "$data/charts" --ignore-existing
-	[ ! -e "$data/ir.db" ] || sqlite3 "$data/ir.db" ".backup '$data/ir.db.before-restore'"
-	rm -f "$data/ir.db-wal" "$data/ir.db-shm"
-	cp "$work/ir.db" "$data/ir.db"
+	# Copied first, so a full disk stops this before anything moves.
+	cp "$work/ir.db" "$data/ir.db.restoring"
+	# Moved, not read: the database being replaced may be the corrupt one. The pid keeps two restores apart.
+	old=$data/ir.db.before-restore-$(date -u +%Y%m%d-%H%M%S)-$$
+	for suffix in "" -wal -shm; do
+		[ ! -e "$data/ir.db$suffix" ] || mv "$data/ir.db$suffix" "$old$suffix"
+	done
+	mv "$data/ir.db.restoring" "$data/ir.db"
 	echo "restored $name"
 }
 
 case ${1:-loop} in
 once) once ;;
-restore) restore ;;
+restore) restore "${2:-}" ;;
 loop)
 	while :; do
 		# A child process: inside "||" the shell would ignore set -e, and a failed step would not stop the rest.
@@ -54,7 +64,7 @@ loop)
 	done
 	;;
 *)
-	echo "usage: backup.sh [once|restore]" >&2
+	echo "usage: backup.sh [once|restore [NAME]]" >&2
 	exit 2
 	;;
 esac

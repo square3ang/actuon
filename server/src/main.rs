@@ -8,8 +8,9 @@ use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -24,12 +25,17 @@ const VERIFY_TIMEOUT: Duration = Duration::from_secs(30);
 const LOGIN_WINDOW_SECS: u64 = 60;
 const LOGIN_ATTEMPTS: u32 = 10;
 const REGISTER_WINDOW_SECS: u64 = 3600;
-const REGISTER_ATTEMPTS: u32 = 60;
-/// Sync uploads every chart played, and charts are small: this is thousands of them.
-const MAX_OWNER_CHART_BYTES: i64 = 512 << 20;
-/// Below the 8 workers, so reads and logins still get through while replays are checked.
-const MAX_CHECKS: usize = 4;
-const CHILD_MEMORY_BYTES: libc::rlim_t = 4 << 30;
+const REGISTER_ATTEMPTS: u32 = 10;
+/// A chart another player already stored costs nothing, so this only counts charts new to the server.
+const MAX_OWNER_CHART_BYTES: i64 = 64 << 20;
+/// However many accounts someone makes, the disk stays usable.
+const MAX_TOTAL_CHART_BYTES: i64 = 10 << 30;
+const MAX_OWNER_CLAIMS: i64 = 50_000;
+/// Checks plus hashes stay below the 8 workers, so reads still get through.
+const MAX_CHECKS: usize = 2;
+const MAX_HASHES: usize = 4;
+/// A real chart takes far less: about 500 bytes a note.
+const CHILD_MEMORY_BYTES: libc::rlim_t = 1 << 30;
 const RANK_ORDER: &str = "ORDER BY s.verified DESC, s.ex DESC, s.date, s.user";
 
 const SCHEMA: &str = "
@@ -58,23 +64,55 @@ struct Ctx {
     data: PathBuf,
     /// shortcut: per-process and lost on restart, move to a shared store if the server ever runs multiple instances
     attempts: Mutex<HashMap<String, (Instant, u32)>>,
-    checks: AtomicUsize,
+    /// The players with a check running, so one player cannot hold every slot.
+    checks: Mutex<HashSet<i64>>,
+    hashes: AtomicUsize,
 }
 
+/// Holds the slot of naming old charts: no account has this id.
+const SERVER_USER: i64 = 0;
+
 /// A place among the running chart and replay checks, given back when dropped.
-struct CheckSlot<'a>(&'a AtomicUsize);
+struct CheckSlot<'a> {
+    checks: &'a Mutex<HashSet<i64>>,
+    user: i64,
+}
 
 impl<'a> CheckSlot<'a> {
-    fn take(ctx: &'a Ctx) -> Result<Self, ApiError> {
-        if ctx.checks.fetch_add(1, Ordering::AcqRel) >= MAX_CHECKS {
-            ctx.checks.fetch_sub(1, Ordering::AcqRel);
+    /// 503 for both limits: clients already try that again, and a sync sends replays in parallel.
+    fn take(ctx: &'a Ctx, user: i64) -> Result<Self, ApiError> {
+        let mut running = ctx.checks.lock().unwrap_or_else(|e| e.into_inner());
+        if running.len() >= MAX_CHECKS || !running.insert(user) {
             return Err(ApiError::new(503, "server is busy"));
         }
-        Ok(CheckSlot(&ctx.checks))
+        Ok(CheckSlot {
+            checks: &ctx.checks,
+            user,
+        })
     }
 }
 
 impl Drop for CheckSlot<'_> {
+    fn drop(&mut self) {
+        let mut running = self.checks.lock().unwrap_or_else(|e| e.into_inner());
+        running.remove(&self.user);
+    }
+}
+
+/// A place among the running password hashes: each takes 19 MiB and a core.
+struct HashSlot<'a>(&'a AtomicUsize);
+
+impl<'a> HashSlot<'a> {
+    fn take(ctx: &'a Ctx) -> Result<Self, ApiError> {
+        if ctx.hashes.fetch_add(1, Ordering::AcqRel) >= MAX_HASHES {
+            ctx.hashes.fetch_sub(1, Ordering::AcqRel);
+            return Err(ApiError::new(503, "server is busy"));
+        }
+        Ok(HashSlot(&ctx.hashes))
+    }
+}
+
+impl Drop for HashSlot<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
     }
@@ -162,6 +200,25 @@ fn auth(req: &Request, db: &Connection) -> Result<i64, ApiError> {
         .ok_or(ApiError::new(401, "bad token"))
 }
 
+/// Who a request is from when throttling. nginx sets X-Real-IP (docs/ir.md), and only it can reach this port.
+/// An IPv6 client owns a whole /64, so that is what counts as one client.
+fn client_key(real_ip: Option<&str>, peer: Option<IpAddr>) -> String {
+    match real_ip.and_then(|ip| ip.trim().parse().ok()).or(peer) {
+        Some(IpAddr::V6(ip)) => format!("{:x?}", &ip.segments()[..4]),
+        Some(ip) => ip.to_string(),
+        None => "unknown".to_string(),
+    }
+}
+
+fn client_of(req: &Request) -> String {
+    let real_ip = req
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("X-Real-IP"))
+        .map(|h| h.value.as_str());
+    client_key(real_ip, req.remote_addr().map(|a| a.ip()))
+}
+
 fn query_of(url: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();
     if let Some((_, q)) = url.split_once('?') {
@@ -211,7 +268,13 @@ fn register(req: &mut Request, db: &Connection, ctx: &Ctx) -> ApiResult {
             "name must be 1-32 characters and password at least 8",
         ));
     }
-    throttle(ctx, "register", REGISTER_WINDOW_SECS, REGISTER_ATTEMPTS)?;
+    throttle(
+        ctx,
+        &format!("register:{}", client_of(req)),
+        REGISTER_WINDOW_SECS,
+        REGISTER_ATTEMPTS,
+    )?;
+    let _slot = HashSlot::take(ctx)?;
     let mut salt_bytes = [0u8; 16];
     getrandom::getrandom(&mut salt_bytes).map_err(|_| ApiError::new(500, "internal error"))?;
     let salt =
@@ -277,7 +340,7 @@ fn login(req: &mut Request, db: &Connection, ctx: &Ctx) -> ApiResult {
     // Hashed because the name is still unchecked and can be 1 MiB long.
     throttle(
         ctx,
-        &format!("login:{}", token_hash(&c.name)),
+        &format!("login:{}:{}", client_of(req), token_hash(&c.name)),
         LOGIN_WINDOW_SECS,
         LOGIN_ATTEMPTS,
     )?;
@@ -289,6 +352,7 @@ fn login(req: &mut Request, db: &Connection, ctx: &Ctx) -> ApiResult {
     let denied = || ApiError::new(401, "wrong name or password");
     let (id, pass) = row.ok_or_else(denied)?;
     let parsed = PasswordHash::new(&pass).map_err(|_| ApiError::new(500, "internal error"))?;
+    let _slot = HashSlot::take(ctx)?;
     Argon2::default()
         .verify_password(c.password.as_bytes(), &parsed)
         .map_err(|_| denied())?;
@@ -320,6 +384,18 @@ fn chart_known(db: &Connection, sha: &str) -> Result<bool, ApiError> {
         .is_some())
 }
 
+fn chart_room(db: &Connection, user: i64, size: i64) -> Result<(), ApiError> {
+    let (mine, total): (i64, i64) = db.query_row(
+        "SELECT COALESCE(SUM(size) FILTER (WHERE owner=?1),0), COALESCE(SUM(size),0) FROM chart",
+        [user],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if mine + size > MAX_OWNER_CHART_BYTES || total + size > MAX_TOTAL_CHART_BYTES {
+        return Err(ApiError::new(429, "chart storage limit reached"));
+    }
+    Ok(())
+}
+
 fn upload_chart(req: &mut Request, db: &Connection, ctx: &Ctx, sha: &str) -> ApiResult {
     let user = auth(req, db)?;
     let format = format_of(req.url())?;
@@ -331,15 +407,8 @@ fn upload_chart(req: &mut Request, db: &Connection, ctx: &Ctx, sha: &str) -> Api
     if path.exists() && chart_known(db, sha)? {
         return Ok(json!({"stored": true}));
     }
-    let used: i64 = db.query_row(
-        "SELECT COALESCE(SUM(size),0) FROM chart WHERE owner=?1",
-        [user],
-        |r| r.get(0),
-    )?;
-    if used + body.len() as i64 > MAX_OWNER_CHART_BYTES {
-        return Err(ApiError::new(429, "chart storage limit reached"));
-    }
-    let _slot = CheckSlot::take(ctx)?;
+    chart_room(db, user, body.len() as i64)?;
+    let _slot = CheckSlot::take(ctx, user)?;
     // Random: two players can upload the same new chart at once.
     let tmp = path.with_extension(format!("tmp{}", new_token()?));
     std::fs::write(&tmp, &body)?;
@@ -417,13 +486,25 @@ fn check_isolated(path: &Path, format: u8) -> Result<core::ChartInfo, ApiError> 
 }
 
 /// Charts stored before titles were kept. No format is stored, and PMS names a chart as BMS does.
+/// Runs once, because a chart that cannot be named would otherwise be parsed again at every start.
 fn name_old_charts(db: &Connection, ctx: &Ctx) -> Result<(), ApiError> {
+    let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version >= 1 {
+        return Ok(());
+    }
     let shas = db
         .prepare("SELECT sha256 FROM chart WHERE title=''")?
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     for sha in shas {
         let path = chart_path(ctx, &sha);
+        // Players go first: this only takes a slot that is free.
+        let _slot = loop {
+            match CheckSlot::take(ctx, SERVER_USER) {
+                Ok(slot) => break slot,
+                Err(_) => std::thread::sleep(Duration::from_secs(1)),
+            }
+        };
         let Ok(info) = check_isolated(&path, 1).or_else(|_| check_isolated(&path, 3)) else {
             eprintln!("chart {sha} could not be named");
             continue;
@@ -433,6 +514,7 @@ fn name_old_charts(db: &Connection, ctx: &Ctx) -> Result<(), ApiError> {
             params![info.title, info.artist, sha],
         )?;
     }
+    db.execute_batch("PRAGMA user_version=1")?;
     Ok(())
 }
 
@@ -462,7 +544,7 @@ fn submit(req: &mut Request, db: &Connection, ctx: &Ctx, sha: &str) -> ApiResult
     }
     let replay = read_body(req, MAX_REPLAY)?;
     let v = {
-        let _slot = CheckSlot::take(ctx)?;
+        let _slot = CheckSlot::take(ctx, user)?;
         verify_isolated(ctx, sha, format, &replay)?
     };
     if !v.ok {
@@ -609,6 +691,13 @@ fn add_claims(req: &mut Request, db: &Connection) -> ApiResult {
             ])?;
         }
     }
+    // Counted after the inserts, because sending a row again adds nothing. Returning rolls them back.
+    let held: i64 = tx.query_row("SELECT COUNT(*) FROM claim WHERE user=?1", [user], |r| {
+        r.get(0)
+    })?;
+    if held > MAX_OWNER_CLAIMS {
+        return Err(ApiError::new(429, "claim limit reached"));
+    }
     tx.commit()?;
     Ok(json!({"stored": q.scores.len()}))
 }
@@ -751,14 +840,24 @@ fn worker(server: Arc<Server>, ctx: Arc<Ctx>, db: Connection) {
     }
 }
 
-/// A hostile chart must not use up the host's memory. The core's allocations then just fail.
-fn limit_child_memory() {
-    let limit = libc::rlimit {
-        rlim_cur: CHILD_MEMORY_BYTES,
-        rlim_max: CHILD_MEMORY_BYTES,
-    };
-    // SAFETY: the pointer is valid for the call, and the callee only reads through it.
-    unsafe { libc::setrlimit(libc::RLIMIT_AS, &limit) };
+/// Called once the input is read. A hostile chart must not use up the host, and a parser bug it reaches
+/// must find no way to open a file or socket. The core's allocations then just fail.
+fn confine_child() {
+    let limits = [
+        (libc::RLIMIT_AS, CHILD_MEMORY_BYTES),
+        (libc::RLIMIT_CPU, VERIFY_TIMEOUT.as_secs() as libc::rlim_t),
+        (libc::RLIMIT_NOFILE, 0),
+    ];
+    for (resource, value) in limits {
+        let limit = libc::rlimit {
+            rlim_cur: value,
+            rlim_max: value,
+        };
+        // SAFETY: the pointer is valid for the call, and the callee only reads through it.
+        if unsafe { libc::setrlimit(resource, &limit) } != 0 {
+            std::process::exit(2);
+        }
+    }
 }
 
 /// Child mode of upload_chart: chart path and format in argv.
@@ -770,6 +869,7 @@ fn check_chart_main(args: &[String]) -> i32 {
     let Ok(chart) = std::fs::read(Path::new(path)) else {
         return 2;
     };
+    confine_child();
     match core::check_chart(&chart, format) {
         Ok(info) => {
             println!("{}", serde_json::to_string(&info).unwrap_or_default());
@@ -796,6 +896,7 @@ fn verify_main(args: &[String]) -> i32 {
     {
         return 2;
     }
+    confine_child();
     match core::verify(&chart, &replay, format) {
         Ok(v) => {
             println!("{}", serde_json::to_string(&v).unwrap_or_default());
@@ -840,11 +941,9 @@ fn initialize(db: &Connection) -> rusqlite::Result<()> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--verify") {
-        limit_child_memory();
         std::process::exit(verify_main(&args));
     }
     if args.get(1).map(String::as_str) == Some("--check-chart") {
-        limit_child_memory();
         std::process::exit(check_chart_main(&args));
     }
     let addr = args
@@ -863,11 +962,9 @@ fn main() {
     let ctx = Arc::new(Ctx {
         data,
         attempts: Mutex::new(HashMap::new()),
-        checks: AtomicUsize::new(0),
+        checks: Mutex::new(HashSet::new()),
+        hashes: AtomicUsize::new(0),
     });
-    if let Err(e) = name_old_charts(&open_db(&db_path).expect("open database"), &ctx) {
-        eprintln!("naming old charts failed: {}", e.1);
-    }
     eprintln!("actuon IR on http://{addr}");
     let threads: Vec<_> = (0..8)
         .map(|_| {
@@ -876,6 +973,13 @@ fn main() {
             std::thread::spawn(move || worker(s, c, db))
         })
         .collect();
+    // Behind the workers: deploy waits for /health, and this can take minutes.
+    let (naming_ctx, naming_db) = (ctx.clone(), open_db(&db_path).expect("open database"));
+    std::thread::spawn(move || {
+        if let Err(e) = name_old_charts(&naming_db, &naming_ctx) {
+            eprintln!("naming old charts failed: {}", e.1);
+        }
+    });
     for t in threads {
         let _ = t.join();
     }
@@ -947,13 +1051,107 @@ mod tests {
         assert_eq!(used, 5);
     }
 
-    #[test]
-    fn throttle_counts_per_key_within_window() {
-        let ctx = Ctx {
+    fn test_ctx() -> Ctx {
+        Ctx {
             data: PathBuf::new(),
             attempts: Mutex::new(HashMap::new()),
-            checks: AtomicUsize::new(0),
+            checks: Mutex::new(HashSet::new()),
+            hashes: AtomicUsize::new(0),
+        }
+    }
+
+    #[test]
+    fn checks_are_capped_overall_and_per_player() {
+        let ctx = test_ctx();
+        let first = CheckSlot::take(&ctx, 1).unwrap();
+        assert_eq!(CheckSlot::take(&ctx, 1).err().unwrap().0, 503);
+        let _second = CheckSlot::take(&ctx, 2).unwrap();
+        assert_eq!(CheckSlot::take(&ctx, 3).err().unwrap().0, 503);
+        drop(first);
+        assert!(
+            CheckSlot::take(&ctx, 1).is_ok(),
+            "a finished check frees its place"
+        );
+    }
+
+    #[test]
+    fn hashes_are_capped() {
+        let ctx = test_ctx();
+        let held: Vec<_> = (0..MAX_HASHES)
+            .map(|_| HashSlot::take(&ctx).unwrap())
+            .collect();
+        assert_eq!(HashSlot::take(&ctx).err().unwrap().0, 503);
+        drop(held);
+        assert!(HashSlot::take(&ctx).is_ok());
+    }
+
+    #[test]
+    fn chart_storage_is_capped_per_owner_and_overall() {
+        let db = Connection::open_in_memory().unwrap();
+        initialize(&db).unwrap();
+        let store = |sha: &str, owner: i64, size: i64| {
+            db.execute(
+                "INSERT INTO chart(sha256,owner,size) VALUES(?1,?2,?3)",
+                params![sha, owner, size],
+            )
+            .unwrap();
         };
+        store("a", 1, MAX_OWNER_CHART_BYTES);
+        assert_eq!(chart_room(&db, 1, 1).unwrap_err().0, 429);
+        assert!(chart_room(&db, 2, MAX_OWNER_CHART_BYTES).is_ok());
+        assert_eq!(
+            chart_room(&db, 2, MAX_OWNER_CHART_BYTES + 1).unwrap_err().0,
+            429
+        );
+        store("b", 3, MAX_TOTAL_CHART_BYTES - MAX_OWNER_CHART_BYTES);
+        assert_eq!(
+            chart_room(&db, 2, 1).unwrap_err().0,
+            429,
+            "the server's total counts everyone"
+        );
+    }
+
+    #[test]
+    fn throttling_sees_the_client_behind_the_proxy() {
+        let proxy: Option<IpAddr> = "127.0.0.1".parse().ok();
+        assert_eq!(client_key(Some("198.51.100.7"), proxy), "198.51.100.7");
+        assert_eq!(client_key(Some("not an address"), proxy), "127.0.0.1");
+        assert_eq!(client_key(None, proxy), "127.0.0.1");
+        assert_eq!(client_key(None, None), "unknown");
+        assert_eq!(
+            client_key(Some("2001:db8:1:2::a"), proxy),
+            client_key(Some("2001:db8:1:2::b"), proxy),
+            "a /64 is one client"
+        );
+        assert_ne!(
+            client_key(Some("2001:db8:1:2::a"), proxy),
+            client_key(Some("2001:db8:1:3::a"), proxy)
+        );
+    }
+
+    #[test]
+    fn a_confined_child_cannot_open_files() {
+        // SAFETY: the forked child only sets limits, tries an open and exits.
+        unsafe {
+            let pid = libc::fork();
+            assert!(pid >= 0);
+            if pid == 0 {
+                confine_child();
+                libc::_exit(if std::fs::File::open("/").is_err() {
+                    0
+                } else {
+                    1
+                });
+            }
+            let mut status = 0;
+            assert_eq!(libc::waitpid(pid, &mut status, 0), pid);
+            assert_eq!(libc::WEXITSTATUS(status), 0);
+        }
+    }
+
+    #[test]
+    fn throttle_counts_per_key_within_window() {
+        let ctx = test_ctx();
         assert!(throttle(&ctx, "a", 60, 1).is_ok());
         assert_eq!(throttle(&ctx, "a", 60, 1).unwrap_err().0, 429);
         assert!(throttle(&ctx, "b", 60, 1).is_ok());

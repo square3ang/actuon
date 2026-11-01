@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """End-to-end IR test: server re-simulation decides the score. Usage: ir_e2e.py SERVER_BIN MKREPLAY CHART WORKDIR"""
-import hashlib, json, os, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+import hashlib, json, os, sqlite3, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 
 server, mkreplay, chart, work = sys.argv[1:5]
 base = "http://127.0.0.1:18731"
 
-def call(method, path, body=None, token=None):
+def call(method, path, body=None, token=None, ip=None):
     headers = {"Authorization": "Bearer " + token} if token else {}
+    if ip:
+        headers["X-Real-IP"] = ip
     if isinstance(body, dict):
         body = json.dumps(body).encode()
     req = urllib.request.Request(base + path, data=body, method=method, headers=headers)
@@ -20,14 +22,33 @@ replay_path = os.path.join(work, "perfect.actr")
 out = subprocess.run([mkreplay, chart, replay_path], capture_output=True, text=True, check=True)
 sha, notes = out.stderr.split()[0], int(out.stderr.split()[1])
 replay = open(replay_path, "rb").read()
-proc = subprocess.Popen([server, "127.0.0.1:18731", os.path.join(work, "ir")], stderr=subprocess.DEVNULL)
-try:
+
+def start_server():
+    started = subprocess.Popen([server, "127.0.0.1:18731", os.path.join(work, "ir")], stderr=subprocess.DEVNULL)
     for _ in range(100):
         try:
             if call("GET", "/health")[0] == 200:
                 break
         except OSError:
             time.sleep(0.1)
+    return started
+
+def stop_server():
+    proc.terminate()
+    proc.wait()
+
+def title_of(sha):
+    return call("GET", f"/scores/{sha}")[1]["title"]
+
+def clear_titles(version):
+    db = sqlite3.connect(os.path.join(work, "ir", "ir.db"))
+    db.execute("UPDATE chart SET title=''")
+    db.execute(f"PRAGMA user_version={version}")
+    db.commit()
+    db.close()
+
+proc = start_server()
+try:
     assert call("POST", "/register", {"name": "a", "password": "short"})[0] == 400
     status, r = call("POST", "/register", {"name": "alice", "password": "correct horse"})
     assert status == 200, r
@@ -122,7 +143,50 @@ try:
     assert call("POST", "/login", {"name": "alicia", "password": "correct horse"})[0] == 200
     guess = {"name": "nobody", "password": "wrong password"}
     assert [call("POST", "/login", guess)[0] for _ in range(11)] == [401] * 10 + [429], "attempts are counted"
+    assert call("POST", "/login", guess, None, "198.51.100.1")[0] == 401, "another client has its own count"
+    account = {"name": "throttled", "password": "correct horse"}
+    tries = [call("POST", "/register", {**account, "name": f"throttled{i}"}, None, "198.51.100.2")[0] for i in range(11)]
+    assert tries == [200] * 10 + [429], tries
+    assert call("POST", "/register", account, None, "198.51.100.3")[0] == 200, "one client's signups leave others alone"
+
+    def bms(name, channels):
+        path = os.path.join(work, name)
+        with open(path, "w") as f:
+            f.write("#TITLE format\n#BPM 120\n#WAV01 a.wav\n" + "".join(f"#001{c}:01\n" for c in channels))
+        made = path + ".actr"
+        hash_ = subprocess.run([mkreplay, path, made], capture_output=True, text=True, check=True).stderr.split()[0]
+        return hash_, open(path, "rb").read(), open(made, "rb").read()
+
+    # PMS has no lane for channel 16, so naming the format would leave only the easy note to judge.
+    cut_sha, cut_chart, cut_replay = bms("cut.bms", ["11", "16"])
+    assert call("PUT", f"/charts/{cut_sha}?format=1", cut_chart, bob)[0] == 200
+    assert call("POST", f"/scores/{cut_sha}?format=2", cut_replay, bob)[0] == 422, "a format that drops notes is refused"
+    assert call("POST", f"/scores/{cut_sha}?format=1", cut_replay, bob)[0] == 200
+    pms_sha, pms_chart, pms_replay = bms("real.pms", ["11", "22"])
+    assert call("PUT", f"/charts/{pms_sha}?format=2", pms_chart, bob)[0] == 200
+    assert call("POST", f"/scores/{pms_sha}?format=2", pms_replay, bob)[0] == 200, "a real PMS chart still ranks"
+
+    hoarder = call("POST", "/register", {"name": "hoarder", "password": "correct horse"})[1]["token"]
+    def claims(start):
+        return {"scores": [{"sha256": f"{i:064x}", "clear": 0, "ex": 0, "max_combo": 0, "miss": 0, "date": 1} for i in range(start, start + 7000)]}
+    sent = [call("POST", "/me/claims", claims(n * 7000), hoarder)[0] for n in range(8)]
+    assert sent == [200] * 7 + [429], sent
+    assert len(call("GET", "/me/scores", None, hoarder)[1]["scores"]) == 49000, "a refused batch stores nothing"
+    assert call("POST", "/me/claims", claims(0), hoarder)[0] == 200, "sending held rows again adds nothing"
+
+    stop_server()
+    clear_titles(0)
+    proc = start_server()
+    for _ in range(100):
+        if title_of(sha):
+            break
+        time.sleep(0.1)
+    assert title_of(sha), "old charts get named behind the workers"
+    stop_server()
+    clear_titles(1)
+    proc = start_server()
+    time.sleep(1)
+    assert title_of(sha) == "", "and only once"
     print(f"IR e2e OK: ex {best} of max {notes * 2}")
 finally:
-    proc.terminate()
-    proc.wait()
+    stop_server()
