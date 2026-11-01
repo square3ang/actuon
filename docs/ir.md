@@ -3,11 +3,10 @@
 `server/` is a self-hosted IR in Rust. It accepts a replay, re-simulates it with the same Zig core through FFI in a child
 process with a 30 s limit, and stores the score it computes itself, not one the client claims.
 
-Scores and accounts live in PostgreSQL, login attempt counters in Redis, and uploaded charts in the data directory.
+Scores and accounts live in SQLite in WAL mode (`ir.db`), and uploaded charts next to it in the data directory.
 
 ```sh
 cd server
-cp .env.example .env    # then set POSTGRES_PASSWORD
 docker compose up -d --build
 ```
 
@@ -19,7 +18,7 @@ Registration allows 60 accounts an hour across the server. Each account can stor
 parse as a chart with notes. Four chart or replay checks run at once, and the next gets a 503 until one ends. Each check
 runs in a child process with a 4 GiB address space limit.
 
-To run it without Docker, set `DATABASE_URL` and `REDIS_URL`, then:
+To run it without Docker:
 
 ```sh
 zig build core -Doptimize=ReleaseSafe
@@ -27,15 +26,39 @@ cd server && cargo build --release
 ./target/release/actuon-ir 127.0.0.1:8730 ir-data
 ```
 
-To move an older SQLite server, start the new one once so it creates the tables, then run the following in `server/`:
+Run one instance on a local disk: WAL does not work over a network filesystem, and login attempt counters live in the
+process, so a restart resets them. A database from an older server opens as it is.
+
+To install or update it on a Linux host over SSH, fill in `server/.env` from `server/.env.example`, then run
+`server/deploy.sh root@HOST`. It builds the images with Docker locally, copies them and the working tree to `/opt/actuon`,
+installs Podman and podman-compose with dnf, starts the server and runs one backup to prove the bucket works. The host must
+be RHEL-like, such as Rocky Linux.
+
+## Backups
+
+The `backup` service sends the database and charts to any S3-compatible storage, such as Cloudflare R2, every 6 hours.
+It keeps database copies for 30 days and charts for good. The bucket must exist. In `server/`:
 
 ```sh
-python3 migrate_sqlite.py ir-data/ir.db | docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U actuon actuon
-docker compose cp ir-data/charts ir:/data
+cp .env.example .env    # then fill in the S3 values
+docker compose up -d --build
+docker compose logs backup
 ```
 
-The `ir` container runs as a non-root user, so check that it owns the copied charts with
-`docker compose exec -u root ir chown -R ir:ir /data/charts`.
+A failed backup is only logged, as `backup failed`, and tried again in 6 hours. Backups hold password and token hashes
+and are not encrypted, so keep the bucket private.
+
+To restore the newest copy, stop the server first. The database it replaces stays as `ir.db.before-restore`.
+
+```sh
+docker compose stop ir
+docker compose run --rm --no-deps backup restore
+docker compose up -d
+```
+
+Scores saved since the last backup are lost, but players can send them again with IR sync.
+
+## Client
 
 Client: set `ir_url` in `config.json`, then run `actuon ir-register URL NAME` with the password on stdin. Use
 `actuon ir-rival NAME` to add a rival. A server that lacks a chart asks the client to upload it, so it holds copies of

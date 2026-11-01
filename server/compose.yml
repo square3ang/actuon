@@ -1,49 +1,36 @@
 services:
   ir:
+    image: localhost/actuon-ir
     build:
       context: ..
       dockerfile: server/Dockerfile
-    restart: unless-stopped
-    environment:
-      DATABASE_URL: postgres://actuon:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres/actuon
-      REDIS_URL: redis://redis/
+    restart: always
     ports:
       # Plain HTTP: put a TLS proxy in front before opening this to the internet.
       - "127.0.0.1:${IR_PORT:-8730}:8730"
     volumes:
-      - charts:/data
+      - data:/data
+
+  backup:
+    image: localhost/actuon-backup
+    build: backup
+    profiles: [backup]
+    restart: always
     depends_on:
-      postgres:
+      ir:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-
-  postgres:
-    image: postgres:18-alpine
-    restart: unless-stopped
     environment:
-      POSTGRES_USER: actuon
-      POSTGRES_DB: actuon
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      RCLONE_CONFIG_BACKUP_TYPE: s3
+      RCLONE_CONFIG_BACKUP_PROVIDER: Other
+      RCLONE_CONFIG_BACKUP_ENDPOINT: ${S3_ENDPOINT:-}
+      RCLONE_CONFIG_BACKUP_REGION: ${S3_REGION:-auto}
+      RCLONE_CONFIG_BACKUP_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+      RCLONE_CONFIG_BACKUP_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
+      # An R2 token limited to one bucket may not list buckets.
+      RCLONE_CONFIG_BACKUP_NO_CHECK_BUCKET: "true"
+      S3_BUCKET: ${S3_BUCKET:-}
     volumes:
-      - postgres:/var/lib/postgresql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U actuon -d actuon"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-
-  # Only login attempt counters live here, so nothing needs to survive a restart.
-  redis:
-    image: redis:8-alpine
-    restart: unless-stopped
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
+      - data:/data
 
 volumes:
-  charts:
-  postgres:
+  data:

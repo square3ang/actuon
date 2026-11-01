@@ -45,6 +45,5 @@ For server changes, also run:
 zig build core -Doptimize=ReleaseSafe
 (cd server && cargo test --release && cargo build --release)
 python3 tests/ir_e2e.py server/target/release/actuon-ir zig-out/bin/mkreplay tests/charts/stop.bms "$(mktemp -d)"
+python3 tests/backup_check.py server/backup/backup.sh "$(mktemp -d)"
 ```
-
-`ir_e2e.py` needs `DATABASE_URL` pointing at an empty database and `REDIS_URL`.
