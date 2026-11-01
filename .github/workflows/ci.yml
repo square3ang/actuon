@@ -2,6 +2,8 @@ name: ci
 on:
   push:
     tags: ['*']
+  # Checks the platform builds without a tag. The version check fails the linux job, so nothing is released.
+  workflow_dispatch:
 jobs:
   linux:
     runs-on: ubuntu-latest
