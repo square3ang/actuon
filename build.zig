@@ -117,10 +117,9 @@ pub fn build(b: *std.Build) void {
         mod.addIncludePath(include);
         translate.addIncludePath(include);
         translate.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "include", "lua5.4" }) });
-        mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
-        // MSYS2's sdl3.pc lists -mwindows, which zig's pkg-config reader refuses.
+        // By full path: MSYS2's sdl3.pc lists -mwindows, which zig's pkg-config reader refuses, and -l picks the static libraries.
         for ([_][]const u8{ "portaudio", "SDL3", "SDL3_ttf", "sqlite3", "lua5.4", "archive", "avformat", "avcodec", "avutil", "swscale", "avfilter" }) |lib|
-            mod.linkSystemLibrary(lib, .{ .use_pkg_config = .no });
+            mod.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib", b.fmt("lib{s}.dll.a", .{lib}) }) });
     }
     // Homebrew's portaudio-2.0.pc lists -framework, which zig's pkg-config reader refuses.
     if (os == .macos) {
