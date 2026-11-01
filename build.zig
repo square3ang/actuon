@@ -110,6 +110,7 @@ pub fn build(b: *std.Build) void {
         mod.linkFramework("CoreFoundation", .{});
     }
     // pkgconf hides MSYS2's own include and lib folders as defaults, but zig does not search them.
+    // translate-c gets include paths only: on Windows, -l fails with "coff does not support linking multiple objects".
     if (os == .windows) {
         const prefix = std.mem.trim(u8, b.run(&.{ "pkg-config", "--variable=prefix", "sdl3" }), "\r\n");
         const include: std.Build.LazyPath = .{ .cwd_relative = b.pathJoin(&.{ prefix, "include" }) };
@@ -117,6 +118,9 @@ pub fn build(b: *std.Build) void {
         translate.addIncludePath(include);
         translate.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "include", "lua5.4" }) });
         mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
+        // MSYS2's sdl3.pc lists -mwindows, which zig's pkg-config reader refuses.
+        for ([_][]const u8{ "portaudio", "SDL3", "SDL3_ttf", "sqlite3", "lua5.4", "archive", "avformat", "avcodec", "avutil", "swscale", "avfilter" }) |lib|
+            mod.linkSystemLibrary(lib, .{ .use_pkg_config = .no });
     }
     // Homebrew's portaudio-2.0.pc lists -framework, which zig's pkg-config reader refuses.
     if (os == .macos) {
@@ -126,15 +130,16 @@ pub fn build(b: *std.Build) void {
         translate.addIncludePath(include);
         mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ portaudio, "lib" }) });
         mod.linkSystemLibrary("portaudio", .{ .use_pkg_config = .no });
-    } else {
+    } else if (os != .windows) {
         mod.linkSystemLibrary("portaudio-2.0", .{ .use_pkg_config = .force });
-        // On Windows translate-c fails on -l with "coff does not support linking multiple objects", so it gets include paths only.
-        if (os != .windows) translate.linkSystemLibrary("portaudio-2.0", .{});
+        translate.linkSystemLibrary("portaudio-2.0", .{});
     }
     // sdl3-ttf also brings SDL3; naming both links it twice, which macOS refuses at startup.
     const libs = [_][]const u8{ "sdl3-ttf", "sqlite3", "lua5.4", "libarchive", "libavformat", "libavcodec", "libavutil", "libswscale", "libavfilter" };
-    for (libs) |lib| mod.linkSystemLibrary(lib, .{ .use_pkg_config = .force });
-    if (os != .windows) for (libs) |lib| translate.linkSystemLibrary(lib, .{});
+    if (os != .windows) {
+        for (libs) |lib| mod.linkSystemLibrary(lib, .{ .use_pkg_config = .force });
+        for (libs) |lib| translate.linkSystemLibrary(lib, .{});
+    }
 
     const exe = b.addExecutable(.{ .name = "actuon", .root_module = mod });
     b.installArtifact(exe);
