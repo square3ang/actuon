@@ -1,5 +1,6 @@
 //! Settings: a flat list of editable items.
 const std = @import("std");
+const builtin = @import("builtin");
 const c = @import("c");
 const config = @import("../game/config.zig");
 const fs = @import("../platform/fs.zig");
@@ -89,6 +90,7 @@ const Item = enum {
     download_url,
     update,
     input_poll,
+    evdev_input,
     bind_4k,
     bind_5k,
     bind_6k,
@@ -109,7 +111,7 @@ const Item = enum {
             .green, .lift, .hidden, .judge_offset, .visual_offset => .timing,
             .import_beatoraja, .import_lr2 => .scores,
             .ir_url, .ir_signup, .ir_signin, .ir_rename, .ir_send_failed, .ir_upload, .ir_download, .download_url, .update => .online,
-            .input_poll, .bind_4k, .bind_5k, .bind_6k, .bind_7k, .bind_10k, .bind_14k, .bind_9k, .beatoraja_select, .bind_start => .controls,
+            .input_poll, .evdev_input, .bind_4k, .bind_5k, .bind_6k, .bind_7k, .bind_10k, .bind_14k, .bind_9k, .beatoraja_select, .bind_start => .controls,
         };
     }
 
@@ -157,6 +159,7 @@ const Item = enum {
             .download_url => tr("Download URL"),
             .update => tr("Game version"),
             .input_poll => tr("Key polling"),
+            .evdev_input => tr("evdev input"),
             .bind_4k => tr("4 key"),
             .bind_5k => tr("5 key"),
             .bind_6k => tr("6 key"),
@@ -212,7 +215,11 @@ const Item = enum {
             .ir_download => tr("Merges your scores on the server into this library. Better local scores stay."),
             .download_url => tr("Where missing charts come from: an archive or a lookup service. {md5} becomes the chart's hash."),
             .update => tr("Checks GitHub at launch. Enter installs a new version for the next launch, or opens its page where the game cannot replace itself. Settings and scores stay."),
-            .input_poll => tr("Key checks per second during play. Higher takes more CPU. Event uses OS key events. macOS always does."),
+            .input_poll => if (builtin.os.tag == .linux)
+                tr("Key checks per second during play. Higher takes more CPU. Event keeps evdev's kernel timestamps, the most exact.")
+            else
+                tr("Key checks per second during play. Higher takes more CPU. Event is not recommended: it times keys on arrival, with OS jitter."),
+            .evdev_input => tr("Reads /dev/input for kernel timestamps and key polling. Off, the compositor still stamps keys, not the frame."),
             .bind_5k, .bind_10k => tr("Enter, then press each input in turn: 5 keys, scratch A, scratch B, per side."),
             .bind_7k, .bind_14k => tr("Enter, then press each input in turn: 7 keys, scratch A, scratch B, per side."),
             .bind_4k => tr("Enter, then press each of the 4 keys in turn."),
@@ -255,7 +262,14 @@ pub const State = struct {
 };
 
 const items = std.enums.values(Item);
-const poll_rates = [_]u32{ 0, 1000, 2000, 4000, 8000 };
+// Linux lists Event last: with evdev it is the most exact choice there, not a fallback.
+const poll_rates = if (builtin.os.tag == .linux) [_]u32{ 1000, 2000, 4000, 8000, 0 } else [_]u32{ 0, 1000, 2000, 4000, 8000 };
+const event_index = std.mem.indexOfScalar(u32, &poll_rates, 0).?;
+const poll_names = blk: {
+    var names: [poll_rates.len][]const u8 = undefined;
+    for (poll_rates, &names) |r, *name| name.* = std.fmt.comptimePrint("{d}", .{r});
+    break :blk names;
+};
 const fps_limits = [_]u32{ 0, 30, 60, 75, 90, 120, 144, 165, 180, 200, 240, 280, 300, 360, 480, 500, 540, 600, 720, 1000 };
 
 /// A limit typed into config.json shows as the nearest choice at or below it.
@@ -279,9 +293,9 @@ fn stepResolution(w: u32, h: u32, dir: i32) [2]u32 {
 
 /// A rate typed into config.json shows as the nearest choice at or below it.
 fn pollIndex(hz: u32) usize {
-    var best: usize = 0;
+    var best = event_index;
     for (poll_rates, 0..) |r, i| {
-        if (r <= hz) best = i;
+        if (r <= hz and r > poll_rates[best]) best = i;
     }
     return best;
 }
@@ -472,14 +486,33 @@ fn startEditing(a: *App, it: Item) void {
 
 /// beatoraja's key config key lands here.
 pub fn openControls(a: *App) void {
-    a.set.cursor = firstOf(.controls);
+    a.set.cursor = firstOf(a, .controls);
     a.set.inside = true;
     a.scene = .settings;
 }
 
-fn firstOf(sec: Section) usize {
-    for (items, 0..) |it, i| if (it.section() == sec) return i;
+/// Key polling needs a key state sampler: Windows has one, Linux only through evdev, macOS none.
+fn rowShown(a: *const App, it: Item) bool {
+    return switch (it) {
+        .input_poll => builtin.os.tag == .windows or (builtin.os.tag == .linux and a.cfg.evdev_input),
+        .evdev_input => builtin.os.tag == .linux,
+        else => true,
+    };
+}
+
+fn firstOf(a: *const App, sec: Section) usize {
+    for (items, 0..) |it, i| if (it.section() == sec and rowShown(a, it)) return i;
     return 0;
+}
+
+/// The next shown row of the same tab in `dir`, wrapping round.
+fn stepRow(a: *const App, from: usize, dir: isize) usize {
+    const sec = items[from].section();
+    var i = from;
+    while (true) {
+        i = @intCast(@mod(@as(isize, @intCast(i)) + dir, @as(isize, items.len)));
+        if (items[i].section() == sec and rowShown(a, items[i])) return i;
+    }
 }
 
 fn bindsOf(a: *App, it: Item) []u16 {
@@ -751,6 +784,7 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
         .fullscreen => drawToggle(g, right, y, h, cfg.fullscreen, on),
         .bga_upscale => drawToggle(g, right, y, h, cfg.bga_upscale, on),
         .bga => drawToggle(g, right, y, h, cfg.bga, on),
+        .evdev_input => drawToggle(g, right, y, h, cfg.evdev_input, on),
         .ir_send_failed => drawToggle(g, right, y, h, cfg.ir_send_failed, on),
         .fps_limit => step(a, it, drawStepper(g, right, y, h, if (cfg.fps_limit == 0) tr("Off") else std.fmt.bufPrint(&buf, "{d}", .{fps_limits[fpsIndex(cfg.fps_limit)]}) catch "", on)),
         .beatoraja_select => drawToggle(g, right, y, h, cfg.beatoraja_select, on),
@@ -772,7 +806,11 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
             a.sfx(.adjust);
             setLanguage(a, @fromBackingInt(@intCast(i)));
         },
-        .input_poll => if (drawChoices(g, right, y, h, &.{ tr("Event"), "1000", "2000", "4000", "8000" }, pollIndex(cfg.input_poll_hz), on)) |i| {
+        .input_poll => if (drawChoices(g, right, y, h, blk: {
+            var names = poll_names;
+            names[event_index] = tr("Event");
+            break :blk &names;
+        }, pollIndex(cfg.input_poll_hz), on)) |i| {
             a.sfx(.adjust);
             cfg.input_poll_hz = poll_rates[i];
         },
@@ -833,7 +871,7 @@ fn drawNav(a: *App, current: Section, nav_w: f32) void {
         const hover = g.hit(14 * u, sy, nav_w, 38 * u);
         if (g.clickIn(14 * u, sy, nav_w, 38 * u)) {
             a.sfx(.confirm);
-            s.cursor = firstOf(sec);
+            s.cursor = firstOf(a, sec);
             s.inside = true;
         }
         if (here and !s.inside) {
@@ -851,9 +889,14 @@ fn drawRows(a: *App, current: Section, px: f32, pw: f32, help_y: f32) void {
     g.panel(px, 18 * u, pw, help_y - 26 * u, "");
     _ = g.text(current.title(), px + 18 * u, 28 * u, g.scaled(24), if (s.inside) gfx.white else gfx.dim);
     var y = 72 * u;
-    const row_h = 54 * u;
+    var rows: f32 = 0;
+    for (items) |it| {
+        if (it.section() == current and rowShown(a, it) and it != .table_list) rows += 1;
+    }
+    // A tab with more rows than the panel holds packs them closer instead of running under the help.
+    const row_h = @min(54 * u, (help_y - 8 * u - y) / rows);
     for (items, 0..) |it, i| {
-        if (it.section() != current) continue;
+        if (it.section() != current or !rowShown(a, it)) continue;
         if (it == .table_list) {
             drawTableList(a, i, px + 8 * u, pw - 16 * u, y, help_y - 12 * u);
             continue;
@@ -971,6 +1014,11 @@ fn adjust(a: *App, it: Item, dir: i32) void {
         .language => setLanguage(a, @fromBackingInt(@intCast(@mod(@as(i32, @backingInt(i18n.current)) + dir, @as(i32, i18n.names.len))))),
         .beatoraja_select => cfg.beatoraja_select = !cfg.beatoraja_select,
         .bga => cfg.bga = !cfg.bga,
+        .evdev_input => {
+            if (!cfg.evdev_input and !input.evdevReadable()) return say(a, "Reading /dev/input needs the udev rule in the README.", .{});
+            cfg.evdev_input = !cfg.evdev_input;
+            input.setEvdev(cfg.evdev_input);
+        },
         .ir_send_failed => cfg.ir_send_failed = !cfg.ir_send_failed,
         .fps_limit => {
             const i = @as(i32, @intCast(fpsIndex(cfg.fps_limit))) + dir;
@@ -1365,11 +1413,11 @@ fn keyTabs(a: *App, it: Item, sc: u32) void {
     switch (sc) {
         c.SDL_SCANCODE_UP => {
             a.sfx(.move);
-            s.cursor = firstOf(sections[if (at == 0) sections.len - 1 else at - 1]);
+            s.cursor = firstOf(a, sections[if (at == 0) sections.len - 1 else at - 1]);
         },
         c.SDL_SCANCODE_DOWN => {
             a.sfx(.move);
-            s.cursor = firstOf(sections[(at + 1) % sections.len]);
+            s.cursor = firstOf(a, sections[(at + 1) % sections.len]);
         },
         c.SDL_SCANCODE_RETURN, c.SDL_SCANCODE_RIGHT => {
             a.sfx(.confirm);
@@ -1441,16 +1489,12 @@ fn keyItems(a: *App, it: Item, sc: u32) void {
     switch (sc) {
         c.SDL_SCANCODE_UP => {
             a.sfx(.move);
-            s.cursor = if (s.cursor > 0 and items[s.cursor - 1].section() == it.section()) s.cursor - 1 else blk: {
-                var last = s.cursor;
-                while (last + 1 < items.len and items[last + 1].section() == it.section()) last += 1;
-                break :blk last;
-            };
+            s.cursor = stepRow(a, s.cursor, -1);
             if (items[s.cursor] == .table_list) s.table_row = tableRowCount(a) - 1;
         },
         c.SDL_SCANCODE_DOWN => {
             a.sfx(.move);
-            s.cursor = if (s.cursor + 1 < items.len and items[s.cursor + 1].section() == it.section()) s.cursor + 1 else firstOf(it.section());
+            s.cursor = stepRow(a, s.cursor, 1);
             s.table_row = 0;
         },
         c.SDL_SCANCODE_LEFT => {
@@ -1522,7 +1566,7 @@ test "tabs wrap, enter goes in and escape comes out, then leaves" {
     try std.testing.expectEqual(.controls, items[a.set.cursor].section());
     key(a, c.SDL_SCANCODE_DOWN);
     try std.testing.expectEqual(.library, items[a.set.cursor].section());
-    try std.testing.expectEqual(firstOf(.library), a.set.cursor);
+    try std.testing.expectEqual(firstOf(a, .library), a.set.cursor);
     key(a, c.SDL_SCANCODE_RETURN);
     try std.testing.expect(a.set.inside);
     key(a, c.SDL_SCANCODE_ESCAPE);
@@ -1767,4 +1811,11 @@ test "a folder added around others takes their place" {
     try std.testing.expectEqualStrings("/bms2", roots[0]);
     try std.testing.expectEqualStrings("/bms", roots[1]);
     try std.testing.expectEqualStrings("C:\\", trimSep("C:\\"));
+}
+
+test "a typed poll rate shows as the nearest choice at or below it, wherever Event sits" {
+    try std.testing.expectEqual(event_index, pollIndex(0));
+    try std.testing.expectEqual(event_index, pollIndex(500));
+    try std.testing.expectEqual(@as(u32, 1000), poll_rates[pollIndex(1500)]);
+    try std.testing.expectEqual(@as(u32, 8000), poll_rates[pollIndex(9000)]);
 }

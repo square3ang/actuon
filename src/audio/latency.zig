@@ -111,7 +111,7 @@ fn queueBench() void {
 
 fn realKeys(seconds: u32) void {
     input.focused.store(true, .release);
-    input.startDirect();
+    input.startDirect(true);
     c.SDL_Delay(200);
     if (!input.direct_keyboard.load(.acquire)) {
         std.debug.print("direct input unavailable (see docs: udev rule), real key test skipped\n", .{});

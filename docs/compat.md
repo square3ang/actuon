@@ -10,7 +10,7 @@
 | BGA | Still images and FFmpeg video. Layer video has no transparency |
 | Windows | RawInput, WASAPI, ASIO |
 | macOS | IOKit HID, CoreAudio |
-| Linux | evdev, JACK, PipeWire, ALSA |
+| Linux | Wayland/X11 key events, optional evdev, JACK, PipeWire, ALSA |
 
 ## Skins
 

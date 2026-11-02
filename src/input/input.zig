@@ -1,7 +1,7 @@
 //! Input capture. Each OS path timestamps events as close to the hardware as it can and hands them
 //! to the sim thread through a queue, so judgment never depends on the render loop:
-//! Linux evdev (kernel timestamps), Windows RawInput thread, macOS IOKit HID callback; SDL events
-//! (their own timestamps) are the fallback and carry joystick input everywhere.
+//! Linux evdev when the player turns it on (kernel timestamps), Windows RawInput thread, macOS IOKit HID
+//! callback; SDL events (their own timestamps) are the fallback and carry joystick input everywhere.
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("c");
@@ -100,18 +100,25 @@ extern fn actuon_rawinput_start() c_int;
 extern fn actuon_rawinput_sample(bits: *KeyBits) void;
 extern fn actuon_hid_start() c_int;
 
-pub fn startDirect() void {
+/// `evdev` opts Linux into /dev/input; without it Linux keeps SDL's key events and their compositor timestamps.
+pub fn startDirect(evdev_on: bool) void {
     switch (builtin.os.tag) {
-        .linux => evdev.start(),
+        .linux => evdev.set(evdev_on),
         .windows => if (actuon_rawinput_start() != 0) direct_keyboard.store(true, .release),
         .macos => if (actuon_hid_start() != 0) direct_keyboard.store(true, .release),
         else => {},
     }
     // shortcut: macOS has no key state sampler and stays on HID events, add CGEventSourceKeyState with a keycode table when it can be tested there.
-    if (direct_keyboard.load(.acquire) and builtin.os.tag != .macos) {
+    // Linux starts it either way, since evdev can be turned on from settings later.
+    if (builtin.os.tag == .linux or (builtin.os.tag == .windows and direct_keyboard.load(.acquire))) {
         const t = c.SDL_CreateThread(pollThread, "input-poll", null);
         if (t != null) c.SDL_DetachThread(t);
     }
+}
+
+/// Turns Linux evdev input on or off while the game runs.
+pub fn setEvdev(on: bool) void {
+    evdev.set(on);
 }
 
 /// One bit per Linux-style key code, the layout EVIOCGKEY returns.
@@ -144,7 +151,8 @@ fn pollThread(_: ?*anyopaque) callconv(.c) c_int {
     var was_on = false;
     var next: u64 = 0;
     while (true) {
-        const hz = poll_hz.load(.acquire);
+        // Without a direct path (Linux evdev off) there is nothing to sample.
+        const hz = if (direct_keyboard.load(.acquire)) poll_hz.load(.acquire) else 0;
         if (hz == 0) {
             was_on = false;
             c.SDL_Delay(20);
@@ -176,7 +184,7 @@ const evdev = if (builtin.os.tag == .linux) struct {
 
     const max_events = 64;
     /// udev opens a new node to the player a moment after it appears.
-    const rescan_ms = 5000;
+    const rescan_ns = 5 * std.time.ns_per_s;
 
     var fds: [32]linux.pollfd = undefined;
     /// The /dev/input number behind each slot of fds.
@@ -221,23 +229,37 @@ const evdev = if (builtin.os.tag == .linux) struct {
         return st.mtime.sec;
     }
 
+    /// /dev/input/event`i` opened, if it is a keyboard this user may read.
+    fn openKeyboard(i: usize) ?i32 {
+        var path_buf: [32]u8 = undefined;
+        const path = std.fmt.bufPrintSentinel(&path_buf, "/dev/input/event{d}", .{i}, 0) catch return null;
+        const rc = linux.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0);
+        if (linux.errno(rc) != .SUCCESS) return null;
+        const fd: i32 = @intCast(rc);
+        var bits: [64]u8 = @splat(0);
+        if (linux.errno(linux.ioctl(fd, EVIOCGBIT_KEY, @intFromPtr(&bits))) != .SUCCESS or bits[3] & 0x40 == 0) { // KEY_A (30)
+            _ = linux.close(fd);
+            return null;
+        }
+        return fd;
+    }
+
+    fn readable() bool {
+        for (0..max_events) |i| if (openKeyboard(i)) |fd| {
+            _ = linux.close(fd);
+            return true;
+        };
+        return false;
+    }
+
     /// Opens every keyboard not open yet, so one plugged in during play works at once.
     fn openKeyboards() void {
         var open: std.StaticBitSet(max_events) = .empty;
         for (fds[0..n.load(.monotonic)], event_nums[0..n.load(.monotonic)]) |f, num| if (f.fd >= 0) open.set(num);
-        var path_buf: [32]u8 = undefined;
         for (0..max_events) |i| {
             if (open.isSet(i)) continue;
             const slot = freeSlot(fds[0..n.load(.monotonic)]) orelse return;
-            const path = std.fmt.bufPrintSentinel(&path_buf, "/dev/input/event{d}", .{i}, 0) catch continue;
-            const rc = linux.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0);
-            if (linux.errno(rc) != .SUCCESS) continue;
-            const fd: i32 = @intCast(rc);
-            var bits: [64]u8 = @splat(0);
-            if (linux.errno(linux.ioctl(fd, EVIOCGBIT_KEY, @intFromPtr(&bits))) != .SUCCESS or bits[3] & 0x40 == 0) { // KEY_A (30)
-                _ = linux.close(fd);
-                continue;
-            }
+            const fd = openKeyboard(i) orelse continue;
             var clock: i32 = @backingInt(linux.clockid_t.MONOTONIC);
             _ = linux.ioctl(fd, EVIOCSCLOCKID, @intFromPtr(&clock));
             event_nums[slot] = @intCast(i);
@@ -246,28 +268,56 @@ const evdev = if (builtin.os.tag == .linux) struct {
         }
     }
 
-    fn start() void {
-        openKeyboards();
-        if (n.load(.acquire) == 0) return; // no permission: stay on SDL keyboard events; docs explain the udev rule
-        direct_keyboard.store(true, .release);
-        const t = c.SDL_CreateThread(run, "input-evdev", null);
-        if (t != null) c.SDL_DetachThread(t);
+    /// The player's setting; the evdev thread alone opens and closes devices to follow it.
+    var wanted: std.atomic.Value(bool) = .init(false);
+    /// Touched only from the main thread.
+    var started = false;
+
+    fn set(on: bool) void {
+        wanted.store(on, .release);
+        // SDL's key events take over at once; the thread lets go of the devices within a second.
+        if (!on) direct_keyboard.store(false, .release);
+        if (!on or started) return;
+        const t = c.SDL_CreateThread(run, "input-evdev", null) orelse return;
+        c.SDL_DetachThread(t);
+        started = true;
+    }
+
+    /// Settings never opens over play, so the sampler is not reading these when they close.
+    fn closeAll() void {
+        for (fds[0..n.load(.monotonic)], 0..) |*f, slot| {
+            if (f.fd < 0) continue;
+            _ = linux.close(f.fd);
+            f.fd = -1;
+            releaseHeld(slot, c.SDL_GetTicksNS());
+        }
+        n.store(0, .release);
     }
 
     fn run(_: ?*anyopaque) callconv(.c) c_int {
         var evs: [64]InputEvent = undefined;
-        var opened_at = c.SDL_GetTicks();
+        // CLOCK_MONOTONIC, not SDL ticks: SDL_Quit resets those while this detached thread still runs.
+        var opened_at = monoNs();
         var nodes_at = nodesChangedAt();
         var rescan_until: u64 = 0;
         while (true) {
+            if (!wanted.load(.acquire)) {
+                closeAll();
+                c.SDL_Delay(100);
+                continue;
+            }
+            if (!direct_keyboard.load(.monotonic)) {
+                openKeyboards();
+                if (n.load(.monotonic) > 0) direct_keyboard.store(true, .release);
+            }
             const count = n.load(.monotonic);
             _ = linux.poll(&fds, count, 1000);
             // Events carry kernel timestamps, so the time this takes cannot move a judgement.
-            if (c.SDL_GetTicks() - opened_at >= 1000) {
-                opened_at = c.SDL_GetTicks();
+            if (monoNs() - opened_at >= std.time.ns_per_s) {
+                opened_at = monoNs();
                 // Opening a device can wake it, so idle mice and pads are left alone until a node changes.
                 const changed = nodesChangedAt();
-                if (changed == null or changed != nodes_at) rescan_until = opened_at + rescan_ms;
+                if (changed == null or changed != nodes_at) rescan_until = opened_at + rescan_ns;
                 nodes_at = changed;
                 if (opened_at < rescan_until) openKeyboards();
             }
@@ -299,9 +349,17 @@ const evdev = if (builtin.os.tag == .linux) struct {
         }
     }
 } else struct {
-    fn start() void {}
+    fn set(_: bool) void {}
     fn sample(_: *KeyBits) void {}
+    fn readable() bool {
+        return false;
+    }
 };
+
+/// Whether evdev input can be turned on: a keyboard under /dev/input this user may read.
+pub fn evdevReadable() bool {
+    return evdev.readable();
+}
 
 test "sampling pushes one event per changed key" {
     clear();
