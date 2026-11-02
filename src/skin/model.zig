@@ -4,6 +4,7 @@ const std = @import("std");
 const c = @import("c");
 const core = @import("actuon_core");
 const gfx = @import("../ui/gfx.zig");
+const bitfont = @import("bitfont.zig");
 const bga = @import("../ui/bga.zig");
 
 pub const Key = struct {
@@ -40,7 +41,7 @@ pub const Src = struct {
     solid: ?[3]u8 = null,
 };
 
-pub const Kind = enum { songlist, image, number, text, graph, slider, gauge, notes, judge, bga, line, notes_graph, bpm_graph, timing, stagefile, hidden_cover, lift_cover };
+pub const Kind = enum { songlist, image, number, text, graph, slider, gauge, notes, judge, bga, line, notes_graph, bpm_graph, timing, stagefile, backbmp, banner, hidden_cover, lift_cover };
 
 /// beatoraja's song bars. Every list but `on` and `off` is placed relative to its bar and indexed
 /// by the row's state; `on` and `off` have one bar per place, `center` being the selected one.
@@ -95,6 +96,8 @@ pub const Object = struct {
     disappear_line: f32 = -1,
     /// text: the skin's font file, null for the built-in one.
     font: ?[:0]const u8 = null,
+    /// text: the skin's bitmap font, drawn instead of `font`.
+    bitmap: ?*const bitfont.BitmapFont = null,
     /// text constant
     constant: []const u8 = "",
     /// gauge: 4 node images (front red, front green, back red, back green)
@@ -460,10 +463,11 @@ pub const Renderer = struct {
             r.ctx.lua_call_str.?(r.s, o.lua_value, &buf)
         else if (o.constant.len > 0) o.constant else r.ctx.str(r.ctx.ud, o.ref);
         if (s.len == 0 or k.a <= 0) return;
+        const col: gfx.Color = .{ .r = @intFromFloat(std.math.clamp(k.r, 0, 255)), .g = @intFromFloat(std.math.clamp(k.g, 0, 255)), .b = @intFromFloat(std.math.clamp(k.b, 0, 255)), .a = @intFromFloat(std.math.clamp(k.a, 0, 255)) };
+        if (o.bitmap) |font| return r.drawBitmapText(font, o, k, s, col, o.align_, font.lr2);
         const size = fontSize(k.h * r.sy);
         r.g.text_font = o.font;
         defer r.g.text_font = null;
-        const col: gfx.Color = .{ .r = @intFromFloat(std.math.clamp(k.r, 0, 255)), .g = @intFromFloat(std.math.clamp(k.g, 0, 255)), .b = @intFromFloat(std.math.clamp(k.b, 0, 255)), .a = @intFromFloat(std.math.clamp(k.a, 0, 255)) };
         switch (o.align_) {
             1 => r.g.textCentered(s, k.x * r.sx, k.y * r.sy, size, col),
             2 => {
@@ -474,12 +478,43 @@ pub const Renderer = struct {
         }
     }
 
+    /// Glyphs from the font's pages, in `fit` squeezed into the text's width as SkinTextImage does.
+    fn drawBitmapText(r: *const Renderer, font: *const bitfont.BitmapFont, o: *const Object, k: Key, s: []const u8, col: gfx.Color, align_: i32, fit: bool) void {
+        if (!std.unicode.utf8ValidateSlice(s)) return;
+        // LR2 sizes by the text's height, a BMFont by the size the skin asks for.
+        const height = if (font.lr2) k.h else @as(f32, @floatFromInt(o.font_size));
+        var scale = height / font.size;
+        const width = bitfont.measure(font, s, scale);
+        const squeeze: f32 = if (fit and k.w > 0 and width > k.w) k.w / width else 1;
+        const shown = width * squeeze;
+        const left = switch (align_) {
+            1 => k.x - shown / 2,
+            2 => k.x - shown,
+            else => k.x,
+        };
+        scale *= squeeze;
+        var x = left;
+        var it = std.unicode.Utf8View.initUnchecked(s).iterator();
+        while (it.nextCodepoint()) |cp| {
+            const glyph = font.glyphs.get(cp) orelse continue;
+            defer x += glyph.advance * scale + font.margin * squeeze;
+            if (glyph.w <= 0 or glyph.h <= 0) continue;
+            const page = font.first_tex + @as(i32, glyph.page);
+            if (page >= r.s.textures.len) continue;
+            const tex = r.s.textures[@intCast(page)] orelse continue;
+            const h = if (font.lr2) k.h else glyph.h * scale;
+            const y = if (font.lr2) k.y else k.y + glyph.y_offset * scale;
+            r.g.sprite(tex, .{ .x = glyph.x, .y = glyph.y, .w = glyph.w, .h = glyph.h }, .{ .x = (x + glyph.x_offset * scale) * r.sx, .y = y * r.sy, .w = glyph.w * scale * r.sx, .h = h * r.sy }, .{ .col = col });
+        }
+    }
+
     /// A song bar's text, cut to the width the skin gives it.
     pub fn drawBarText(r: *const Renderer, o: *const Object, k: Key, s: []const u8) void {
         if (s.len == 0 or k.a <= 0) return;
+        const col: gfx.Color = .{ .r = byte(k.r), .g = byte(k.g), .b = byte(k.b), .a = byte(k.a) };
+        if (o.bitmap) |font| return r.drawBitmapText(font, o, k, s, col, 0, true);
         r.g.text_font = o.font;
         defer r.g.text_font = null;
-        const col: gfx.Color = .{ .r = byte(k.r), .g = byte(k.g), .b = byte(k.b), .a = byte(k.a) };
         r.g.textClip(s, k.x * r.sx, k.y * r.sy, k.w * r.sx, fontSize(k.h * r.sy), col);
     }
 
@@ -594,7 +629,7 @@ pub const Renderer = struct {
                 }
                 r.blit(&o.src, r.frameOf(&o.src), kk, o.blend, o.center, null);
             },
-            .songlist, .judge, .notes, .bga, .line, .notes_graph, .bpm_graph, .timing, .stagefile => {},
+            .songlist, .judge, .notes, .bga, .line, .notes_graph, .bpm_graph, .timing, .stagefile, .backbmp, .banner => {},
             .hidden_cover, .lift_cover => r.drawCover(o, k),
         }
     }

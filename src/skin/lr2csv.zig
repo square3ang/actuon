@@ -4,6 +4,7 @@ const core = @import("actuon_core");
 const fs = @import("../platform/fs.zig");
 const m = @import("model.zig");
 const jsonskin = @import("jsonskin.zig");
+const bitfont = @import("bitfont.zig");
 
 const Parser = struct {
     a: std.mem.Allocator,
@@ -12,6 +13,8 @@ const Parser = struct {
     root: []const u8,
     dir: []const u8,
     images: std.ArrayList(?[]const u8) = .empty,
+    /// #LR2FONT in file order, null where one would not load: SRC_TEXT counts them.
+    fonts: std.ArrayList(?*bitfont.BitmapFont) = .empty,
     objects: std.ArrayList(m.Object) = .empty,
     keys: std.ArrayList(std.ArrayList(m.Key)) = .empty,
     current: ?usize = null,
@@ -123,6 +126,18 @@ fn laneOf(mode: core.types.Mode, code: i32) ?u8 {
 
 fn srcOf(v: [24]i32) m.Src {
     return .{ .tex = v[2], .x = v[3], .y = v[4], .w = v[5], .h = v[6], .divx = std.math.clamp(v[7], 1, m.max_div), .divy = std.math.clamp(v[8], 1, m.max_div), .cycle = v[9], .timer = v[10] };
+}
+
+/// The images LR2 numbers from 100: the chart's own, and plain colors.
+fn runtimeImage(gr: i32) ?m.Object {
+    return switch (gr) {
+        100 => .{ .kind = .stagefile },
+        101 => .{ .kind = .backbmp },
+        102 => .{ .kind = .banner },
+        110 => .{ .kind = .image, .src = .{ .solid = .{ 0, 0, 0 } } },
+        111 => .{ .kind = .image, .src = .{ .solid = .{ 255, 255, 255 } } },
+        else => if (gr >= 100) .{ .kind = .image, .src = .{ .tex = -1 } } else null,
+    };
 }
 
 fn begin(p: *Parser, o: m.Object) !void {
@@ -252,10 +267,12 @@ fn line(p: *Parser, raw: []const u8) anyerror!void {
         try runFile(p, path);
     } else if (eq(cmd, "IMAGE")) {
         try p.images.append(p.a, if (str.len > 1) resolve(p, str[1]) else null);
+    } else if (eq(cmd, "LR2FONT")) {
+        // shortcut: only unpacked .lr2font files, as in beatoraja; a skin's encrypted .dxa archives get the built-in font.
+        try p.fonts.append(p.a, if (str.len > 1) if (resolve(p, str[1])) |path| bitfont.load(p.a, path) else null else null);
     } else if (eq(cmd, "SRC_IMAGE")) {
         p.current = null;
-        // shortcut: gr >= 100 are runtime images (stagefile, banner...), left blank until those are wired up
-        if (v[2] < 100) try begin(p, .{ .kind = .image, .src = srcOf(v) });
+        try begin(p, runtimeImage(v[2]) orelse .{ .kind = .image, .src = srcOf(v) });
     } else if (eq(cmd, "SRC_NUMBER")) {
         p.current = null;
         const src = srcOf(v);
@@ -268,7 +285,7 @@ fn line(p: *Parser, raw: []const u8) anyerror!void {
         } else if (@mod(n, 10) != 0) o.zero_pad = true;
         try begin(p, o);
     } else if (eq(cmd, "SRC_TEXT")) {
-        try begin(p, .{ .kind = .text, .ref = v[3], .align_ = v[4] });
+        try begin(p, .{ .kind = .text, .ref = v[3], .align_ = v[4], .bitmap = if (v[2] >= 0 and v[2] < p.fonts.items.len) p.fonts.items[@intCast(v[2])] else null });
     } else if (eq(cmd, "SRC_BARGRAPH")) {
         try begin(p, .{ .kind = .graph, .src = srcOf(v), .ref = v[11] + 100, .dir = v[12] });
     } else if (eq(cmd, "SRC_SLIDER")) {
@@ -407,6 +424,12 @@ pub fn load(skin: *m.Skin, path: []const u8, mode: core.types.Mode, resolver: *c
         last.judge_numbers = try a.dupe(m.Object, &p.judge_nums);
     }
     skin.objects = p.objects.items;
+    // Last, as #IMAGE lines count their own position.
+    for (p.fonts.items) |font| {
+        const f = font orelse continue;
+        f.first_tex = @intCast(p.images.items.len);
+        try p.images.appendSlice(a, f.pages);
+    }
     return p.images.items;
 }
 
@@ -442,6 +465,16 @@ test "a saved pick selects its #CUSTOMOPTION item, includes too" {
     try std.testing.expect(skin.enabled.contains(902));
     try std.testing.expect(!skin.enabled.contains(900));
     try std.testing.expect(skin.enabled.contains(910));
+}
+
+test "runtime images become the chart's images and plain colors" {
+    try std.testing.expectEqual(m.Kind.stagefile, runtimeImage(100).?.kind);
+    try std.testing.expectEqual(m.Kind.backbmp, runtimeImage(101).?.kind);
+    try std.testing.expectEqual(m.Kind.banner, runtimeImage(102).?.kind);
+    try std.testing.expectEqual(@as(u8, 255), runtimeImage(111).?.src.solid.?[0]);
+    try std.testing.expectEqual(@as(u8, 0), runtimeImage(110).?.src.solid.?[0]);
+    try std.testing.expectEqual(@as(i32, -1), runtimeImage(150).?.src.tex);
+    try std.testing.expect(runtimeImage(99) == null);
 }
 
 test "paths that climb out of the skin are refused" {

@@ -116,6 +116,9 @@ pub const State = struct {
     load_ms: i64 = 0,
     /// #STAGEFILE, owned by the app.
     stagefile: ?*gfx.Texture = null,
+    /// #BACKBMP and #BANNER, owned by the app.
+    backbmp: ?*gfx.Texture = null,
+    banner: ?*gfx.Texture = null,
     notes: []const core.types.Note = &.{},
     timelines: []const core.types.Timeline = &.{},
     graph_end_us: i64 = 0,
@@ -752,8 +755,8 @@ fn drawTiming(g: *gfx.Gfx, o: *const m.Object, st: *const State, snap: *const Sn
     if (!o.timing_bare) g.rect(mid - 1, box.y, 2, box.h, gfx.white);
 }
 
-fn drawStagefile(g: *gfx.Gfx, st: *const State, d: c.SDL_FRect, alpha: f32) void {
-    const tex = st.stagefile orelse return;
+fn drawStagefile(g: *gfx.Gfx, image: ?*gfx.Texture, d: c.SDL_FRect, alpha: f32) void {
+    const tex = image orelse return;
     const fitted = bga_mod.fit(1, tex.w, tex.h, d);
     g.sprite(tex, fitted.src, fitted.dst, .{ .col = gfx.Color{ .r = 255, .g = 255, .b = 255, .a = @intFromFloat(std.math.clamp(alpha, 0, 255)) } });
 }
@@ -771,7 +774,9 @@ pub fn drawLoading(g: *gfx.Gfx, skin: *m.Skin, st: *State, now_ms: i64) void {
         .notes_graph => if (r.visible(o)) |k| drawNotesGraph(g, st, screenRect(&r, k), 0),
         .bpm_graph => if (r.visible(o)) |k| drawBpmGraph(g, st, screenRect(&r, k)),
         .timing => if (r.visible(o)) |k| drawTiming(g, o, st, &before, screenRect(&r, k)),
-        .stagefile => if (r.visible(o)) |k| drawStagefile(g, st, screenRect(&r, k), k.a),
+        .stagefile => if (r.visible(o)) |k| drawStagefile(g, st.stagefile, screenRect(&r, k), k.a),
+        .backbmp => if (r.visible(o)) |k| drawStagefile(g, st.backbmp, screenRect(&r, k), k.a),
+        .banner => if (r.visible(o)) |k| drawStagefile(g, st.banner, screenRect(&r, k), k.a),
         else => r.drawObject(o),
     };
 }
@@ -803,7 +808,9 @@ pub fn drawPlay(g: *gfx.Gfx, skin: *m.Skin, st: *State, s: *Session, view: *play
         .notes_graph => if (r.visible(o)) |k| drawNotesGraph(g, st, screenRect(&r, k), snap.time_us),
         .bpm_graph => if (r.visible(o)) |k| drawBpmGraph(g, st, screenRect(&r, k)),
         .timing => if (r.visible(o)) |k| drawTiming(g, o, st, &snap, screenRect(&r, k)),
-        .stagefile => if (r.visible(o)) |k| drawStagefile(g, st, screenRect(&r, k), k.a),
+        .stagefile => if (r.visible(o)) |k| drawStagefile(g, st.stagefile, screenRect(&r, k), k.a),
+        .backbmp => if (r.visible(o)) |k| drawStagefile(g, st.backbmp, screenRect(&r, k), k.a),
+        .banner => if (r.visible(o)) |k| drawStagefile(g, st.banner, screenRect(&r, k), k.a),
         else => r.drawObject(o),
     };
     return snap;
@@ -898,7 +905,9 @@ pub fn drawSelect(g: *gfx.Gfx, skin: *m.Skin, st: *State, now_ms: i64, bars: Bar
         .notes, .bga, .judge => {},
         .notes_graph => if (r.visible(o)) |k| drawNotesGraph(g, st, screenRect(&r, k), 0),
         .bpm_graph => if (r.visible(o)) |k| drawBpmGraph(g, st, screenRect(&r, k)),
-        .stagefile => if (r.visible(o)) |k| drawStagefile(g, st, screenRect(&r, k), k.a),
+        .stagefile => if (r.visible(o)) |k| drawStagefile(g, st.stagefile, screenRect(&r, k), k.a),
+        .backbmp => if (r.visible(o)) |k| drawStagefile(g, st.backbmp, screenRect(&r, k), k.a),
+        .banner => if (r.visible(o)) |k| drawStagefile(g, st.banner, screenRect(&r, k), k.a),
         else => r.drawObject(o),
     };
     return clicked;

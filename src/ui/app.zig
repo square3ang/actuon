@@ -431,7 +431,9 @@ pub const App = struct {
             a.decide_at = c.SDL_GetTicks();
             a.startDecideBgm();
         }
-        if ((a.play_skin == null and !show_decide) or ch.stagefile.len == 0) return;
+        if (a.play_skin == null and !show_decide) return;
+        a.loadChartImages(ch);
+        if (ch.stagefile.len == 0) return;
         var tmp = std.heap.ArenaAllocator.init(a.gpa);
         defer tmp.deinit();
         const al = tmp.allocator();
@@ -440,6 +442,20 @@ pub const App = struct {
         a.stagefile_path = a.gpa.dupe(u8, path) catch return;
         a.stagefile_done.store(false, .release);
         a.stagefile_thread = c.SDL_CreateThread(stagefileThread, "stagefile", a);
+    }
+
+    /// shortcut: read on the main thread under the loading screen, one short hitch; share the stagefile's thread if it shows.
+    fn loadChartImages(a: *App, ch: *const core.types.Chart) void {
+        var tmp = std.heap.ArenaAllocator.init(a.gpa);
+        defer tmp.deinit();
+        const al = tmp.allocator();
+        const dir = std.fs.path.dirname(a.load_params.path) orelse ".";
+        for ([_]struct { []const u8, *?*gfx.Texture }{ .{ ch.backbmp, &a.skin_state.backbmp }, .{ ch.banner, &a.skin_state.banner } }) |img| {
+            if (img[0].len == 0) continue;
+            const path = (fs.resolveAsset(al, dir, img[0], &.{ "png", "jpg", "jpeg", "bmp", "gif", "tga" }) catch null) orelse continue;
+            const bytes = fs.readAlloc(al, path, 1 << 26) catch continue;
+            img[1].* = gfx.loadTexture(&a.g, path, bytes);
+        }
     }
 
     fn stagefileThread(ud: ?*anyopaque) callconv(.c) c_int {
@@ -577,6 +593,10 @@ pub const App = struct {
         if (a.stagefile_thread != null) a.finishStagefile(false);
         if (a.skin_state.stagefile) |tex| a.g.destroyTexture(tex);
         a.skin_state.stagefile = null;
+        for ([_]*?*gfx.Texture{ &a.skin_state.backbmp, &a.skin_state.banner }) |img| {
+            if (img.*) |tex| a.g.destroyTexture(tex);
+            img.* = null;
+        }
     }
 
     /// No-op without a configured skin. A broken skin falls back to the built-in look rather than blocking play.

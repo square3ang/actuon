@@ -4,6 +4,7 @@ const c = @import("c");
 const core = @import("actuon_core");
 const fs = @import("../platform/fs.zig");
 const m = @import("model.zig");
+const bitfont = @import("bitfont.zig");
 const gfx = @import("../ui/gfx.zig");
 const lr2 = @import("lr2csv.zig");
 const J = std.json.Value;
@@ -210,6 +211,7 @@ const Loader = struct {
     offsets: std.AutoHashMapUnmanaged(i32, Offset) = .empty,
     /// Font id -> file.
     fonts: std.StringHashMapUnmanaged([:0]const u8) = .empty,
+    bitmaps: std.StringHashMapUnmanaged(*bitfont.BitmapFont) = .empty,
     /// source id -> texture index
     sources: std.StringHashMapUnmanaged(i32) = .empty,
     paths: std.ArrayList(?[]const u8) = .empty,
@@ -395,7 +397,13 @@ const Loader = struct {
         for (arr(r.get("font"))) |v| {
             if (v != .object) continue;
             const file = try l.assetPath(str(v.object.get("path"))) orelse continue;
-            try l.fonts.put(a, try idOf(a, v.object.get("id")), try a.dupeSentinel(u8, file, 0));
+            const font_id = try idOf(a, v.object.get("id"));
+            if (std.ascii.endsWithIgnoreCase(file, ".fnt")) {
+                const font = bitfont.load(a, file) orelse continue;
+                font.first_tex = @intCast(l.paths.items.len);
+                try l.paths.appendSlice(a, font.pages);
+                try l.bitmaps.put(a, font_id, font);
+            } else try l.fonts.put(a, font_id, try a.dupeSentinel(u8, file, 0));
         }
         for (arr(r.get("image"))) |v| {
             if (v != .object) continue;
@@ -429,7 +437,7 @@ const Loader = struct {
         for (arr(r.get("text"))) |v| {
             if (v != .object) continue;
             const o = v.object;
-            try l.protos.put(a, try idOf(a, o.get("id")), .{ .kind = .text, .ref = int(o.get("ref"), 0), .lua_value = fnRef(o.get("value")), .align_ = int(o.get("align"), 0), .constant = str(o.get("constantText")), .font = l.fonts.get(try idOf(a, o.get("font"))) });
+            try l.protos.put(a, try idOf(a, o.get("id")), .{ .kind = .text, .ref = int(o.get("ref"), 0), .lua_value = fnRef(o.get("value")), .align_ = int(o.get("align"), 0), .constant = str(o.get("constantText")), .font = l.fonts.get(try idOf(a, o.get("font"))), .bitmap = l.bitmaps.get(try idOf(a, o.get("font"))), .font_size = @intCast(std.math.clamp(int(o.get("size"), 24), 1, 1024)) });
         }
         for (arr(r.get("graph"))) |v| {
             if (v != .object) continue;

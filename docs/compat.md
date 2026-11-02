@@ -17,6 +17,5 @@ Select, decide, play and result skins load in all three formats. Tested with lr2
 
 Not implemented, so skins using them look incomplete:
 
-- LR2 bitmap fonts.
-- Runtime images with `gr` ≥ 100.
+- LR2 fonts packed in encrypted `.dxa` archives (unpacked `.lr2font` works, as in beatoraja).
 - Pop-up and rarely used beatoraja Lua API: stubs return defaults.
