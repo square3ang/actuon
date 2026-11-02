@@ -51,6 +51,8 @@ if [ -f /opt/actuon/server/compose.yml ]; then
 	if [ ! -e /var/lib/actuon/ir.db ]; then
 		cp -a "$(podman volume inspect server_data --format '{{.Mountpoint}}')/." /var/lib/actuon/
 		chown -R actuon:actuon /var/lib/actuon
+		# cp -a also copied the volume's mode, which lets anyone read the password hashes.
+		chmod 0700 /var/lib/actuon
 		echo "moved the data out of the Podman volume server_data"
 	fi
 	mv /opt/actuon/server/compose.yml /opt/actuon/server/compose.yml.old
@@ -68,6 +70,6 @@ for url in http://127.0.0.1:8730/health http://127.0.0.1:8731/; do
 	done
 done
 systemctl start actuon-backup || { journalctl -u actuon-backup -n 20 --no-pager >&2; exit 1; }
-journalctl -u actuon-backup -n 1 -o cat --no-pager
+journalctl -u actuon-backup -n 20 -o cat --no-pager | grep -E 'backed up|nothing to back up' | tail -n 1
 REMOTE
 echo "deployed to $target"
