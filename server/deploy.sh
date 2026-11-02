@@ -34,7 +34,14 @@ ssh_shared "$target" 'umask 077; cat >/etc/actuon/backup.env' <server/.env
 
 ssh_shared "$target" 'sh -s' <<'REMOTE'
 set -eu
-dnf -y -q install epel-release && dnf -y -q install rclone sqlite curl
+dnf -y -q install sqlite curl
+# EPEL has no rclone for Rocky 8: rclone's own package, checked against the sum it published.
+if [ "$(rclone version 2>/dev/null | head -n 1)" != "rclone v1.75.2" ]; then
+	curl -fsSLo /tmp/rclone.rpm https://downloads.rclone.org/v1.75.2/rclone-v1.75.2-linux-amd64.rpm
+	echo "d5174054cf94075c32faf25961687622b8d366b788972ea9fbcedba59013e320  /tmp/rclone.rpm" | sha256sum -c -
+	dnf -y -q install /tmp/rclone.rpm
+	rm /tmp/rclone.rpm
+fi
 id actuon >/dev/null 2>&1 || useradd --system --home-dir /var/lib/actuon --shell /sbin/nologin actuon
 install -d -m 0700 -o actuon -g actuon /var/lib/actuon
 # Once: the old deploy ran Podman containers, which hold the ports, and kept the data in their volume. The volume and
