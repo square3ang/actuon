@@ -8,6 +8,7 @@ const tr = i18n.tr;
 const app_mod = @import("app.zig");
 const result = @import("result.zig");
 const play = @import("play.zig");
+const practice = @import("practice.zig");
 const course_mod = @import("course.zig");
 const table = @import("../table/table.zig");
 const ir = @import("../net/ir.zig");
@@ -115,7 +116,7 @@ pub const State = struct {
 };
 
 const random_names = [_][]const u8{ "OFF", "MIRROR", "RANDOM", "R-RANDOM", "S-RANDOM" };
-const gauge_names = [_][]const u8{ "ASSIST EASY", "EASY", "NORMAL", "HARD", "EX HARD", "HAZARD", "GAS" };
+pub const gauge_names = [_][]const u8{ "ASSIST EASY", "EASY", "NORMAL", "HARD", "EX HARD", "HAZARD", "GAS" };
 const hs_names = [_][]const u8{ "START", "MAX", "MAIN", "OFF" };
 // In beatoraja's order: its skins show the sort by this index.
 const sort_count = 8;
@@ -1429,7 +1430,7 @@ fn tableName(a: *App, song: db_mod.Song) usize {
 
 const max_replays = db_mod.max_replays;
 
-fn selectedSong(s: *const State) ?db_mod.Song {
+pub fn selectedSong(s: *const State) ?db_mod.Song {
     return if (s.cursor < s.rows.len) s.rows[s.cursor].song else null;
 }
 
@@ -1490,33 +1491,50 @@ fn playReplay(a: *App, song: db_mod.Song) void {
         s.status = tr("Could not read this replay");
         return;
     };
-    startSongWith(a, song, r);
+    startSongWith(a, song, r, null);
 }
 
 fn startSong(a: *App, song: db_mod.Song) void {
-    startSongWith(a, song, null);
+    startSongWith(a, song, null, null);
 }
 
-fn startSongWith(a: *App, song: db_mod.Song, replay: ?core.replay.Replay) void {
-    const seed = c.SDL_GetTicksNS();
+/// A round of a versus room: everyone's seed is the same, only LN mode ranks, and no decide screen holds up the clock.
+pub fn startVersus(a: *App, song: db_mod.Song, seed: u64) void {
+    var params = songParams(a, song) orelse return;
+    params.seed = seed;
+    params.autoplay = false;
+    params.ln_mode = .ln;
+    a.startPlay(params, true);
+}
+
+pub fn startPractice(a: *App, section: session_mod.Practice) void {
+    const song = selectedSong(&a.sel) orelse return;
+    startSongWith(a, song, null, section);
+}
+
+fn songParams(a: *App, song: db_mod.Song) ?session_mod.Params {
     // The loader thread may still be reading the buffer, and a path this long can't be opened anyway.
-    if (a.load_thread != null or song.path.len > a.play_path_buf.len) return;
+    if (a.load_thread != null or song.path.len > a.play_path_buf.len) return null;
     @memcpy(a.play_path_buf[0..song.path.len], song.path);
     const level_n = @min(song.table_level.len, a.play_level_buf.len);
     @memcpy(a.play_level_buf[0..level_n], song.table_level[0..level_n]);
     const table_n = tableName(a, song);
-    var params: session_mod.Params = .{
+    return .{
         .path = a.play_path_buf[0..song.path.len],
         .table_level = a.play_level_buf[0..level_n],
         .table_name = a.play_table_buf[0..table_n],
         .gauge = config.gaugeType(a.cfg.gauge),
         .gas = a.cfg.gauge == config.gas,
         .random = @fromBackingInt(@intCast(@min(a.cfg.random, 4))),
-        .seed = seed,
+        .seed = c.SDL_GetTicksNS(),
         .autoplay = a.sel.autoplay,
         .judge_offset_us = @as(i64, a.cfg.judge_offset_ms) * 1000,
         .ln_mode = std.enums.fromInt(core.options.LnMode, a.cfg.ln_mode) orelse .ln,
     };
+}
+
+fn startSongWith(a: *App, song: db_mod.Song, replay: ?core.replay.Replay, section: ?session_mod.Practice) void {
+    var params = songParams(a, song) orelse return;
     if (replay) |r| {
         params.replay = r;
         params.gauge = r.gauge;
@@ -1526,6 +1544,11 @@ fn startSongWith(a: *App, song: db_mod.Song, replay: ?core.replay.Replay) void {
         params.ln_mode = r.ln_mode;
         params.autoplay = false;
         params.judge_offset_us = 0;
+    }
+    if (section) |sec| {
+        params.practice = sec;
+        params.autoplay = false;
+        return a.startPlay(params, false);
     }
     a.decidePlay(params, true);
 }
@@ -1726,8 +1749,7 @@ fn padBrowse(a: *App, at: usize) void {
     const on_song = s.cursor < s.rows.len and s.rows[s.cursor].song != null;
     switch (at) {
         0, 2, 4, 6 => {
-            // On a chart beatoraja's key 3 is practice, which Actuon lacks.
-            if (on_song and at == 2) return;
+            if (on_song and at == 2) return practice.open(a, s.rows[s.cursor].song.?);
             if (on_song and at == 6) return playReplay(a, s.rows[s.cursor].song.?);
             const was_auto = s.autoplay;
             if (on_song and at == 4) s.autoplay = true;
@@ -1901,6 +1923,7 @@ fn tickPadScroll(a: *App, now_ms: u64) void {
 
 pub fn key(a: *App, sc: u32) void {
     const s = &a.sel;
+    if (a.practice.open) return practice.key(a, sc);
     if (s.query != null) return keyQuery(a, sc);
     if (s.searching and keySearching(a, sc)) return;
     keySound(a, sc);
@@ -1947,6 +1970,7 @@ pub fn key(a: *App, sc: u32) void {
         },
         c.SDL_SCANCODE_4 => nextReplay(a),
         c.SDL_SCANCODE_F => if (selectedSong(s)) |song| toggleFavorite(a, song),
+        c.SDL_SCANCODE_P => if (selectedSong(s)) |song| practice.open(a, song),
         c.SDL_SCANCODE_9 => {
             a.cfg.pace_target = (@min(a.cfg.pace_target, play.pace_targets.len - 1) + 1) % @as(u8, play.pace_targets.len);
             s.status = play.paceTargetName(a.cfg.pace_target);

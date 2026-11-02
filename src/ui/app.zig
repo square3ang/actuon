@@ -15,6 +15,7 @@ const skin_sound = @import("../audio/skin_sound.zig");
 const preview_mod = @import("../audio/preview.zig");
 const db_mod = @import("../db/db.zig");
 const play = @import("play.zig");
+const practice = @import("practice.zig");
 const select = @import("select.zig");
 const result = @import("result.zig");
 const settings = @import("settings.zig");
@@ -102,6 +103,7 @@ pub const App = struct {
     joy_axis: [32]i16 = @splat(0),
     joy_axis_at: [32]u64 = @splat(0),
     /// Headless capture for tests: save a frame after N ms, then quit.
+    practice: practice.State = .{},
     shot_wanted: bool = false,
     /// A short message over any screen.
     notice: []const u8 = "",
@@ -710,6 +712,10 @@ pub const App = struct {
         else
             a.view.draw(&a.g, s, &a.cfg);
         if (a.pause.open) return pause.tick(a);
+        if (s.params.practice) |p| {
+            var buf: [48]u8 = undefined;
+            a.g.textRight(i18n.bufPrint(&buf, "PRACTICE {d}%", .{p.freq}) catch "", a.g.w - 22 * a.g.h / 720, 52 * a.g.h / 720, a.g.scaled(16), gfx.amber);
+        }
         if (s.was_paused and a.record) a.g.textRight(tr("NOT RECORDED: PAUSED"), a.g.w - 22 * a.g.h / 720, 52 * a.g.h / 720, a.g.scaled(16), gfx.amber);
         if (s.canSkip(snap)) {
             var key_buf: [32]u8 = undefined;
@@ -741,8 +747,9 @@ pub const App = struct {
         s.stop();
         input.setPollRate(0);
         if (!natural or snap.failed) a.sfxOr(a.sfx_play_stop, .back);
+        const practised = s.params.practice != null;
         const continues = a.course != null and course_mod.stageDone(a, s, snap, natural);
-        if (!continues) {
+        if (!continues and !practised) {
             result.capture(a, s, snap, natural);
             _ = a.kept.reset(.retain_capacity);
             a.skin_state.keepChart(a.kept.allocator());
@@ -758,6 +765,11 @@ pub const App = struct {
         }
         if (continues) {
             course_mod.next(a);
+            return;
+        }
+        if (practised) {
+            a.practice.open = true;
+            a.scene = .select;
             return;
         }
         if (a.course != null) course_mod.finish(a);
@@ -1018,6 +1030,7 @@ pub const App = struct {
                 .select => {
                     if (a.last_scene != .select) a.select_shown_at = c.SDL_GetTicks();
                     select.draw(a);
+                    practice.draw(a);
                     if (a.select_skin == null) {
                         const alpha = fadeInAlpha(c.SDL_GetTicks() - a.select_shown_at);
                         if (alpha > 0) a.g.rect(0, 0, a.g.w, a.g.h, .{ .r = 0, .g = 0, .b = 0, .a = alpha });

@@ -161,6 +161,7 @@ test {
     _ = @import("ui/pause.zig");
     _ = @import("ui/skinconf.zig");
     _ = @import("ui/result.zig");
+    _ = @import("ui/practice.zig");
     _ = @import("skin/bitfont.zig");
     _ = @import("ui/select.zig");
     _ = @import("ui/settings.zig");
