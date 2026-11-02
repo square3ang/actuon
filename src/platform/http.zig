@@ -297,3 +297,204 @@ test "url join" {
         try std.testing.expectEqualStrings(k[2], r);
     }
 }
+
+/// A WebSocket on the client's connection, TLS included. Messages are text.
+// shortcut: reads block, so a network that drops silently holds the reader until TCP gives up; add a read timeout if players see frozen rooms.
+pub const WebSocket = struct {
+    req: std.http.Client.Request,
+
+    /// `ws` must stay where it is until `close`: the request holds the connection.
+    pub fn open(ws: *WebSocket, c: *std.http.Client, url: []const u8, auth: []const std.http.Header) !void {
+        var raw: [16]u8 = undefined;
+        fs.io.random(&raw);
+        var key: [24]u8 = undefined;
+        _ = std.base64.standard.Encoder.encode(&key, &raw);
+        var headers: [4]std.http.Header = undefined;
+        if (auth.len > 1) return error.TooManyHeaders;
+        headers[0] = .{ .name = "upgrade", .value = "websocket" };
+        headers[1] = .{ .name = "sec-websocket-version", .value = "13" };
+        headers[2] = .{ .name = "sec-websocket-key", .value = &key };
+        @memcpy(headers[3..][0..auth.len], auth);
+        ws.req = try c.request(.GET, try std.Uri.parse(url), .{
+            .headers = .{ .connection = .{ .override = "Upgrade" }, .accept_encoding = .omit },
+            .extra_headers = headers[0 .. 3 + auth.len],
+            .redirect_behavior = .unhandled,
+        });
+        errdefer ws.req.deinit();
+        try ws.req.sendBodiless();
+        const res = try ws.req.receiveHead(&.{});
+        if (res.head.status != .switching_protocols) return error.Refused;
+        const want = acceptKey(&key);
+        var it = res.head.iterateHeaders();
+        while (it.next()) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "sec-websocket-accept") and std.mem.eql(u8, h.value, &want)) return;
+        }
+        return error.Refused;
+    }
+
+    pub fn send(ws: *WebSocket, text: []const u8) !void {
+        const conn = ws.req.connection.?;
+        var mask: [4]u8 = undefined;
+        fs.io.random(&mask);
+        try writeFrame(conn.writer(), 0x1, text, mask);
+        try conn.flush();
+    }
+
+    /// The next text or binary message, in `buf`. Pings are answered on the way.
+    pub fn receive(ws: *WebSocket, buf: []u8) ![]u8 {
+        const conn = ws.req.connection.?;
+        while (true) {
+            const f = try readFrame(conn.reader(), buf);
+            switch (f.opcode) {
+                0x1, 0x2 => return f.payload,
+                0x9 => {
+                    var mask: [4]u8 = undefined;
+                    fs.io.random(&mask);
+                    try writeFrame(conn.writer(), 0xA, f.payload, mask);
+                    try conn.flush();
+                },
+                0xA => {},
+                0x8 => return error.Closed,
+                else => return error.BadFrame,
+            }
+        }
+    }
+
+    pub fn close(ws: *WebSocket) void {
+        const conn = ws.req.connection.?;
+        writeFrame(conn.writer(), 0x8, "", @splat(0)) catch {};
+        conn.flush() catch {};
+        conn.closing = true;
+        ws.req.deinit();
+    }
+};
+
+fn acceptKey(key: []const u8) [28]u8 {
+    var sha = std.crypto.hash.Sha1.init(.{});
+    sha.update(key);
+    sha.update("258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    var out: [28]u8 = undefined;
+    _ = std.base64.standard.Encoder.encode(&out, &sha.finalResult());
+    return out;
+}
+
+/// A client's frame is always masked, and never split.
+fn writeFrame(w: *std.Io.Writer, opcode: u4, payload: []const u8, mask: [4]u8) !void {
+    try w.writeByte(0x80 | @as(u8, opcode));
+    if (payload.len < 126) {
+        try w.writeByte(0x80 | @as(u8, @intCast(payload.len)));
+    } else if (payload.len <= 0xffff) {
+        try w.writeByte(0x80 | 126);
+        try w.writeInt(u16, @intCast(payload.len), .big);
+    } else return error.TooLarge;
+    try w.writeAll(&mask);
+    for (payload, 0..) |b, i| try w.writeByte(b ^ mask[i % 4]);
+}
+
+const Frame = struct { opcode: u4, payload: []u8 };
+
+/// The server is untrusted: a frame larger than `buf`, split, or masked is refused.
+fn readFrame(r: *std.Io.Reader, buf: []u8) !Frame {
+    var head: [2]u8 = undefined;
+    try r.readSliceAll(&head);
+    if (head[0] & 0x80 == 0) return error.BadFrame;
+    if (head[1] & 0x80 != 0) return error.BadFrame;
+    var len: u64 = head[1] & 0x7f;
+    if (len == 126) {
+        var ext: [2]u8 = undefined;
+        try r.readSliceAll(&ext);
+        len = std.mem.readInt(u16, &ext, .big);
+    } else if (len == 127) {
+        var ext: [8]u8 = undefined;
+        try r.readSliceAll(&ext);
+        len = std.mem.readInt(u64, &ext, .big);
+    }
+    if (len > buf.len) return error.TooLarge;
+    const payload = buf[0..@intCast(len)];
+    try r.readSliceAll(payload);
+    return .{ .opcode = @truncate(head[0]), .payload = payload };
+}
+
+test "the WebSocket accept key matches RFC 6455's example" {
+    try std.testing.expectEqualStrings("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", &acceptKey("dGhlIHNhbXBsZSBub25jZQ=="));
+}
+
+test "a client frame is masked, and a server frame too large, split or masked is refused" {
+    var out: [300]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out);
+    try writeFrame(&w, 0x1, "Hello", .{ 0x37, 0xfa, 0x21, 0x3d });
+    // RFC 6455, section 5.7.
+    try std.testing.expectEqualSlices(u8, &.{ 0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58 }, w.buffered());
+    var buf: [200]u8 = undefined;
+    var long: [4 + 130]u8 = @splat('a');
+    long[0..4].* = .{ 0x82, 126, 0, 130 };
+    var r: std.Io.Reader = .fixed(&long);
+    const f = try readFrame(&r, &buf);
+    try std.testing.expectEqual(@as(u4, 2), f.opcode);
+    try std.testing.expectEqual(@as(usize, 130), f.payload.len);
+    r = .fixed(&long);
+    try std.testing.expectError(error.TooLarge, readFrame(&r, buf[0..100]));
+    r = .fixed(&.{ 0x01, 0x00 });
+    try std.testing.expectError(error.BadFrame, readFrame(&r, &buf));
+    r = .fixed(&.{ 0x81, 0x80, 0, 0, 0, 0 });
+    try std.testing.expectError(error.BadFrame, readFrame(&r, &buf));
+}
+
+/// Opens one WebSocket, then sends a ping and echoes the client's message, and reports whether the pong came back.
+const WebSocketPeer = struct {
+    fn run(s: *std.Io.net.Server, ponged: *bool) void {
+        const stream = s.accept(fs.io) catch return;
+        defer stream.close(fs.io);
+        var in_buf: [1024]u8 = undefined;
+        var reader = stream.reader(fs.io, &in_buf);
+        var key_buf: [24]u8 = undefined;
+        while (true) {
+            const line = reader.interface.takeDelimiterInclusive('\n') catch return;
+            if (line.len == 2) break;
+            if (std.ascii.startsWithIgnoreCase(line, "sec-websocket-key: ") and line.len == 19 + 24 + 2) key_buf = line[19..][0..24].*;
+        }
+        var out_buf: [256]u8 = undefined;
+        var writer = stream.writer(fs.io, &out_buf);
+        const w = &writer.interface;
+        w.print("HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: {s}\r\n\r\n", .{&acceptKey(&key_buf)}) catch return;
+        w.flush() catch return;
+        var text: [8]u8 = undefined;
+        const n = readMasked(&reader.interface, 0x81, &text) orelse return;
+        w.writeAll(&.{ 0x89, 1, 'p', 0x81, @intCast(n) }) catch return;
+        w.writeAll(text[0..n]) catch return;
+        w.flush() catch return;
+        var pong: [1]u8 = undefined;
+        ponged.* = readMasked(&reader.interface, 0x8A, &pong) == 1 and pong[0] == 'p';
+    }
+
+    fn readMasked(r: *std.Io.Reader, want: u8, out: []u8) ?usize {
+        var head: [6]u8 = undefined;
+        r.readSliceAll(&head) catch return null;
+        const n = head[1] & 0x7f;
+        if (head[0] != want or head[1] & 0x80 == 0 or n > out.len) return null;
+        r.readSliceAll(out[0..n]) catch return null;
+        for (out[0..n], 0..) |*b, i| b.* ^= head[2 + i % 4];
+        return n;
+    }
+};
+
+test "a WebSocket opens over the HTTP client, sends, receives and answers a ping" {
+    const a = std.testing.allocator;
+    const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    var server = try address.listen(fs.io, .{ .reuse_address = true });
+    defer server.deinit(fs.io);
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/play", .{server.socket.address.getPort()});
+    var ponged = false;
+    const thread = try std.Thread.spawn(.{}, WebSocketPeer.run, .{ &server, &ponged });
+    var c = client(a);
+    defer c.deinit();
+    var ws: WebSocket = undefined;
+    try ws.open(&c, url, &.{});
+    try ws.send("hello");
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("hello", try ws.receive(&buf));
+    thread.join();
+    ws.close();
+    try std.testing.expect(ponged);
+}

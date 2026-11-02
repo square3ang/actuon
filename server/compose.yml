@@ -12,10 +12,6 @@ services:
     ports:
       # Plain HTTP: put a TLS proxy in front before opening this to the internet.
       - "127.0.0.1:${IR_PORT:-8730}:8730"
-      # Live versus scores, only used when IR_UDP_PUBLIC is set.
-      - "${IR_UDP_PORT:-8740}:8740/udp"
-    environment:
-      IR_UDP_PUBLIC: ${IR_UDP_PUBLIC:-}
     volumes:
       - data:/data
 

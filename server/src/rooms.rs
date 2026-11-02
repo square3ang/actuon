@@ -2,7 +2,6 @@
 //! the usual replay check. What a player reports during a song is only ever shown, never ranked: the
 //! winner comes from `final_ex`, which only a verified replay sets.
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -23,6 +22,21 @@ pub enum RoomError {
     NotHost,
     TooMany,
     Busy,
+    BadRequest,
+}
+
+impl RoomError {
+    /// As an HTTP status and words, for the client to show.
+    pub fn status(&self) -> (u16, &'static str) {
+        match self {
+            RoomError::NotFound => (404, "no such room"),
+            RoomError::Full => (409, "room is full"),
+            RoomError::NotHost => (403, "only the host can do that"),
+            RoomError::TooMany => (503, "too many rooms"),
+            RoomError::Busy => (409, "a round is about to start"),
+            RoomError::BadRequest => (400, "bad request"),
+        }
+    }
 }
 
 pub struct Player {
@@ -35,8 +49,6 @@ pub struct Player {
     pub done: bool,
     pub final_ex: Option<u32>,
     pub seen: Instant,
-    /// The last accepted live packet.
-    pub live_at: Option<Instant>,
 }
 
 impl Player {
@@ -72,20 +84,6 @@ pub struct Room {
 #[derive(Default)]
 pub struct Rooms {
     rooms: HashMap<String, Room>,
-    /// Makes each player's live key, so a key needs no table and survives a rejoin.
-    secret: [u8; 32],
-    pruned_at: Option<Instant>,
-}
-
-const LIVE_REQUEST: &[u8; 4] = b"AU1Q";
-const LIVE_REPLY: &[u8; 4] = b"AU1R";
-const LIVE_REQUEST_LEN: usize = 47;
-/// A player's own limit, so one key cannot make the server work flat out.
-const LIVE_MIN_GAP: Duration = Duration::from_millis(40);
-const NO_START: u32 = u32::MAX;
-
-fn le_u32(b: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
 }
 
 /// What a client reports each tick. The numbers are clamped, as they end up on other players' screens.
@@ -119,85 +117,10 @@ fn player(user: i64, name: &str, now: Instant) -> Player {
         done: false,
         final_ex: None,
         seen: now,
-        live_at: None,
     }
 }
 
 impl Rooms {
-    pub fn with_secret(secret: [u8; 32]) -> Rooms {
-        Rooms {
-            secret,
-            ..Rooms::default()
-        }
-    }
-
-    pub fn live_key(&self, code: &str, user: i64) -> [u8; 16] {
-        let digest = Sha256::new()
-            .chain_update(self.secret)
-            .chain_update(code)
-            .chain_update(user.to_le_bytes())
-            .finalize();
-        let mut key = [0u8; 16];
-        key.copy_from_slice(&digest[..16]);
-        key
-    }
-
-    /// One live UDP packet. Anything without a player's key gets no answer, so a forged source
-    /// address cannot turn this into a flood at someone else.
-    pub fn live(&mut self, packet: &[u8], now: Instant) -> Option<Vec<u8>> {
-        if packet.len() != LIVE_REQUEST_LEN || &packet[..4] != LIVE_REQUEST {
-            return None;
-        }
-        let code = std::str::from_utf8(&packet[4..10]).ok()?;
-        if !valid_code(code) {
-            return None;
-        }
-        if self.pruned_at.is_none_or(|at| now.duration_since(at) >= Duration::from_secs(1)) {
-            self.prune(now);
-            self.pruned_at = Some(now);
-        }
-        let room = self.rooms.get(code)?;
-        let user = room
-            .players
-            .iter()
-            .map(|p| p.user)
-            .find(|u| self.live_key(code, *u) == packet[10..26])?;
-        let room = self.rooms.get_mut(code)?;
-        let current = room.round;
-        let p = room.players.iter_mut().find(|p| p.user == user)?;
-        if p.live_at.is_some_and(|at| now.duration_since(at) < LIVE_MIN_GAP) {
-            return None;
-        }
-        p.live_at = Some(now);
-        let flags = packet[46];
-        let report = Report {
-            round: le_u32(packet, 30),
-            has_chart: flags & 1 != 0,
-            ex: le_u32(packet, 34),
-            judged: le_u32(packet, 38),
-            gauge: f32::from_bits(le_u32(packet, 42)),
-            done: flags & 2 != 0,
-        };
-        p.apply(&report, current, now);
-        let starts_in = room.starts_at.filter(|at| *at > now).map_or(NO_START, |at| {
-            at.duration_since(now).as_millis().min(NO_START as u128 - 1) as u32
-        });
-        let mut reply = Vec::with_capacity(17 + 17 * room.players.len());
-        reply.extend_from_slice(LIVE_REPLY);
-        reply.extend_from_slice(&packet[26..30]);
-        reply.extend_from_slice(&current.to_le_bytes());
-        reply.extend_from_slice(&starts_in.to_le_bytes());
-        reply.push(room.players.len() as u8);
-        for p in &room.players {
-            reply.extend_from_slice(&(p.user as u32).to_le_bytes());
-            reply.extend_from_slice(&p.ex.to_le_bytes());
-            reply.extend_from_slice(&p.judged.to_le_bytes());
-            reply.extend_from_slice(&p.gauge.to_bits().to_le_bytes());
-            reply.push(p.done as u8);
-        }
-        Some(reply)
-    }
-
     /// Silent players leave, and the host's seat passes on to whoever is left.
     fn prune(&mut self, now: Instant) {
         self.rooms.retain(|_, room| {
@@ -225,7 +148,7 @@ impl Rooms {
     ) -> Result<(), RoomError> {
         self.prune(now);
         // One room at a time: leaving the old one keeps a player from filling the table.
-        self.remove_player(user);
+        self.leave(user);
         if self.rooms.len() >= MAX_ROOMS || self.rooms.contains_key(&code) {
             return Err(RoomError::TooMany);
         }
@@ -261,14 +184,15 @@ impl Rooms {
             if room.players.len() >= MAX_PLAYERS {
                 return Err(RoomError::Full);
             }
-            self.remove_player(user);
+            self.leave(user);
             let room = self.rooms.get_mut(code).ok_or(RoomError::NotFound)?;
             room.players.push(player(user, name, now));
         }
         Ok(())
     }
 
-    fn remove_player(&mut self, user: i64) {
+    /// Takes the player out of whatever room they are in, and hands the host's seat on.
+    pub fn leave(&mut self, user: i64) {
         self.rooms.retain(|_, room| {
             room.players.retain(|p| p.user != user);
             if room.host == user {
@@ -278,13 +202,6 @@ impl Rooms {
             }
             !room.players.is_empty()
         });
-    }
-
-    /// Only from the named room: a late leave must not take a player out of the room they moved on to.
-    pub fn leave(&mut self, code: &str, user: i64) {
-        if self.rooms.get(code).is_some_and(|r| r.players.iter().any(|p| p.user == user)) {
-            self.remove_player(user);
-        }
     }
 
     fn room_of_host(&mut self, code: &str, user: i64) -> Result<&mut Room, RoomError> {
@@ -358,7 +275,13 @@ impl Rooms {
             .find(|p| p.user == user)
             .ok_or(RoomError::NotFound)?;
         p.apply(r, current, now);
-        Ok(view(room, user, now))
+        Ok(view(code, room, user, now))
+    }
+
+    /// The room as one player sees it.
+    pub fn view_of(&self, code: &str, user: i64, now: Instant) -> Result<Value, RoomError> {
+        let room = self.rooms.get(code).ok_or(RoomError::NotFound)?;
+        Ok(view(code, room, user, now))
     }
 
     /// Only the replay check calls this, with the score it computed. The seed ties a replay to this
@@ -370,7 +293,11 @@ impl Rooms {
         if room.round == 0 || room.round_sha256 != sha256 || room.seed != seed {
             return;
         }
-        if let Some(p) = room.players.iter_mut().find(|p| p.user == user && p.final_ex.is_none()) {
+        if let Some(p) = room
+            .players
+            .iter_mut()
+            .find(|p| p.user == user && p.final_ex.is_none())
+        {
             p.final_ex = Some(ex);
             p.ex = ex;
             p.done = true;
@@ -378,7 +305,7 @@ impl Rooms {
     }
 }
 
-fn view(room: &Room, me: i64, now: Instant) -> Value {
+fn view(code: &str, room: &Room, me: i64, now: Instant) -> Value {
     let players: Vec<Value> = room
         .players
         .iter()
@@ -391,7 +318,7 @@ fn view(room: &Room, me: i64, now: Instant) -> Value {
         .starts_at
         .filter(|at| *at > now)
         .map(|at| at.duration_since(now).as_millis() as u64);
-    json!({"sha256": room.sha256, "title": room.title, "round": room.round, "seed": room.seed.to_string(), "starts_in_ms": starts_in, "host": room.host == me, "players": players})
+    json!({"type": "room", "code": code, "sha256": room.sha256, "title": room.title, "round": room.round, "seed": room.seed.to_string(), "starts_in_ms": starts_in, "host": room.host == me, "players": players})
 }
 
 #[cfg(test)]
@@ -409,43 +336,6 @@ mod tests {
             gauge: 50.0,
             done: false,
         }
-    }
-
-    fn live_packet(code: &str, key: &[u8; 16], ex: u32) -> Vec<u8> {
-        let mut p = b"AU1Q".to_vec();
-        p.extend_from_slice(code.as_bytes());
-        p.extend_from_slice(key);
-        p.extend_from_slice(&7u32.to_le_bytes());
-        p.extend_from_slice(&1u32.to_le_bytes());
-        p.extend_from_slice(&ex.to_le_bytes());
-        p.extend_from_slice(&ex.to_le_bytes());
-        p.extend_from_slice(&f32::NAN.to_bits().to_le_bytes());
-        p.push(1);
-        p
-    }
-
-    #[test]
-    fn a_live_packet_needs_a_player_key_and_is_rate_limited() {
-        let now = Instant::now();
-        let mut rooms = Rooms::with_secret([9; 32]);
-        room_with_two(&mut rooms, now);
-        rooms.start("AAAAAA", 1, 8, now).unwrap();
-        let key = rooms.live_key("AAAAAA", 2);
-        assert_ne!(key, rooms.live_key("AAAAAA", 1));
-        assert!(rooms.live(&live_packet("AAAAAA", &[0; 16], 5), now).is_none());
-        assert!(rooms.live(&live_packet("ZZZZZZ", &key, 5), now).is_none());
-        assert!(rooms.live(&[0; 47], now).is_none());
-        assert!(rooms.live(&live_packet("AAAAAA", &key, 5)[..46], now).is_none());
-        let reply = rooms.live(&live_packet("AAAAAA", &key, 1 << 30), now).unwrap();
-        assert_eq!(&reply[..4], b"AU1R");
-        assert_eq!(reply[4], 7, "the sequence number comes back");
-        assert_eq!(reply[16], 2);
-        let p = &rooms.rooms["AAAAAA"].players[1];
-        assert_eq!((p.ex, p.gauge), (1 << 24, 0.0), "numbers are clamped");
-        assert_eq!(p.final_ex, None, "and decide nothing");
-        assert!(rooms.live(&live_packet("AAAAAA", &key, 5), now).is_none());
-        let later = now + LIVE_MIN_GAP;
-        assert!(rooms.live(&live_packet("AAAAAA", &key, 5), later).is_some());
     }
 
     fn room_with_two(rooms: &mut Rooms, now: Instant) {
@@ -470,21 +360,22 @@ mod tests {
         room_with_two(&mut rooms, now);
         assert_eq!(rooms.start("AAAAAA", 2, 7, now), Err(RoomError::NotHost));
         rooms.start("AAAAAA", 1, 7, now).unwrap();
-        let v = rooms
-            .report("AAAAAA", 2, &report(10), now)
-            .ok()
-            .unwrap();
+        let v = rooms.report("AAAAAA", 2, &report(10), now).ok().unwrap();
         assert_eq!(v["seed"], "7");
         assert_eq!(v["starts_in_ms"], START_DELAY.as_millis() as u64);
         assert_eq!(v["players"][1]["ex"], 10);
-        assert_eq!(rooms.start("AAAAAA", 1, 8, now), Err(RoomError::Busy), "players are still loading");
-        assert_eq!(rooms.set_chart("AAAAAA", 1, "b", "t", now), Err(RoomError::Busy));
+        assert_eq!(
+            rooms.start("AAAAAA", 1, 8, now),
+            Err(RoomError::Busy),
+            "players are still loading"
+        );
+        assert_eq!(
+            rooms.set_chart("AAAAAA", 1, "b", "t", now),
+            Err(RoomError::Busy)
+        );
         let later = now + START_DELAY;
         rooms.start("AAAAAA", 1, 8, later).unwrap();
-        let v = rooms
-            .report("AAAAAA", 2, &report(10), later)
-            .ok()
-            .unwrap();
+        let v = rooms.report("AAAAAA", 2, &report(10), later).ok().unwrap();
         // Round 1's report no longer counts in round 2.
         assert_eq!(v["players"][1]["ex"], 0);
     }
@@ -495,27 +386,21 @@ mod tests {
         let mut rooms = Rooms::default();
         room_with_two(&mut rooms, now);
         rooms.start("AAAAAA", 1, 1, now).unwrap();
-        let v = rooms
-            .report("AAAAAA", 2, &report(9999), now)
-            .ok()
-            .unwrap();
+        let v = rooms.report("AAAAAA", 2, &report(9999), now).ok().unwrap();
         assert!(v["players"][1]["final_ex"].is_null());
         rooms.record_final("AAAAAA", 2, "other", 1, 5);
         rooms.record_final("AAAAAA", 2, SHA, 99, 5);
-        let v = rooms
-            .report("AAAAAA", 2, &report(9999), now)
-            .ok()
-            .unwrap();
+        let v = rooms.report("AAAAAA", 2, &report(9999), now).ok().unwrap();
         assert!(v["players"][1]["final_ex"].is_null());
         let later = now + START_DELAY;
         rooms.set_chart("AAAAAA", 1, "b", "t", later).unwrap();
         rooms.record_final("AAAAAA", 2, SHA, 1, 5);
         rooms.record_final("AAAAAA", 2, SHA, 1, 9);
-        let v = rooms
-            .report("AAAAAA", 1, &report(1), later)
-            .ok()
-            .unwrap();
-        assert_eq!(v["players"][1]["final_ex"], 5, "the first check of the round counts, whatever the chart is now");
+        let v = rooms.report("AAAAAA", 1, &report(1), later).ok().unwrap();
+        assert_eq!(
+            v["players"][1]["final_ex"], 5,
+            "the first check of the round counts, whatever the chart is now"
+        );
         assert!(v["starts_in_ms"].is_null(), "a past start is not announced");
     }
 
@@ -527,17 +412,22 @@ mod tests {
         for user in 3..=MAX_PLAYERS as i64 {
             rooms.join("AAAAAA", user, "p", now).unwrap();
         }
-        assert_eq!(
-            rooms.join("AAAAAA", 99, "p", now),
-            Err(RoomError::Full)
-        );
+        assert_eq!(rooms.join("AAAAAA", 99, "p", now), Err(RoomError::Full));
         assert_eq!(rooms.join("BBBBBB", 99, "p", now), Err(RoomError::NotFound));
         let later = now + PLAYER_TIMEOUT - Duration::from_secs(1);
         for user in 2..=MAX_PLAYERS as i64 {
-            rooms.report("AAAAAA", user, &report(0), later).ok().unwrap();
+            rooms
+                .report("AAAAAA", user, &report(0), later)
+                .ok()
+                .unwrap();
         }
         let v = rooms
-            .report("AAAAAA", 2, &report(0), now + PLAYER_TIMEOUT + Duration::from_secs(2))
+            .report(
+                "AAAAAA",
+                2,
+                &report(0),
+                now + PLAYER_TIMEOUT + Duration::from_secs(2),
+            )
             .ok()
             .unwrap();
         assert_eq!(v["host"], true);
@@ -554,10 +444,11 @@ mod tests {
         rooms
             .create("BBBBBB".into(), 1, "one", SHA, "t", now)
             .unwrap();
-        assert_eq!(rooms.join("AAAAAA", 2, "two", now), Err(RoomError::NotFound));
-        rooms.leave("AAAAAA", 1);
-        assert!(rooms.rooms.contains_key("BBBBBB"), "a late leave from the old room stays there");
-        rooms.leave("BBBBBB", 1);
+        assert_eq!(
+            rooms.join("AAAAAA", 2, "two", now),
+            Err(RoomError::NotFound)
+        );
+        rooms.leave(1);
         assert!(!rooms.rooms.contains_key("BBBBBB"));
     }
 }

@@ -96,29 +96,33 @@ Replays played in CN or HCN mode on a chart that leaves its LN type open are ref
 
 Players on one server race the same chart with the same seed. Rooms live in memory, so a restart ends them.
 
-| Request | Does |
+Everything about a room goes over one WebSocket per player: `GET /play` with the usual `Authorization` header, on the
+same port and through the same proxy as the rest of the API. Nothing falls back to plain HTTP. Each message is a JSON text
+with a `type`, and each gets exactly one answer: the room (`"type": "room"`) or `{"type": "error", "status", "error"}`, with
+an HTTP status number to tell the cases apart.
+
+| Message | Does |
 | --- | --- |
-| `POST /rooms` `{sha256,title}` | Creates a room, returns `code` |
-| `POST /rooms/CODE/join`, `/leave` | Enters or leaves. A player is in one room at a time |
-| `POST /rooms/CODE/chart` `{sha256,title}` | Host only: changes the chart |
-| `POST /rooms/CODE/start` | Host only: starts a round after 8 seconds. 409 while one is about to start, as for `/chart` |
-| `POST /rooms/CODE/report` `{round,has_chart,ex,judged,gauge,done}` | Sends this player's live numbers, returns the room |
+| `{type: "create", sha256, title}` | Creates a room; the answer holds its `code` |
+| `{type: "join", code}` | Enters a room. A player is in one room at a time |
+| `{type: "chart", sha256, title}` | Host only: changes the chart |
+| `{type: "start"}` | Host only: starts a round after 8 seconds. 409 while one is about to start, as for `chart` |
+| `{type: "report", round, has_chart, ex, judged, gauge, done}` | This player's live numbers |
 
-The responses to `POST /rooms` and `/join` also hold `key` and `udp`. With `IR_UDP_PUBLIC=host:port` set, the server listens
-on `IR_UDP_BIND` (default `0.0.0.0:8740`) and clients send their live numbers there ten times a second, in little-endian:
+Closing a player's last connection leaves the room, so a client that reconnects keeps its seat while the server still
+holds the dropped connection. A player can have four connections open. The client reports ten times a second; the server answers no faster than once per
+40 ms per player, and at most 1024 players are connected at once. Room list and matchmaking are to come as more types.
 
-| Packet | Layout |
-| --- | --- |
-| Request, 47 bytes | `AU1Q`, code (6), key (16), seq, round, ex, judged, gauge (f32), flags (u8: 1 has chart, 2 done) |
-| Reply | `AU1R`, seq, round, ms until start (`0xFFFFFFFF` for none), count (u8), then per player: id, ex, judged, gauge (f32), done (u8) |
+nginx drops the upgrade unless told to pass it on, which turns every room request into a 400:
 
-A packet without a player's key gets no reply, so a forged source address cannot aim replies at someone else. With no UDP
-reply for 2 seconds, as on a network that blocks it, the client reports over HTTP four times a second instead. Without
-`IR_UDP_PUBLIC`, every client does. HTTP still carries names, the chart, the seed and final scores.
-
-UDP cannot pass through Cloudflare's proxy, and the address in `IR_UDP_PUBLIC` is given to every player in a room. Pointing
-it at the origin reveals an address the proxy otherwise hides, so use a separate host or address if that matters. Open the
-port too: `firewall-cmd --permanent --add-port=8740/udp && firewall-cmd --reload`.
+```nginx
+location = /play {
+    proxy_pass http://127.0.0.1:8730;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+}
+```
 
 A replay counts for a round only with that round's chart and seed, and only the first one does.
 

@@ -24,8 +24,7 @@ sha, notes = out.stderr.split()[0], int(out.stderr.split()[1])
 replay = open(replay_path, "rb").read()
 
 def start_server():
-    env = {**os.environ, "IR_UDP_PUBLIC": "127.0.0.1:18732", "IR_UDP_BIND": "127.0.0.1:18732"}
-    started = subprocess.Popen([server, "127.0.0.1:18731", os.path.join(work, "ir")], stderr=subprocess.DEVNULL, env=env)
+    started = subprocess.Popen([server, "127.0.0.1:18731", os.path.join(work, "ir")], stderr=subprocess.DEVNULL)
     for _ in range(100):
         try:
             if call("GET", "/health")[0] == 200:
@@ -169,44 +168,75 @@ try:
 
     host = call("POST", "/register", {"name": "roomhost", "password": "correct horse"})[1]["token"]
     guest = call("POST", "/register", {"name": "roomguest", "password": "correct horse"})[1]["token"]
-    assert call("POST", "/rooms", {"sha256": "../x", "title": "t"}, host)[0] == 400, "a room's chart hash is checked"
-    room = call("POST", "/rooms", {"sha256": sha, "title": "t"}, host)[1]["code"]
-    assert call("POST", "/rooms/ZZZZZZ/join", None, guest)[0] == 404
-    assert call("POST", "/rooms/a%2Fb/join", None, guest)[0] == 404, "a bad code is refused"
-    assert call("POST", f"/rooms/{room}/join", None)[0] == 401, "a room needs a player"
-    joined = call("POST", f"/rooms/{room}/join", None, guest)
-    assert joined[0] == 200 and joined[1]["udp"] == "127.0.0.1:18732"
-    assert call("POST", f"/rooms/{room}/start", None, guest)[0] == 403, "only the host starts"
-    assert call("POST", f"/rooms/{room}/start", None, host)[0] == 200
-    assert call("POST", f"/rooms/{room}/start", None, host)[0] == 409, "players are still loading"
-    claim = {"round": 1, "has_chart": True, "ex": 999999, "judged": 1, "gauge": 100, "done": True}
-    seen = call("POST", f"/rooms/{room}/report", claim, guest)[1]
-    assert 0 < seen["starts_in_ms"] and seen["seed"] == call("POST", f"/rooms/{room}/report", claim, host)[1]["seed"]
+    import base64
+    class Play:
+        def __init__(self, token, key="dGhlIHNhbXBsZSBub25jZQ=="):
+            self.sock = socket.create_connection(("127.0.0.1", 18731), timeout=10)
+            auth = f"Authorization: Bearer {token}\r\n" if token else ""
+            self.sock.sendall(f"GET /play HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n{auth}\r\n".encode())
+            head = b""
+            while b"\r\n\r\n" not in head:
+                head += self.sock.recv(1)
+            self.status = int(head.split()[1])
+            want = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+            assert self.status != 101 or want.encode() in head, head
+        def recv_exact(self, n):
+            data = b""
+            while len(data) < n:
+                data += self.sock.recv(n - len(data))
+            return data
+        def ask(self, message):
+            payload = json.dumps(message).encode()
+            mask = os.urandom(4)
+            size = bytes([0x80 | len(payload)]) if len(payload) < 126 else bytes([0x80 | 126]) + struct.pack(">H", len(payload))
+            self.sock.sendall(bytes([0x81]) + size + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+            head = self.recv_exact(2)
+            n = head[1] & 0x7F
+            if n == 126:
+                n = struct.unpack(">H", self.recv_exact(2))[0]
+            return json.loads(self.recv_exact(n))
+        def close(self):
+            self.sock.close()
+
+    assert Play(None).status == 401, "a room needs a player"
+    assert call("GET", "/play", None, host)[0] == 400, "plain HTTP gets no room"
+    host_play, guest_play = Play(host), Play(guest)
+    assert host_play.status == 101 and guest_play.status == 101
+    assert host_play.ask({"type": "create", "sha256": "../x", "title": "t"})["status"] == 400, "a room's chart hash is checked"
+    room = host_play.ask({"type": "create", "sha256": sha, "title": "t"})["code"]
+    assert guest_play.ask({"type": "join", "code": "ZZZZZZ"})["status"] == 404
+    assert guest_play.ask({"type": "join", "code": "a/b"})["status"] == 404, "a bad code is refused"
+    assert len(guest_play.ask({"type": "join", "code": room})["players"]) == 2
+    assert guest_play.ask({"type": "start"})["status"] == 403, "only the host starts"
+    assert host_play.ask({"type": "start"})["round"] == 1
+    assert host_play.ask({"type": "start"})["status"] == 409, "players are still loading"
+    claim = {"type": "report", "round": 1, "has_chart": True, "ex": 1234, "judged": 5, "gauge": 50, "done": False}
+    seen = guest_play.ask(claim)
+    assert 0 < seen["starts_in_ms"] <= 8000 and seen["seed"] == host_play.ask({**claim, "ex": 0})["seed"]
     assert all(p["final_ex"] is None for p in seen["players"]), "a reported score decides nothing"
-    live = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    live.settimeout(1)
-    live.connect(("127.0.0.1", 18732))
-    def live_packet(key):
-        return b"AU1Q" + room.encode() + key + struct.pack("<IIIIfB", 1, 1, 1234, 5, 50.0, 1)
-    live.send(live_packet(b"\0" * 16))
-    try:
-        live.recv(512)
-        assert False, "a live packet without a key gets no reply"
-    except TimeoutError:
-        pass
-    live.send(live_packet(bytes.fromhex(joined[1]["key"])))
-    answer = live.recv(512)
-    assert answer[:4] == b"AU1R" and answer[16] == 2 and 0 < struct.unpack("<I", answer[12:16])[0] <= 8000, answer
-    seen = call("POST", f"/rooms/{room}/report", claim, host)[1]
+    seen = host_play.ask({**claim, "ex": 0})
     assert [p["ex"] for p in seen["players"] if p["name"] == "roomguest"] == [1234], "a live score reaches the room"
     assert call("POST", f"/scores/{sha}?format=1&room={room}", replay, guest)[0] == 200
-    seen = call("POST", f"/rooms/{room}/report", claim, host)[1]
+    seen = host_play.ask({**claim, "ex": 0})
     assert all(p["final_ex"] is None for p in seen["players"]), "a replay from another round decides nothing"
     subprocess.run([mkreplay, chart, replay_path + ".round", seen["seed"]], capture_output=True, check=True)
     round_replay = open(replay_path + ".round", "rb").read()
     assert call("POST", f"/scores/{sha}?format=1&room={room}", round_replay, guest)[0] == 200
-    seen = call("POST", f"/rooms/{room}/report", claim, host)[1]
+    seen = host_play.ask({**claim, "ex": 0})
     assert [p["final_ex"] for p in seen["players"] if p["name"] == "roomguest"] == [notes * 2], "the checked replay decides"
+    rejoined = Play(guest)
+    assert len(rejoined.ask({"type": "join", "code": room})["players"]) == 2
+    guest_play.close()
+    time.sleep(0.2)
+    assert len(host_play.ask({**claim, "ex": 0})["players"]) == 2, "an old connection closing keeps a player who reconnected"
+    spare = [Play(guest) for _ in range(3)]
+    assert [p.status for p in spare] == [101, 101, 101] and Play(guest).status == 429, "one player cannot take every connection"
+    for p in spare:
+        p.close()
+    rejoined.close()
+    time.sleep(0.2)
+    assert len(host_play.ask({**claim, "ex": 0})["players"]) == 1, "a closed connection leaves the room"
+    host_play.close()
 
     hoarder = call("POST", "/register", {"name": "hoarder", "password": "correct horse"})[1]["token"]
     def claims(start):

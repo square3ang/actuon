@@ -1,26 +1,18 @@
-//! A versus room on the IR server: one thread keeps asking it for the room and telling it this player's score.
+//! A versus room on the IR server: one thread holds the player's WebSocket, sends commands and the score, and
+//! keeps the room the server answers with. Nothing about a room goes over plain HTTP.
 const std = @import("std");
 const c = @import("c");
-const fs = @import("../platform/fs.zig");
 const http = @import("../platform/http.zig");
 
 pub const code_len = 6;
 pub const max_players = 8;
-const poll_ms = 250;
-const min_poll_ms = 50;
-/// While live scores arrive over UDP, HTTP only carries names, the chart and checked scores.
-const poll_with_live_ms = 1000;
-const live_ms = 100;
-/// This long with no UDP answer, as on a network that blocks it, and HTTP carries the scores again.
-const live_stale_ms = 2000;
-const live_request = "AU1Q";
-const live_reply = "AU1R";
-const live_request_len = 47;
-const live_header_len = 17;
-const live_entry_len = 17;
-const no_start = std.math.maxInt(u32);
-/// Polls in a row that may fail before the room counts as lost.
-const lost_after = 20;
+/// How often the score goes out, and the room comes back.
+const report_ms = 100;
+/// Tries to reconnect in a row before the room counts as lost.
+const reconnect_tries = 5;
+const reconnect_ms = 1000;
+/// Far above any room: eight names and a title.
+const max_message = 16 << 10;
 
 pub const Player = struct {
     id: u32 = 0,
@@ -75,6 +67,7 @@ pub const Report = struct {
 };
 
 const Wire = struct {
+    code: []const u8 = "",
     sha256: []const u8 = "",
     title: []const u8 = "",
     round: u32 = 0,
@@ -108,61 +101,10 @@ fn setStart(v: *View, round: u32, ms: u64, now: u64) void {
     v.start_tick = now + @min(ms, 60_000);
 }
 
-pub fn encodeLive(out: *[live_request_len]u8, code: *const [code_len]u8, key: *const [16]u8, seq: u32, r: Report) void {
-    out[0..4].* = live_request.*;
-    out[4..10].* = code.*;
-    out[10..26].* = key.*;
-    std.mem.writeInt(u32, out[26..30], seq, .little);
-    std.mem.writeInt(u32, out[30..34], r.round, .little);
-    std.mem.writeInt(u32, out[34..38], r.ex, .little);
-    std.mem.writeInt(u32, out[38..42], r.judged, .little);
-    std.mem.writeInt(u32, out[42..46], @bitCast(r.gauge), .little);
-    out[46] = @as(u8, @intFromBool(r.has_chart)) | @as(u8, @intFromBool(r.done)) << 1;
-}
-
-/// A UDP answer updates scores only. False for a broken packet, or one that arrived after a newer one.
-pub fn applyLive(v: *View, data: []const u8, last_seq: *u32, now: u64) bool {
-    if (data.len < live_header_len or !std.mem.eql(u8, data[0..4], live_reply)) return false;
-    const count = data[16];
-    if (count > max_players or data.len != live_header_len + @as(usize, count) * live_entry_len) return false;
-    const seq = std.mem.readInt(u32, data[4..8], .little);
-    if (seq <= last_seq.*) return false;
-    last_seq.* = seq;
-    const round = std.mem.readInt(u32, data[8..12], .little);
-    const starts_in = std.mem.readInt(u32, data[12..16], .little);
-    if (starts_in != no_start) setStart(v, round, starts_in, now);
-    var at: usize = live_header_len;
-    for (0..count) |_| {
-        defer at += live_entry_len;
-        const id = std.mem.readInt(u32, data[at..][0..4], .little);
-        for (v.players[0..v.count]) |*p| {
-            if (p.id != id) continue;
-            p.ex = std.mem.readInt(u32, data[at + 4 ..][0..4], .little);
-            p.judged = std.mem.readInt(u32, data[at + 8 ..][0..4], .little);
-            const gauge: f32 = @bitCast(std.mem.readInt(u32, data[at + 12 ..][0..4], .little));
-            p.gauge = if (std.math.isFinite(gauge)) gauge else 0;
-            p.done = data[at + 16] != 0;
-        }
-    }
-    return true;
-}
-
-fn fromServer(from: *const std.Io.net.IpAddress, server: *const std.Io.net.IpAddress) bool {
-    return from.eql(server);
-}
-
-/// "host:port", the host possibly a bracketed IPv6 address.
-fn parseLiveAddress(text: []const u8) ?struct { host: []const u8, port: u16 } {
-    const colon = std.mem.lastIndexOfScalar(u8, text, ':') orelse return null;
-    if (colon == 0) return null;
-    const port = std.fmt.parseInt(u16, text[colon + 1 ..], 10) catch return null;
-    if (port == 0) return null;
-    return .{ .host = std.mem.trim(u8, text[0..colon], "[]"), .port = port };
-}
-
 /// The server may be anyone's, so what it sends is cut to size. `now` is when the answer arrived.
 pub fn applyAnswer(v: *View, a: std.mem.Allocator, body: []const u8, now: u64) !void {
     const w = try std.json.parseFromSliceLeaky(Wire, a, body, .{ .ignore_unknown_fields = true });
+    if (validCode(w.code)) @memcpy(&v.code, w.code);
     if (w.sha256.len == v.sha256.len) @memcpy(&v.sha256, w.sha256);
     v.title_len = @intCast(copyInto(&v.title_buf, w.title));
     v.round = w.round;
@@ -198,13 +140,6 @@ pub const Room = struct {
     want_sha: ?[64]u8 = null,
     want_title: []u8 = &.{},
     quit: std.atomic.Value(bool) = .init(false),
-    /// Stops the UDP thread. Separate from `quit`: only the game may let the room be freed.
-    live_stop: std.atomic.Value(bool) = .init(false),
-    /// When UDP last answered, in SDL ticks.
-    live_at: std.atomic.Value(u64) = .init(0),
-    live_key: [16]u8 = @splat(0),
-    live_address: [128]u8 = undefined,
-    live_address_len: usize = 0,
 
     fn open(gpa: std.mem.Allocator, base: []const u8, token: []const u8) !*Room {
         const r = try gpa.create(Room);
@@ -284,150 +219,75 @@ pub const Room = struct {
         r.view.status = status;
     }
 
-    fn chartBody(a: std.mem.Allocator, sha: []const u8, title: []const u8) ![]u8 {
-        return std.json.Stringify.valueAlloc(a, .{ .sha256 = sha, .title = title }, .{});
+    fn command(a: std.mem.Allocator, fields: anytype) ![]u8 {
+        return std.json.Stringify.valueAlloc(a, fields, .{});
     }
 
-    fn enter(r: *Room, a: std.mem.Allocator, client: *std.http.Client, hs: []const std.http.Header) !Status {
-        const ans = if (r.creating)
-            try http.send(client, a, .POST, try std.fmt.allocPrint(a, "{s}/rooms", .{r.base}), try chartBody(a, &r.create_sha, r.create_title), hs)
-        else
-            try http.send(client, a, .POST, try std.fmt.allocPrint(a, "{s}/rooms/{s}/join", .{ r.base, &r.join_code }), "", hs);
-        switch (ans.status) {
-            200 => {},
-            404 => return .not_found,
-            409 => return .full,
-            else => return .failed,
-        }
-        const w = try std.json.parseFromSliceLeaky(struct { code: []const u8, key: []const u8 = "", udp: ?[]const u8 = null }, a, ans.body, .{ .ignore_unknown_fields = true });
-        if (!validCode(w.code)) return .failed;
-        @memcpy(&r.join_code, w.code);
-        // Without both, this room's scores stay on HTTP.
-        const udp = w.udp orelse return .joined;
-        if (udp.len > r.live_address.len or w.key.len != 2 * r.live_key.len) return .joined;
-        _ = std.fmt.hexToBytes(&r.live_key, w.key) catch return .joined;
-        @memcpy(r.live_address[0..udp.len], udp);
-        r.live_address_len = udp.len;
-        return .joined;
-    }
-
-    fn openLive(r: *Room) !struct { std.Io.net.Socket, std.Io.net.IpAddress } {
-        const target = parseLiveAddress(r.live_address[0..r.live_address_len]) orelse return error.BadAddress;
-        const dest = try std.Io.net.IpAddress.resolve(fs.io, target.host, target.port);
-        const any = try std.Io.net.IpAddress.parse(if (dest == .ip4) "0.0.0.0" else "::", 0);
-        return .{ try any.bind(fs.io, .{ .mode = .dgram, .protocol = .udp }), dest };
-    }
-
-    fn liveThread(ud: ?*anyopaque) callconv(.c) c_int {
-        const r: *Room = @ptrCast(@alignCast(ud));
-        const socket, const dest = r.openLive() catch |e| {
-            std.log.warn("versus live scores off: {t}", .{e});
-            return 0;
-        };
-        defer socket.close(fs.io);
-        var seq: u32 = 0;
-        var last_seq: u32 = 0;
-        var warned = false;
-        var packet: [live_request_len]u8 = undefined;
-        var reply: [live_header_len + max_players * live_entry_len + 1]u8 = undefined;
-        while (!r.live_stop.load(.acquire)) {
-            const sent_at = c.SDL_GetTicks();
-            seq += 1;
-            _ = c.SDL_LockMutex(r.lock);
-            const report = r.report;
-            _ = c.SDL_UnlockMutex(r.lock);
-            encodeLive(&packet, &r.join_code, &r.live_key, seq, report);
-            socket.send(fs.io, &dest, &packet) catch |e| if (!warned) {
-                warned = true;
-                std.log.warn("versus live scores: {t}", .{e});
-            };
-            if (socket.receiveTimeout(fs.io, &reply, .{ .duration = .{ .raw = .fromMilliseconds(live_ms), .clock = .awake } })) |msg| recv: {
-                // A forged high sequence number would make every real answer look old.
-                if (!fromServer(&msg.from, &dest)) break :recv;
-                const now = c.SDL_GetTicks();
-                _ = c.SDL_LockMutex(r.lock);
-                const applied = applyLive(&r.view, msg.data, &last_seq, now);
-                _ = c.SDL_UnlockMutex(r.lock);
-                if (applied) r.live_at.store(now, .release);
-            } else |_| {}
-            const spent = c.SDL_GetTicks() - sent_at;
-            if (spent < live_ms) c.SDL_Delay(@intCast(live_ms - spent));
-        }
-        return 0;
-    }
-
-    fn liveHealthy(r: *Room) bool {
-        const at = r.live_at.load(.acquire);
-        return at != 0 and c.SDL_GetTicks() - at < live_stale_ms;
-    }
-
-    /// Cut short when UDP announces a round: its seed and chart come over HTTP.
-    fn waitForNextPoll(r: *Room) void {
-        // A server that never catches up with its own announcement must not get a request per answer.
-        c.SDL_Delay(min_poll_ms);
-        const until = c.SDL_GetTicks() + @as(u64, if (r.liveHealthy()) poll_with_live_ms else poll_ms);
-        while (c.SDL_GetTicks() < until and !r.quit.load(.acquire)) {
-            _ = c.SDL_LockMutex(r.lock);
-            const behind = r.view.start_round != 0 and r.view.start_round != r.view.round;
-            _ = c.SDL_UnlockMutex(r.lock);
-            if (behind) return;
-            c.SDL_Delay(10);
-        }
-    }
-
-    fn sendOrders(r: *Room, a: std.mem.Allocator, client: *std.http.Client, hs: []const std.http.Header) !void {
+    /// One command and its answer: the room, applied, or the status of an error.
+    fn ask(r: *Room, a: std.mem.Allocator, ws: *http.WebSocket, buf: []u8, text: []const u8) !u16 {
+        try ws.send(text);
+        const body = try ws.receive(buf);
+        const kind = try std.json.parseFromSliceLeaky(struct { type: []const u8 = "", status: u16 = 0 }, a, body, .{ .ignore_unknown_fields = true });
+        if (!std.mem.eql(u8, kind.type, "room")) return if (kind.status != 0) kind.status else 500;
+        const now = c.SDL_GetTicks();
         _ = c.SDL_LockMutex(r.lock);
-        const start_it = r.want_start;
-        r.want_start = false;
-        const sha = r.want_sha;
-        r.want_sha = null;
-        const title = a.dupe(u8, r.want_title) catch "";
-        if (start_it or sha != null) r.view.order_failed = false;
-        _ = c.SDL_UnlockMutex(r.lock);
-        if (sha) |*s| {
-            const body = try chartBody(a, s, title);
-            r.sendOrder(a, client, hs, "chart", body);
-        }
-        if (start_it) r.sendOrder(a, client, hs, "start", "");
+        defer _ = c.SDL_UnlockMutex(r.lock);
+        r.view.status = .joined;
+        try applyAnswer(&r.view, a, body, now);
+        r.join_code = r.view.code;
+        return 200;
     }
 
-    /// An order is not sent twice: by the next poll the host may want something else.
-    fn sendOrder(r: *Room, a: std.mem.Allocator, client: *std.http.Client, hs: []const std.http.Header, action: []const u8, body: []const u8) void {
-        const ok = blk: {
-            const url = std.fmt.allocPrint(a, "{s}/rooms/{s}/{s}", .{ r.base, &r.join_code, action }) catch break :blk false;
-            const ans = http.send(client, a, .POST, url, body, hs) catch |e| {
-                std.log.warn("versus {s}: {t}", .{ action, e });
-                break :blk false;
-            };
-            break :blk ans.status == 200;
-        };
-        if (ok) return;
+    /// The host's start or chart. Refused, it is not sent again: by then the host may want something else.
+    fn order(r: *Room, a: std.mem.Allocator, ws: *http.WebSocket, buf: []u8, text: []const u8) !void {
+        if (try r.ask(a, ws, buf, text) == 200) return;
         _ = c.SDL_LockMutex(r.lock);
         defer _ = c.SDL_UnlockMutex(r.lock);
         r.view.order_failed = true;
     }
 
-    fn poll(r: *Room, a: std.mem.Allocator, client: *std.http.Client, hs: []const std.http.Header, url: []const u8) !u16 {
-        try r.sendOrders(a, client, hs);
-        _ = c.SDL_LockMutex(r.lock);
-        const report = r.report;
-        _ = c.SDL_UnlockMutex(r.lock);
-        const ans = try http.send(client, a, .POST, url, try std.json.Stringify.valueAlloc(a, report, .{}), hs);
-        if (ans.status != 200) return ans.status;
-        const now = c.SDL_GetTicks();
-        _ = c.SDL_LockMutex(r.lock);
-        defer _ = c.SDL_UnlockMutex(r.lock);
-        r.view.code = r.join_code;
-        r.view.status = .joined;
-        try applyAnswer(&r.view, a, ans.body, now);
-        return 200;
+    /// Enters the room, then reports until the game lets go. Null when the server refused the room.
+    fn session(r: *Room, step: *std.heap.ArenaAllocator, ws: *http.WebSocket, entered: *bool, misses: *u32) !?Status {
+        var buf: [max_message]u8 = undefined;
+        const a = step.allocator();
+        const enter = if (r.creating and !entered.*)
+            try command(a, .{ .type = "create", .sha256 = @as([]const u8, &r.create_sha), .title = r.create_title })
+        else
+            try command(a, .{ .type = "join", .code = @as([]const u8, &r.join_code) });
+        switch (try r.ask(a, ws, &buf, enter)) {
+            200 => {},
+            404 => return .not_found,
+            409 => return .full,
+            else => return .failed,
+        }
+        entered.* = true;
+        misses.* = 0;
+        while (!r.quit.load(.acquire)) {
+            _ = step.reset(.retain_capacity);
+            const sent_at = c.SDL_GetTicks();
+            _ = c.SDL_LockMutex(r.lock);
+            const start_it = r.want_start;
+            r.want_start = false;
+            const sha = r.want_sha;
+            r.want_sha = null;
+            const title = a.dupe(u8, r.want_title) catch "";
+            if (start_it or sha != null) r.view.order_failed = false;
+            const report = r.report;
+            _ = c.SDL_UnlockMutex(r.lock);
+            if (sha) |*s| try r.order(a, ws, &buf, try command(a, .{ .type = "chart", .sha256 = @as([]const u8, s), .title = title }));
+            if (start_it) try r.order(a, ws, &buf, try command(a, .{ .type = "start" }));
+            if (try r.ask(a, ws, &buf, try command(a, .{ .type = "report", .round = report.round, .has_chart = report.has_chart, .ex = report.ex, .judged = report.judged, .gauge = report.gauge, .done = report.done })) != 200) return .lost;
+            const spent = c.SDL_GetTicks() - sent_at;
+            if (spent < report_ms) c.SDL_Delay(@intCast(report_ms - spent));
+        }
+        return null;
     }
 
     fn thread(ud: ?*anyopaque) callconv(.c) c_int {
         const r: *Room = @ptrCast(@alignCast(ud));
         r.loop();
         // The game still holds the room until it lets go, even after the server has dropped it.
-        while (!r.quit.load(.acquire)) c.SDL_Delay(poll_ms);
+        while (!r.quit.load(.acquire)) c.SDL_Delay(report_ms);
         const gpa = r.gpa;
         gpa.free(r.base);
         gpa.free(r.token);
@@ -438,6 +298,7 @@ pub const Room = struct {
         return 0;
     }
 
+    /// A dropped connection is tried again, and joins the same room: closing it left the room on the server.
     fn loop(r: *Room) void {
         var arena = std.heap.ArenaAllocator.init(r.gpa);
         defer arena.deinit();
@@ -446,90 +307,31 @@ pub const Room = struct {
         const al = arena.allocator();
         const auth = std.fmt.allocPrint(al, "Bearer {s}", .{r.token}) catch return r.setStatus(.failed);
         const hs = [_]std.http.Header{.{ .name = "authorization", .value = auth }};
-        const first = r.enter(al, &client, &hs) catch .failed;
-        if (first != .joined) return r.setStatus(first);
-        const live = if (r.live_address_len > 0) c.SDL_CreateThread(liveThread, "versus-live", r) else null;
-        defer if (live) |t| {
-            r.live_stop.store(true, .release);
-            c.SDL_WaitThread(t, null);
-        };
-        const url = std.fmt.allocPrint(al, "{s}/rooms/{s}/report", .{ r.base, &r.join_code }) catch return r.setStatus(.failed);
-        const leave_url = std.fmt.allocPrint(al, "{s}/rooms/{s}/leave", .{ r.base, &r.join_code }) catch return r.setStatus(.failed);
-        var misses: u32 = 0;
+        const url = std.fmt.allocPrint(al, "{s}/play", .{r.base}) catch return r.setStatus(.failed);
         var step = std.heap.ArenaAllocator.init(r.gpa);
         defer step.deinit();
+        var entered = false;
+        var misses: u32 = 0;
         while (!r.quit.load(.acquire)) {
             _ = step.reset(.retain_capacity);
-            const code = r.poll(step.allocator(), &client, &hs, url) catch |e| blk: {
+            var ws: http.WebSocket = undefined;
+            const ended = if (ws.open(&client, url, &hs)) blk: {
+                defer ws.close();
+                break :blk r.session(&step, &ws, &entered, &misses);
+            } else |e| e;
+            const status = ended catch |e| {
                 std.log.warn("versus room: {t}", .{e});
-                break :blk @as(u16, 0);
+                misses += 1;
+                if (!entered) return r.setStatus(.failed);
+                if (misses >= reconnect_tries) return r.setStatus(.lost);
+                c.SDL_Delay(reconnect_ms);
+                continue;
             };
-            if (code == 404) return r.setStatus(.lost);
-            misses = if (code == 200) 0 else misses + 1;
-            if (misses == lost_after) r.setStatus(.lost);
-            r.waitForNextPoll();
+            if (status) |st| return r.setStatus(if (entered and st != .lost) .lost else st);
+            return;
         }
-        _ = step.reset(.retain_capacity);
-        _ = http.send(&client, step.allocator(), .POST, leave_url, "", &hs) catch {};
     }
 };
-
-test "a UDP answer updates scores, and a broken or old one is ignored" {
-    var v: View = .{ .count = 2, .round = 1 };
-    v.players[0].id = 5;
-    v.players[1].id = 6;
-    var data: [live_header_len + live_entry_len]u8 = @splat(0);
-    data[0..4].* = live_reply.*;
-    std.mem.writeInt(u32, data[4..8], 3, .little);
-    std.mem.writeInt(u32, data[8..12], 2, .little);
-    std.mem.writeInt(u32, data[12..16], 4000, .little);
-    data[16] = 1;
-    std.mem.writeInt(u32, data[17..21], 6, .little);
-    std.mem.writeInt(u32, data[21..25], 77, .little);
-    std.mem.writeInt(u32, data[29..33], @bitCast(std.math.nan(f32)), .little);
-    var seq: u32 = 0;
-    try std.testing.expect(!applyLive(&v, data[0 .. data.len - 1], &seq, 10));
-    data[16] = 200;
-    try std.testing.expect(!applyLive(&v, &data, &seq, 10));
-    data[16] = 1;
-    try std.testing.expect(applyLive(&v, &data, &seq, 10));
-    try std.testing.expectEqual(@as(u32, 77), v.players[1].ex);
-    try std.testing.expectEqual(@as(f32, 0), v.players[1].gauge);
-    try std.testing.expectEqual(@as(u32, 0), v.players[0].ex);
-    try std.testing.expectEqual(@as(u32, 2), v.start_round);
-    try std.testing.expectEqual(@as(u64, 4010), v.start_tick);
-    try std.testing.expectEqual(@as(u32, 1), v.round);
-    try std.testing.expect(!applyLive(&v, &data, &seq, 10));
-}
-
-test "a live request has the layout the server reads" {
-    var out: [live_request_len]u8 = undefined;
-    encodeLive(&out, "ABC234", &@as([16]u8, @splat(9)), 7, .{ .round = 2, .has_chart = true, .ex = 3, .judged = 4, .gauge = 1, .done = true });
-    try std.testing.expectEqualStrings("AU1QABC234", out[0..10]);
-    try std.testing.expectEqual(@as(u8, 9), out[25]);
-    try std.testing.expectEqual(@as(u8, 7), out[26]);
-    try std.testing.expectEqual(@as(u8, 2), out[30]);
-    try std.testing.expectEqual(@as(u8, 3), out[46]);
-}
-
-test "a live answer from anyone but the server is refused" {
-    const server = try std.Io.net.IpAddress.parse("127.0.0.1", 8740);
-    try std.testing.expect(fromServer(&server, &server));
-    const port = try std.Io.net.IpAddress.parse("127.0.0.1", 8741);
-    const host = try std.Io.net.IpAddress.parse("127.0.0.2", 8740);
-    try std.testing.expect(!fromServer(&port, &server));
-    try std.testing.expect(!fromServer(&host, &server));
-}
-
-test "a live address is parsed or refused" {
-    const v6 = parseLiveAddress("[::1]:8740").?;
-    try std.testing.expectEqualStrings("::1", v6.host);
-    try std.testing.expectEqual(@as(u16, 8740), parseLiveAddress("a.example:8740").?.port);
-    try std.testing.expect(parseLiveAddress("a.example") == null);
-    try std.testing.expect(parseLiveAddress(":1") == null);
-    try std.testing.expect(parseLiveAddress("a:99999") == null);
-    try std.testing.expect(parseLiveAddress("a:0") == null);
-}
 
 test "a room code that could change the URL is refused" {
     try std.testing.expect(validCode("ABC234"));

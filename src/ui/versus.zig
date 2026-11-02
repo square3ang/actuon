@@ -164,8 +164,7 @@ pub fn tick(a: *App) void {
             v.in_round = false;
             v.open = true;
         }
-        // UDP can announce a round first; its seed and chart arrive with the next HTTP answer.
-        if (v.view.start_round != v.played_round and v.view.start_round != 0 and v.view.start_round == v.view.round) startRound(a);
+        if (v.view.start_round != v.played_round and v.view.start_round != 0) startRound(a);
     }
 }
 
