@@ -25,6 +25,8 @@ bool rb_setup(SDL_Window *win) {
     rb_layer = (__bridge CAMetalLayer *)SDL_Metal_GetLayer(rb_view);
     rb_layer.device = dev;
     rb_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    // The screenshot key blits from the drawable.
+    rb_layer.framebufferOnly = NO;
     sg_setup(&(sg_desc){
         // Every cached text and skin image is one image and one view.
         .image_pool_size = 1 << 14,
@@ -57,5 +59,32 @@ void rb_wait_frame(void) {}
 
 void rb_present(void) { rb_drawable = nil; }
 
-// shortcut: --shot only reads back under OpenGL; add a blit to a shared texture if it is needed here.
-bool rb_read_pixels(int w, int h, void *rgba) { (void)w; (void)h; (void)rgba; return false; }
+// Presents as well, as on the other backends.
+bool rb_read_pixels(int w, int h, void *rgba) {
+    bool ok = false;
+    id<MTLTexture> tex = rb_drawable.texture;
+    id<MTLCommandQueue> queue = [rb_layer.device newCommandQueue];
+    NSUInteger pitch = (NSUInteger)w * 4;
+    id<MTLBuffer> buf = [rb_layer.device newBufferWithLength:pitch * h options:MTLResourceStorageModeShared];
+    if (tex && queue && buf && (int)tex.width == w && (int)tex.height == h) {
+        id<MTLCommandBuffer> cmd = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+        [blit copyFromTexture:tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:buf destinationOffset:0 destinationBytesPerRow:pitch destinationBytesPerImage:pitch * h];
+        [blit endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+        if (cmd.status == MTLCommandBufferStatusCompleted) {
+            const uint8_t *src = buf.contents;
+            uint8_t *out = rgba;
+            for (NSUInteger i = 0; i < pitch * h; i += 4) {
+                out[i] = src[i + 2];
+                out[i + 1] = src[i + 1];
+                out[i + 2] = src[i];
+                out[i + 3] = src[i + 3];
+            }
+            ok = true;
+        }
+    }
+    rb_present();
+    return ok;
+}

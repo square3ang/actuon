@@ -102,6 +102,10 @@ pub const App = struct {
     joy_axis: [32]i16 = @splat(0),
     joy_axis_at: [32]u64 = @splat(0),
     /// Headless capture for tests: save a frame after N ms, then quit.
+    shot_wanted: bool = false,
+    /// A short message over any screen.
+    notice: []const u8 = "",
+    notice_until: u64 = 0,
     shot_path: ?[:0]const u8 = null,
     shot_after_ms: u64 = 0,
     /// Keys the capture presses first, so it can reach any screen.
@@ -757,6 +761,10 @@ pub const App = struct {
     }
 
     fn sdlKey(a: *App, sc: u32, ts: u64, down: bool, repeat: bool) void {
+        if (sc == c.SDL_SCANCODE_F12) {
+            if (down and !repeat) a.shot_wanted = true;
+            return;
+        }
         if (select.pad(a, @intCast(sc), down, repeat)) return;
         if (a.scene == .play) {
             if (!repeat and !input.direct_keyboard.load(.acquire) and sc < input.joy_base) {
@@ -953,8 +961,36 @@ pub const App = struct {
     }
 
     fn shot(a: *App) void {
-        a.g.saveShot(a.shot_path.?.ptr);
+        if (!a.g.saveShot(a.shot_path.?.ptr)) std.log.warn("--shot saved nothing", .{});
         a.running = false;
+    }
+
+    /// The screenshot key: the frame just drawn, into the data folder.
+    fn saveScreenshot(a: *App) void {
+        var ok = false;
+        defer a.showNotice(if (ok) tr("Screenshot saved") else tr("Screenshot failed"));
+        const path = screenshotPath(a.gpa) catch |e| {
+            std.log.err("screenshot failed: {t}", .{e});
+            a.g.present();
+            return;
+        };
+        defer a.gpa.free(path);
+        ok = a.g.saveShot(path.ptr);
+        if (!ok) std.log.err("screenshot failed: {s}", .{c.SDL_GetError()});
+    }
+
+    fn showNotice(a: *App, text: []const u8) void {
+        a.notice = text;
+        a.notice_until = c.SDL_GetTicks() + 2000;
+    }
+
+    fn drawNotice(a: *App) void {
+        if (c.SDL_GetTicks() >= a.notice_until) return;
+        const u = a.g.h / 720;
+        const size = a.g.scaled(14);
+        const w = a.g.measure(a.notice, size) + 24 * u;
+        a.g.panel(a.g.w - w - 12 * u, 12 * u, w, 32 * u, "");
+        a.g.textRight(a.notice, a.g.w - 24 * u, 19 * u, size, gfx.sky);
     }
 
     pub fn run(a: *App) void {
@@ -1003,7 +1039,13 @@ pub const App = struct {
             a.applyMouse();
             a.applyCursor();
             if (a.shot_path != null and c.SDL_GetTicks() - a.start_ms >= a.shot_after_ms) a.shot();
-            a.g.present();
+            if (a.shot_wanted) {
+                a.shot_wanted = false;
+                a.saveScreenshot();
+            } else {
+                a.drawNotice();
+                a.g.present();
+            }
         }
         // Closing the window past the last note keeps the clear, like leaving with Esc there.
         if (a.scene == .play) if (a.session) |s| {
@@ -1024,6 +1066,18 @@ pub const App = struct {
 };
 
 const select_fade_ms = 300;
+fn screenshotPath(gpa: std.mem.Allocator) ![:0]u8 {
+    const dir = try fs.dataDir(gpa);
+    defer gpa.free(dir);
+    const folder = try std.fmt.allocPrint(gpa, "{s}screenshots", .{dir});
+    defer gpa.free(folder);
+    try fs.mkdirs(folder);
+    var ns: c.SDL_Time = 0;
+    var t: c.SDL_DateTime = undefined;
+    if (!c.SDL_GetCurrentTime(&ns) or !c.SDL_TimeToDateTime(ns, &t, true)) return error.NoClock;
+    return std.fmt.allocPrintSentinel(gpa, "{s}/actuon-{d}{d:0>2}{d:0>2}-{d:0>2}{d:0>2}{d:0>2}-{d:0>3}.bmp", .{ folder, @as(u32, @intCast(t.year)), @as(u32, @intCast(t.month)), @as(u32, @intCast(t.day)), @as(u32, @intCast(t.hour)), @as(u32, @intCast(t.minute)), @as(u32, @intCast(t.second)), @as(u32, @intCast(@divTrunc(t.nanosecond, 1_000_000))) }, 0);
+}
+
 const shot_keys_start_ms = 2000;
 const shot_key_gap_ms = 300;
 

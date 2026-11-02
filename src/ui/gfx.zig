@@ -1125,22 +1125,23 @@ pub const Gfx = struct {
         c.rb_present();
     }
 
-    /// Writes this frame to a BMP. Used once, at the end of a run.
-    pub fn saveShot(g: *Gfx, path: [*:0]const u8) void {
+    /// Writes this frame to a BMP and presents it, in place of `present`. False when nothing was saved.
+    // shortcut: BMP needs no new library, encode PNG in a thread if the files or the hitch bother players.
+    pub fn saveShot(g: *Gfx, path: [*:0]const u8) bool {
+        defer g.reapTextures();
         g.record();
-        const w: c_int = @intFromFloat(g.w);
-        const h: c_int = @intFromFloat(g.h);
-        const px = g.gpa.alloc(u8, @intCast(w * h * 4)) catch return;
+        var w: c_int = 0;
+        var h: c_int = 0;
+        _ = c.SDL_GetWindowSizeInPixels(g.win, &w, &h);
+        const px = g.gpa.alloc(u8, @intCast(@max(w, 1) * @max(h, 1) * 4)) catch {
+            c.rb_present();
+            return false;
+        };
         defer g.gpa.free(px);
-        if (!c.rb_read_pixels(w, h, px.ptr)) {
-            std.log.warn("--shot needs the Vulkan backend", .{});
-            return;
-        }
-        const surf = c.SDL_CreateSurfaceFrom(w, h, c.SDL_PIXELFORMAT_RGBA32, px.ptr, w * 4);
-        if (surf != null) {
-            _ = c.SDL_SaveBMP(surf, path);
-            c.SDL_DestroySurface(surf);
-        }
+        if (!c.rb_read_pixels(w, h, px.ptr)) return false;
+        const surf = c.SDL_CreateSurfaceFrom(w, h, c.SDL_PIXELFORMAT_RGBA32, px.ptr, w * 4) orelse return false;
+        defer c.SDL_DestroySurface(surf);
+        return c.SDL_SaveBMP(surf, path);
     }
 };
 

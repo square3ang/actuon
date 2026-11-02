@@ -174,8 +174,34 @@ void rb_present(void) {
     rb_frame_id++;
 }
 
-// shortcut: --shot only reads back under Vulkan; add a staging copy if it is needed on Windows.
-bool rb_read_pixels(int w, int h, void *rgba) { (void)w; (void)h; (void)rgba; return false; }
+// Presents as well, as on the other backends: a flip model back buffer is gone after that.
+bool rb_read_pixels(int w, int h, void *rgba) {
+    bool ok = false;
+    ID3D11Texture2D *back = NULL;
+    ID3D11Texture2D *staging = NULL;
+    IDXGISwapChain_GetBuffer(rb_chain, 0, &IID_ID3D11Texture2D, (void **)&back);
+    if (back) {
+        D3D11_TEXTURE2D_DESC desc;
+        ID3D11Texture2D_GetDesc(back, &desc);
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.BindFlags = 0;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        desc.MiscFlags = 0;
+        if ((int)desc.Width == w && (int)desc.Height == h && SUCCEEDED(ID3D11Device_CreateTexture2D(rb_dev, &desc, NULL, &staging))) {
+            ID3D11DeviceContext_CopyResource(rb_ctx, (ID3D11Resource *)staging, (ID3D11Resource *)back);
+            D3D11_MAPPED_SUBRESOURCE map;
+            if (SUCCEEDED(ID3D11DeviceContext_Map(rb_ctx, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &map))) {
+                for (int y = 0; y < h; y++) SDL_memcpy((Uint8 *)rgba + (size_t)y * w * 4, (const Uint8 *)map.pData + (size_t)y * map.RowPitch, (size_t)w * 4);
+                ID3D11DeviceContext_Unmap(rb_ctx, (ID3D11Resource *)staging, 0);
+                ok = true;
+            }
+            ID3D11Texture2D_Release(staging);
+        }
+        ID3D11Texture2D_Release(back);
+    }
+    rb_present();
+    return ok;
+}
 
 #else
 #undef vkQueueSubmit
