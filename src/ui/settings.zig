@@ -71,6 +71,7 @@ const Item = enum {
     language,
     skin,
     skin_slots,
+    scratch_side,
     open_skins,
     green,
     lift,
@@ -83,6 +84,7 @@ const Item = enum {
     ir_signup,
     ir_signin,
     ir_rename,
+    ir_send_failed,
     ir_upload,
     ir_download,
     download_url,
@@ -104,10 +106,10 @@ const Item = enum {
             .add_table, .update_tables, .table_list => .tables,
             .volume, .bgm_volume, .bgm_set, .sfx_volume, .sound_set, .audio_rate, .audio_frames, .audio_device => .audio,
             .resolution, .fullscreen, .vsync, .fps_limit, .reflex, .bga, .bga_upscale, .language => .display,
-            .skin, .skin_slots, .open_skins => .skin,
+            .skin, .skin_slots, .scratch_side, .open_skins => .skin,
             .green, .lift, .hidden, .judge_offset, .visual_offset => .timing,
             .import_beatoraja, .import_lr2 => .scores,
-            .ir_url, .ir_signup, .ir_signin, .ir_rename, .ir_upload, .ir_download, .download_url, .update => .online,
+            .ir_url, .ir_signup, .ir_signin, .ir_rename, .ir_send_failed, .ir_upload, .ir_download, .download_url, .update => .online,
             .input_poll, .bind_4k, .bind_5k, .bind_6k, .bind_7k, .bind_10k, .bind_14k, .bind_9k, .beatoraja_select, .bind_start => .controls,
         };
     }
@@ -136,6 +138,7 @@ const Item = enum {
             .bga_upscale => tr("BGA movie upscaling (FSRCNNX)"),
             .skin => tr("Skin"),
             .skin_slots => tr("Skins per screen"),
+            .scratch_side => tr("Scratch side"),
             .open_skins => tr("Open skin folder"),
             .open_data => tr("Open data folder"),
             .language => tr("Language"),
@@ -150,6 +153,7 @@ const Item = enum {
             .ir_signup => tr("Create IR account"),
             .ir_signin => tr("Sign in to IR"),
             .ir_rename => tr("Change IR name"),
+            .ir_send_failed => tr("Send failed plays to IR"),
             .ir_upload => tr("Upload my scores to IR"),
             .ir_download => tr("Download my scores from IR"),
             .download_url => tr("Download URL"),
@@ -192,6 +196,7 @@ const Item = enum {
             .open_skins => tr("Put each skin in its own folder here, then pick it under Skin."),
             .open_data => tr("Settings, scores, replays and skins live here."),
             .skin_slots => tr("Enter picks a skin and its settings for each screen and key mode. The rest use the skin above."),
+            .scratch_side => tr("Where the built-in skin puts the scratch lane in single play. osu!mania skins have their own option."),
             .language => tr("The game's language. Applies at once."),
             .skin => tr("Enter or click lists the skins folder. Left/Right steps through them."),
             .green => tr("How long notes stay visible: higher is slower. Enter to type a number, 30 to 2000."),
@@ -205,6 +210,7 @@ const Item = enum {
             .ir_signup => tr("Makes an account on that server and signs in. Asks for a name, then a password."),
             .ir_signin => tr("Signs in to an account you already have on that server."),
             .ir_rename => tr("Changes the name shown in rankings. You then sign in with the new name. Scores stay."),
+            .ir_send_failed => tr("Off keeps failed plays off the server. Versus rounds always send."),
             .ir_upload => tr("Sends saved replays the server does not have yet. Scores without a replay, like imported ones, rank as unverified."),
             .ir_download => tr("Merges your scores on the server into this library. Better local scores stay."),
             .download_url => tr("Where missing charts come from: an archive or a lookup service. {md5} becomes the chart's hash."),
@@ -747,6 +753,11 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
         .fullscreen => drawToggle(g, right, y, h, cfg.fullscreen, on),
         .bga_upscale => drawToggle(g, right, y, h, cfg.bga_upscale, on),
         .bga => drawToggle(g, right, y, h, cfg.bga, on),
+        .ir_send_failed => drawToggle(g, right, y, h, cfg.ir_send_failed, on),
+        .scratch_side => if (drawChoices(g, right, y, h, &.{ tr("Left"), tr("Right") }, @intFromBool(cfg.scratch_right), on)) |i| {
+            a.sfx(.adjust);
+            cfg.scratch_right = i == 1;
+        },
         .fps_limit => if (drawChoices(g, right, y, h, &.{ tr("Off"), "60", "120", "144", "240", "360", "1000" }, fpsIndex(cfg.fps_limit), on)) |i| {
             a.sfx(.adjust);
             cfg.fps_limit = fps_limits[i];
@@ -968,6 +979,8 @@ fn adjust(a: *App, it: Item, dir: i32) void {
         .language => setLanguage(a, @fromBackingInt(@intCast(@mod(@as(i32, @backingInt(i18n.current)) + dir, @as(i32, i18n.names.len))))),
         .beatoraja_select => cfg.beatoraja_select = !cfg.beatoraja_select,
         .bga => cfg.bga = !cfg.bga,
+        .ir_send_failed => cfg.ir_send_failed = !cfg.ir_send_failed,
+        .scratch_side => cfg.scratch_right = !cfg.scratch_right,
         .fps_limit => {
             const i = @as(i32, @intCast(fpsIndex(cfg.fps_limit))) + dir;
             cfg.fps_limit = fps_limits[@intCast(std.math.clamp(i, 0, fps_limits.len - 1))];

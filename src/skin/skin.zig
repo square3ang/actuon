@@ -292,6 +292,7 @@ fn addFileOptions(a: std.mem.Allocator, out: *std.ArrayList(Option), dir: []cons
         try addOption(a, out, .{ .kind = .property, .name = osuskin.bga_stretch_name, .choices = &osuskin.bga_stretch_choices, .def = "Fit" });
         try addOption(a, out, .{ .kind = .property, .name = osuskin.bga_dim_name, .choices = &osuskin.bga_dim_choices, .def = "0%" });
         try addOption(a, out, .{ .kind = .property, .name = osuskin.gauge_color_name, .choices = &osuskin.gauge_color_choices, .def = "On" });
+        try addOption(a, out, .{ .kind = .property, .name = osuskin.scratch_side_name, .choices = &osuskin.scratch_side_choices, .def = "Left" });
         return;
     }
     if (std.ascii.endsWithIgnoreCase(path, ".lr2skin")) {
@@ -476,9 +477,10 @@ test "a skin.ini stands for the 7, 6, 5 and 4 key screens only" {
     try std.testing.expect(find(a, dir, playType(.beat14)) == null);
     try std.testing.expect(find(a, dir, type_select) == null);
     const rows = try options(a, dir, playType(.beat7));
-    try std.testing.expectEqual(@as(usize, 3), rows.len);
+    try std.testing.expectEqual(@as(usize, 4), rows.len);
     try std.testing.expectEqualStrings(osuskin.bga_dim_name, rows[1].name);
     try std.testing.expectEqualStrings(osuskin.gauge_color_name, rows[2].name);
+    try std.testing.expectEqualStrings(osuskin.scratch_side_name, rows[3].name);
 }
 
 test "each screen offers only its own file's options" {

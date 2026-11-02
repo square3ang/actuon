@@ -105,7 +105,7 @@ pub fn skipPastNotes(chart: *const core.types.Chart, first: usize, t: i64) usize
     return i;
 }
 
-pub fn laneOrder(mode: core.types.Mode, out: *[core.types.max_lanes]u8) u8 {
+pub fn laneOrder(mode: core.types.Mode, scratch_right: bool, out: *[core.types.max_lanes]u8) u8 {
     const n = mode.keys();
     switch (mode) {
         .beat5 => out[0..6].* = .{ 5, 0, 1, 2, 3, 4 },
@@ -116,6 +116,8 @@ pub fn laneOrder(mode: core.types.Mode, out: *[core.types.max_lanes]u8) u8 {
         .beat4 => out[0..4].* = .{ 0, 1, 2, 3 },
         .beat6 => out[0..6].* = .{ 0, 1, 2, 3, 4, 5 },
     }
+    // Double play keeps each side's scratch on its outer edge.
+    if (scratch_right and (mode == .beat5 or mode == .beat7)) std.mem.rotate(u8, out[0..n], 1);
     return n;
 }
 
@@ -235,7 +237,7 @@ fn layoutLanes(g: *gfx.Gfx, mode: core.types.Mode, cfg: *const config.Config) La
         .pad_y = base_y + 4 * u,
         .pad_h = 92 * u,
     };
-    l.n = laneOrder(mode, &l.order);
+    l.n = laneOrder(mode, cfg.scratch_right, &l.order);
     var x = l.left;
     for (l.order[0..l.n], 0..) |lane, i| {
         const sc = mode.scratchOf(lane) >= 0;
@@ -692,6 +694,15 @@ test "a 4 key gear has wide, mirrored lanes" {
     try std.testing.expectEqual(noteColor(.beat4, 0), noteColor(.beat4, 3));
     try std.testing.expectEqual(noteColor(.beat4, 1), noteColor(.beat4, 2));
     try std.testing.expect(noteColor(.beat4, 0).r != noteColor(.beat4, 1).r);
+}
+
+test "scratch on the right moves to the end in single play only" {
+    var out: [core.types.max_lanes]u8 = undefined;
+    const n = laneOrder(.beat7, true, &out);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 1, 2, 3, 4, 5, 6, 7 }, out[0..n]);
+    const d = laneOrder(.beat14, true, &out);
+    try std.testing.expectEqual(@as(u8, 7), out[0]);
+    try std.testing.expectEqual(@as(u8, 15), out[d - 1]);
 }
 
 test "green number maps to visible y" {

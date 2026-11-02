@@ -176,8 +176,14 @@ pub fn capture(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, nat
         return;
     };
     // A play left early would rank on the server as if it had reached the end. The server ranks LN plays only.
-    if (natural and s.params.ln_mode == .ln and a.cfg.ir_url.len > 0 and a.cfg.ir_token.len > 0) r.board = ir.startUpload(a.gpa, a.cfg.ir_url, a.cfg.ir_token, &s.chart.sha256, s.params.path, bytes, if (a.versus.in_round) &a.versus.view.code else "");
+    if (natural and s.params.ln_mode == .ln and a.cfg.ir_url.len > 0 and a.cfg.ir_token.len > 0 and
+        irSends(a.cfg.ir_send_failed, r.clear, a.versus.in_round)) r.board = ir.startUpload(a.gpa, a.cfg.ir_url, a.cfg.ir_token, &s.chart.sha256, s.params.path, bytes, if (a.versus.in_round) &a.versus.view.code else "");
     r.ir_used = r.board != null;
+}
+
+/// A versus round always sends, so the room sees every player's result.
+fn irSends(send_failed: bool, clear: core.types.Clear, versus: bool) bool {
+    return send_failed or clear != .failed or versus;
 }
 
 fn wallClock() i64 {
@@ -420,6 +426,13 @@ test "rank boundaries follow ninths of the max EX" {
     try std.testing.expectEqualStrings("AAA", rankOf(1600, 900));
     try std.testing.expectEqualStrings("AA", rankOf(1599, 900));
     try std.testing.expectEqualStrings("F", rankOf(0, 900));
+}
+
+test "a failed play stays off the IR when asked, except in versus" {
+    try std.testing.expect(irSends(true, .failed, false));
+    try std.testing.expect(!irSends(false, .failed, false));
+    try std.testing.expect(irSends(false, .easy, false));
+    try std.testing.expect(irSends(false, .failed, true));
 }
 
 test "leaving waits for a skin's fade and a built-in screen goes at once" {

@@ -459,6 +459,13 @@ pub const gauge_color_name = "Gauge color";
 pub const gauge_color_choices = [_][]const u8{ "On", "Off" };
 pub const bga_dim_name = "BGA dim";
 pub const bga_dim_choices = [_][]const u8{ "0%", "10%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "90%", "100%" };
+pub const scratch_side_name = "Scratch side";
+pub const scratch_side_choices = [_][]const u8{ "Left", "Right" };
+
+fn scratchRight(conf: jsonskin.Conf) bool {
+    const pick = conf.property.map.get(scratch_side_name) orelse return false;
+    return std.mem.eql(u8, pick, "Right");
+}
 
 /// bga.fit's types: keep the shape and fit inside, keep it and crop, or fill the screen out of shape.
 fn gaugeColorOn(conf: jsonskin.Conf) bool {
@@ -486,7 +493,7 @@ fn dimAlpha(conf: jsonskin.Conf) f32 {
 
 fn build(b: *Build, skin: *m.Skin, general: []const u8, fonts: []const u8, mode: core.types.Mode, conf: jsonskin.Conf) !void {
     var order_buf: [core.types.max_lanes]u8 = undefined;
-    const order = order_buf[0..play.laneOrder(mode, &order_buf)];
+    const order = order_buf[0..play.laneOrder(mode, scratchRight(conf), &order_buf)];
     const l = layoutOf(b.mania, order.len);
     const hit = hitPosition(b.mania);
 
@@ -653,6 +660,9 @@ test "the BGA options read back from a saved pick" {
     try std.testing.expect(gaugeColorOn(conf));
     try conf.property.map.put(a, gauge_color_name, "Off");
     try std.testing.expect(!gaugeColorOn(conf));
+    try std.testing.expect(!scratchRight(conf));
+    try conf.property.map.put(a, scratch_side_name, "Right");
+    try std.testing.expect(scratchRight(conf));
     try conf.property.map.put(a, bga_dim_name, "33%");
     try std.testing.expectEqual(@as(f32, 0), dimAlpha(conf));
 }
