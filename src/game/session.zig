@@ -21,6 +21,9 @@ pub const Hit = struct {
 };
 pub const hit_ring = 64;
 
+/// One judged press, kept for the whole play so the result can chart its timing.
+pub const TimedHit = struct { fast_us: i32, judge: u8 };
+
 /// What the loader knows once the chart is parsed, before its sounds decode.
 /// The chart's slices live until the session does; only a load that then fails frees them.
 pub const Parsed = struct {
@@ -98,6 +101,8 @@ pub const Session = struct {
     lock: *c.SDL_Mutex,
     snap: Snapshot = .{},
     events: std.ArrayList(core.sim.Event) = .empty,
+    /// Filled by the sim thread, and read only once it has stopped. Its capacity never grows there.
+    timed_hits: std.ArrayList(TimedHit) = .empty,
     last_event_t: i64 = std.math.minInt(i64),
     end_us: i64,
     load_warnings: u32 = 0,
@@ -210,6 +215,7 @@ pub const Session = struct {
         };
         s.sim.notes = s.chart.notes;
         try s.events.ensureTotalCapacity(gpa, chart.total_notes * 4 + 4096);
+        try s.timed_hits.ensureTotalCapacity(gpa, chart.total_notes);
         return s;
     }
 
@@ -320,6 +326,7 @@ pub const Session = struct {
                 .judge => {
                     snap.hits[snap.hit_seq % hit_ring] = .{ .at_us = now, .fast_us = o.fast_us, .note = o.note, .judge = o.judge };
                     snap.hit_seq +%= 1;
+                    if (s.timed_hits.items.len < s.timed_hits.capacity) s.timed_hits.appendAssumeCapacity(.{ .fast_us = o.fast_us, .judge = o.judge });
                     snap.last_judge = o.judge;
                     snap.last_fast_us = o.fast_us;
                     snap.judge_at_us = now;
@@ -422,6 +429,7 @@ pub const Session = struct {
         s.gpa.free(s.dir);
         s.sim.destroy();
         s.events.deinit(s.gpa);
+        s.timed_hits.deinit(s.gpa);
         s.chart.deinit();
         c.SDL_DestroyMutex(s.lock);
         s.gpa.destroy(s);

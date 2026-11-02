@@ -17,7 +17,51 @@ const App = app_mod.App;
 
 pub const clear_names = [_][]const u8{ "NO PLAY", "FAILED", "ASSIST EASY", "LIGHT ASSIST", "EASY", "NORMAL", "HARD", "EX HARD", "FULL COMBO", "PERFECT", "MAX" };
 
+/// 5 ms a bin, over the widest window a hit can land in.
+pub const timing_bins = 61;
+const timing_bin_us = 5_000;
+/// Too few hits say nothing about a player's offset.
+const offset_min_hits = 32;
+
+pub const TimingStats = struct {
+    /// From the earliest to the latest.
+    bins: [timing_bins]u32 = @splat(0),
+    hits: u32 = 0,
+    mean_fast_us: i32 = 0,
+    deviation_us: u32 = 0,
+
+    /// The judge offset that centres this play's hits, when there are enough to say.
+    pub fn suggestedOffsetMs(t: *const TimingStats, current_ms: i32) ?i32 {
+        if (t.hits < offset_min_hits) return null;
+        return current_ms - @divTrunc(t.mean_fast_us, 1000);
+    }
+};
+
+/// Hits a key press made: a POOR or a miss has no timing worth reading.
+pub fn timingStats(hits: []const session_mod.TimedHit) TimingStats {
+    var t: TimingStats = .{};
+    var sum: i64 = 0;
+    var square: f64 = 0;
+    for (hits) |h| {
+        if (h.judge >= 4) continue;
+        t.hits += 1;
+        sum += h.fast_us;
+        square += @as(f64, @floatFromInt(h.fast_us)) * @as(f64, @floatFromInt(h.fast_us));
+        const bin = @divFloor(h.fast_us + timing_bin_us / 2, timing_bin_us);
+        t.bins[@intCast(std.math.clamp(timing_bins / 2 - bin, 0, timing_bins - 1))] += 1;
+    }
+    if (t.hits == 0) return t;
+    const n: f64 = @floatFromInt(t.hits);
+    const mean = @as(f64, @floatFromInt(sum)) / n;
+    t.mean_fast_us = @intFromFloat(mean);
+    t.deviation_us = @intFromFloat(@sqrt(@max(square / n - mean * mean, 0)));
+    return t;
+}
+
 pub const State = struct {
+    timing: TimingStats = .{},
+    /// A skin has no place for the graph, so a key brings it over the skin.
+    timing_shown: bool = false,
     title_buf: [256]u8 = undefined,
     title: []const u8 = "",
     snap: session_mod.Snapshot = .{},
@@ -99,6 +143,8 @@ pub fn capture(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, nat
     r.title = r.title_buf[0..n];
     r.snap = snap;
     r.notes = s.chart.total_notes;
+    r.timing = if (s.params.autoplay) .{} else timingStats(s.timed_hits.items);
+    r.timing_shown = false;
     const finished = natural and !snap.failed;
     r.clear = s.sim.clear(finished);
     r.recorded = false;
@@ -286,10 +332,42 @@ fn drawJudges(a: *App, age_ms: f32) void {
     g.textRight(std.fmt.bufPrint(&buf, "{d:.1}%", .{r.snap.gauge}) catch "", x0 + w - 10 * u, y + 12 * u, g.scaled(20), gfx.white);
 }
 
+/// How early and late the hits were, centre line at the note, with the mean and the offset it suggests.
+fn drawTiming(a: *App, x: f32, y: f32, w: f32, h: f32) void {
+    const g = &a.g;
+    const t = &a.res.timing;
+    const u = g.h / 720;
+    g.panel(x, y, w, h, "TIMING");
+    if (t.hits == 0) return;
+    const side = 150 * u;
+    const gx = x + 8 * u;
+    const gw = w - 16 * u - side;
+    const top = y + 20 * u;
+    const gh = h - 26 * u;
+    var most: u32 = 1;
+    for (t.bins) |b| most = @max(most, b);
+    const bw = gw / timing_bins;
+    for (t.bins, 0..) |b, i| {
+        const bh = gh * @as(f32, @floatFromInt(b)) / @as(f32, @floatFromInt(most));
+        const col = if (i < timing_bins / 2) gfx.cyan else if (i > timing_bins / 2) gfx.amber else gfx.white;
+        g.rect(gx + @as(f32, @floatFromInt(i)) * bw, top + gh - bh, @max(bw - 1, 1), bh, col);
+    }
+    g.rect(gx + gw / 2 - 1, top, 1, gh, gfx.white.alpha(120));
+    const tx = x + w - side;
+    const mean_ms = @as(f32, @floatFromInt(t.mean_fast_us)) / 1000;
+    g.fmt(tx, y + 6 * u, g.scaled(12), gfx.dim, "{s} {d:.1} ms", .{ if (mean_ms >= 0) "FAST" else "SLOW", @abs(mean_ms) });
+    g.fmt(tx, y + 24 * u, g.scaled(12), gfx.dim, "SD {d:.1} ms", .{@as(f32, @floatFromInt(t.deviation_us)) / 1000});
+    if (t.suggestedOffsetMs(a.cfg.judge_offset_ms)) |ms| g.fmt(tx, y + 42 * u, g.scaled(12), gfx.sky, "OFFSET {d} ms", .{ms});
+}
+
 pub fn draw(a: *App) void {
     const g = &a.g;
     const r = &a.res;
-    if (a.result_skin) |sk| return drawSkinned(a, sk);
+    if (a.result_skin) |sk| {
+        drawSkinned(a, sk);
+        if (r.timing_shown) drawTiming(a, g.w * 0.2, g.h * 0.72, g.w * 0.6, g.h * 0.16);
+        return;
+    }
     const u = g.h / 720;
     const ex = r.snap.score.exScore();
     const age_ms: f32 = @floatFromInt(c.SDL_GetTicks() - r.shown_at);
@@ -297,6 +375,7 @@ pub fn draw(a: *App) void {
     drawHeadline(a, ease, ex);
     drawExPanel(a, ease, ex);
     drawJudges(a, age_ms);
+    drawTiming(a, g.w * 0.5, 610 * u, g.w * 0.5 - 16 * u, 70 * u);
     var key_buf: [32]u8 = undefined;
     var hint_buf: [48]u8 = undefined;
     g.textRight(i18n.bufPrint(&hint_buf, "{s}: BACK", .{select.guideKey(a, a.cfg.p1[0], "ENTER", &key_buf)}) catch "", g.w - 20 * u, g.h - 26 * u, g.scaled(14), gfx.dim);
@@ -314,11 +393,27 @@ pub fn key(a: *App, sc: u32) void {
         r.leave_at = c.SDL_GetTicks();
         a.skin_state.timers[2] = @intCast(r.leave_at - r.shown_at);
     }
+    if (sc == c.SDL_SCANCODE_T) a.res.timing_shown = !a.res.timing_shown;
     // The mouse wheel arrives as these too.
     if (a.res.board) |b| {
         if (sc == c.SDL_SCANCODE_UP) b.scroll(-1);
         if (sc == c.SDL_SCANCODE_DOWN) b.scroll(1);
     }
+}
+
+test "timing stats bin presses, skip misses and suggest an offset that centres them" {
+    var hits: [40]session_mod.TimedHit = @splat(.{ .fast_us = 10_000, .judge = 0 });
+    hits[0] = .{ .fast_us = 900_000, .judge = 5 };
+    const t = timingStats(&hits);
+    try std.testing.expectEqual(@as(u32, 39), t.hits);
+    try std.testing.expectEqual(@as(i32, 10_000), t.mean_fast_us);
+    try std.testing.expectEqual(@as(u32, 39), t.bins[timing_bins / 2 - 2]);
+    // Pressing 10 ms early needs an offset 10 ms lower.
+    try std.testing.expectEqual(@as(?i32, -7), t.suggestedOffsetMs(3));
+    try std.testing.expectEqual(@as(?i32, null), timingStats(hits[0..5]).suggestedOffsetMs(0));
+    // A far late hit lands in the last bin, not out of range.
+    const late = [_]session_mod.TimedHit{.{ .fast_us = -500_000, .judge = 3 }};
+    try std.testing.expectEqual(@as(u32, 1), timingStats(&late).bins[timing_bins - 1]);
 }
 
 test "rank boundaries follow ninths of the max EX" {
