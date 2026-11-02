@@ -1004,6 +1004,7 @@ fn drawDock(a: *App, dock_y: f32) void {
         .{ .sc = c.SDL_SCANCODE_F9, .label = "F9 IR" },
         .{ .sc = c.SDL_SCANCODE_F10, .label = tr("F10 Settings") },
         .{ .sc = c.SDL_SCANCODE_R, .label = tr("R Replay") },
+        .{ .sc = c.SDL_SCANCODE_V, .label = tr("V Versus") },
         .{ .sc = c.SDL_SCANCODE_8, .label = tr("8 Folder") },
         .{ .sc = c.SDL_SCANCODE_ESCAPE, .label = tr("Esc Back") },
     };
@@ -1026,6 +1027,7 @@ fn drawDock(a: *App, dock_y: f32) void {
         .{ .sc = 0, .label = i18n.bufPrint(&label_buf[5], "Hold {s}+{s} or 5 Detail", .{ start, select_key }) catch "" },
         .{ .sc = c.SDL_SCANCODE_0, .label = tr("0 Search") },
         .{ .sc = c.SDL_SCANCODE_7, .label = tr("7 IR page") },
+        .{ .sc = c.SDL_SCANCODE_V, .label = tr("V Versus") },
         .{ .sc = c.SDL_SCANCODE_8, .label = tr("8 Folder") },
         .{ .sc = c.SDL_SCANCODE_6, .label = tr("6 Key config") },
     };

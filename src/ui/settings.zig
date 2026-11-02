@@ -58,6 +58,7 @@ const Item = enum {
     audio_rate,
     audio_frames,
     audio_device,
+    resolution,
     fullscreen,
     vsync,
     reflex,
@@ -96,7 +97,7 @@ const Item = enum {
             .add_root, .clear_roots => .library,
             .add_table, .update_tables, .table_list => .tables,
             .volume, .bgm_volume, .bgm_set, .sfx_volume, .sound_set, .audio_rate, .audio_frames, .audio_device => .audio,
-            .fullscreen, .vsync, .reflex, .bga_upscale, .skin, .skin_slots, .language => .display,
+            .resolution, .fullscreen, .vsync, .reflex, .bga_upscale, .skin, .skin_slots, .language => .display,
             .green, .lift, .hidden, .judge_offset, .visual_offset => .timing,
             .import_beatoraja, .import_lr2 => .scores,
             .ir_url, .ir_signup, .ir_signin, .ir_rename, .ir_upload, .ir_download, .download_url, .update => .online,
@@ -119,6 +120,7 @@ const Item = enum {
             .audio_rate => tr("Sample rate"),
             .audio_frames => tr("Buffer size"),
             .audio_device => tr("Output device"),
+            .resolution => tr("Window size"),
             .fullscreen => tr("Fullscreen"),
             .vsync => tr("VSync"),
             .reflex => tr("NVIDIA Reflex"),
@@ -169,6 +171,7 @@ const Item = enum {
             .audio_rate => tr("Takes effect after a restart."),
             .audio_frames => tr("Smaller is lower latency, too small crackles. Takes effect after a restart."),
             .audio_device => tr("Falls back to Default if it will not open. Applies when you leave settings."),
+            .resolution => tr("Applies at once. Fullscreen always fills the screen."),
             .fullscreen => tr("Applies at once."),
             .vsync => tr("Applies at once. Off lowers input latency and may tear."),
             .bga_upscale => tr("Cleaner, sharper movies when they are enlarged, for a little CPU and GPU time per movie frame. Applies to the next chart for deblocking."),
@@ -234,6 +237,16 @@ pub const State = struct {
 
 const items = std.enums.values(Item);
 const poll_rates = [_]u32{ 0, 1000, 2000, 4000, 8000 };
+const resolutions = [_][2]u32{ .{ 1280, 720 }, .{ 1600, 900 }, .{ 1920, 1080 }, .{ 2560, 1440 }, .{ 3840, 2160 } };
+
+/// A size typed into config.json or dragged steps to the nearest choice in that direction.
+fn stepResolution(w: u32, h: u32, dir: i32) [2]u32 {
+    var i: usize = 0;
+    while (i + 1 < resolutions.len and resolutions[i][0] < w) i += 1;
+    const exact = resolutions[i][0] == w and resolutions[i][1] == h;
+    if (!exact and dir > 0 and resolutions[i][0] > w) return resolutions[i];
+    return resolutions[@intCast(std.math.clamp(@as(i32, @intCast(i)) + dir, 0, resolutions.len - 1))];
+}
 
 /// A rate typed into config.json shows as the nearest choice at or below it.
 fn pollIndex(hz: u32) usize {
@@ -688,6 +701,7 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
         .sfx_volume => if (drawSlider(g, right, y, h, cfg.sfx_volume, on)) |v| {
             cfg.sfx_volume = v;
         },
+        .resolution => step(a, it, drawStepper(g, right, y, h, std.fmt.bufPrint(&buf, "{d}x{d}", .{ cfg.width, cfg.height }) catch "", on)),
         .fullscreen => drawToggle(g, right, y, h, cfg.fullscreen, on),
         .bga_upscale => drawToggle(g, right, y, h, cfg.bga_upscale, on),
         .beatoraja_select => drawToggle(g, right, y, h, cfg.beatoraja_select, on),
@@ -867,7 +881,7 @@ pub fn draw(a: *App) void {
 fn rowActs(it: Item) bool {
     return switch (it) {
         // Lists open from their value or with Enter, not from anywhere on the row.
-        .volume, .bgm_volume, .sfx_volume, .audio_rate, .audio_frames, .audio_device, .vsync, .reflex, .language, .input_poll, .lift, .hidden, .judge_offset, .visual_offset, .skin, .bgm_set, .sound_set => false,
+        .volume, .bgm_volume, .sfx_volume, .audio_rate, .audio_frames, .audio_device, .resolution, .vsync, .reflex, .language, .input_poll, .lift, .hidden, .judge_offset, .visual_offset, .skin, .bgm_set, .sound_set => false,
         else => true,
     };
 }
@@ -908,6 +922,12 @@ fn adjust(a: *App, it: Item, dir: i32) void {
         .bga_upscale => {
             cfg.bga_upscale = !cfg.bga_upscale;
             a.g.upscale_on = cfg.bga_upscale;
+        },
+        .resolution => {
+            const size = stepResolution(cfg.width, cfg.height, dir);
+            cfg.width = size[0];
+            cfg.height = size[1];
+            _ = c.SDL_SetWindowSize(a.g.win, @intCast(cfg.width), @intCast(cfg.height));
         },
         .fullscreen => {
             cfg.fullscreen = !cfg.fullscreen;
@@ -1475,6 +1495,16 @@ test "left and right step a value, and arrow rows ignore enter" {
     openItem(a, .audio_rate);
     key(a, c.SDL_SCANCODE_RETURN);
     try std.testing.expectEqual(@as(u32, 44100), a.cfg.audio_rate);
+    openItem(a, .resolution);
+    key(a, c.SDL_SCANCODE_RIGHT);
+    try std.testing.expectEqual(@as(u32, 1600), a.cfg.width);
+}
+
+test "a window size off the list steps to its neighbours" {
+    try std.testing.expectEqual([2]u32{ 1920, 1080 }, stepResolution(1700, 950, 1));
+    try std.testing.expectEqual([2]u32{ 1600, 900 }, stepResolution(1700, 950, -1));
+    try std.testing.expectEqual([2]u32{ 3840, 2160 }, stepResolution(5000, 3000, 1));
+    try std.testing.expectEqual([2]u32{ 1280, 720 }, stepResolution(1280, 720, -1));
 }
 
 test "signing up asks for a name, then sends the password as typed" {

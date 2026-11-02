@@ -110,8 +110,9 @@ bool rb_setup(SDL_Window *win) {
         .SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD,
         .Flags = rb_tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0,
     };
-    D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0;
-    if (FAILED(D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, &level, 1, D3D11_SDK_VERSION, &sd, &rb_chain, &rb_dev, NULL, &rb_ctx))) return false;
+    // 11_1 first: on 11_0 sokol has only 8 UAV slots, and warns about it on every start.
+    D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
+    if (FAILED(D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, levels, 2, D3D11_SDK_VERSION, &sd, &rb_chain, &rb_dev, NULL, &rb_ctx))) return false;
     rb_sg_setup((sg_environment){
         .defaults = { .color_format = SG_PIXELFORMAT_RGBA8, .depth_format = SG_PIXELFORMAT_NONE, .sample_count = 1 },
         .d3d11 = { .device = rb_dev, .device_context = rb_ctx },
