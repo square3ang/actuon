@@ -462,7 +462,7 @@ pub const bga_dim_choices = [_][]const u8{ "0%", "10%", "20%", "30%", "40%", "50
 pub const scratch_side_name = "Scratch side";
 pub const scratch_side_choices = [_][]const u8{ "Left", "Right" };
 
-fn scratchRight(conf: jsonskin.Conf) bool {
+pub fn scratchRight(conf: jsonskin.Conf) bool {
     const pick = conf.property.map.get(scratch_side_name) orelse return false;
     return std.mem.eql(u8, pick, "Right");
 }

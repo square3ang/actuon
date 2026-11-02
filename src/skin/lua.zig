@@ -513,8 +513,8 @@ pub fn callNum(skin: *m.Skin, r: i32) f64 {
     defer c.lua_settop(l, 0);
     if (protectedCall(l, 0, 1, call_steps) != c.LUA_OK) return 0;
     const v = c.lua_tonumberx(l, -1, null);
-    // Callers cast this to integers; beyond 2^53 it is not a number any skin means, and NaN fails too.
-    return if (@abs(v) < 9e15) v else 0;
+    // Callers cast this to integers, so it is clamped, keeping its sign: TIMER_OFF must stay negative.
+    return if (std.math.isNan(v)) 0 else std.math.clamp(v, -9e15, 9e15);
 }
 
 test "skins cannot reach native code or bytecode" {
@@ -636,8 +636,15 @@ test "numbers from Lua do not trap" {
         \\assert(main_state.judge(1 << 40) == 0)
         \\assert(main_state.judge(-(1 << 40)) == 0)
     );
-    for ([_][*:0]const u8{ "return 0/0", "return 1e300", "return -1/0" }) |script| {
-        try std.testing.expectEqual(c.LUA_OK, c.luaL_loadstring(l, script));
-        try std.testing.expectEqual(@as(f64, 0), callNum(&skin, c.luaL_ref(l, c.LUA_REGISTRYINDEX)));
+    const cases = [_]struct { [*:0]const u8, f64 }{
+        .{ "return 0/0", 0 },
+        .{ "return 1e300", 9e15 },
+        .{ "return -1/0", -9e15 },
+        // An off timer stays off, or a skin's closed panel would show for good.
+        .{ "return require('timer_util').timer_observe_boolean(function() return false end)()", -9e15 },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqual(c.LUA_OK, c.luaL_loadstring(l, case[0]));
+        try std.testing.expectEqual(case[1], callNum(&skin, c.luaL_ref(l, c.LUA_REGISTRYINDEX)));
     }
 }

@@ -126,6 +126,8 @@ pub const View = struct {
     first_note: usize = 0,
     last_t: i64 = std.math.minInt(i64),
     bga: ?*bga.Bga = null,
+    /// The built-in skin's option, read at play start.
+    scratch_right: bool = false,
     best_ex: u32 = 0,
     target_ex: u32 = 0,
     /// The target is another player's score right now, not a final one to pace against.
@@ -163,7 +165,7 @@ pub const View = struct {
             v.timing_n += 1;
         }
 
-        const l = layoutLanes(g, mode, cfg);
+        const l = layoutLanes(g, mode, cfg, v.scratch_right);
         drawGear(g, &l, s, &snap);
         const vis_y = visibleY(cfg.green_ms, v.refBpm(chart, cfg.hs_fix));
         const px_per_y = l.lane_h / @as(f32, @floatCast(vis_y)) * @as(f32, @floatCast(chart.speedAt(t)));
@@ -216,7 +218,7 @@ fn flatKeys(mode: core.types.Mode) bool {
     return mode == .beat4;
 }
 
-fn layoutLanes(g: *gfx.Gfx, mode: core.types.Mode, cfg: *const config.Config) Lanes {
+fn layoutLanes(g: *gfx.Gfx, mode: core.types.Mode, cfg: *const config.Config, scratch_right: bool) Lanes {
     const u = g.h / 720;
     const key_w = keyWidth(mode) * u;
     const sc_w: f32 = 72 * u;
@@ -237,7 +239,7 @@ fn layoutLanes(g: *gfx.Gfx, mode: core.types.Mode, cfg: *const config.Config) La
         .pad_y = base_y + 4 * u,
         .pad_h = 92 * u,
     };
-    l.n = laneOrder(mode, cfg.scratch_right, &l.order);
+    l.n = laneOrder(mode, scratch_right, &l.order);
     var x = l.left;
     for (l.order[0..l.n], 0..) |lane, i| {
         const sc = mode.scratchOf(lane) >= 0;

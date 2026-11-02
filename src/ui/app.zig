@@ -590,6 +590,11 @@ pub const App = struct {
             return;
         } };
         a.view.bga = if (a.cfg.bga) bga.Bga.create(a.gpa, &a.g, s) else null;
+        {
+            var arena = std.heap.ArenaAllocator.init(a.gpa);
+            defer arena.deinit();
+            a.view.scratch_right = skin_mod.scratchRight(skin_mod.loadConf(arena.allocator(), "", skin_mod.playType(s.chart.mode)));
+        }
         a.view.best_ex = a.bestEx(&s.chart.sha256, s.params.ln_mode);
         const pace_target = play.paceTarget(a.cfg.pace_target, s.params.practice != null);
         a.view.target_ex = play.targetEx(pace_target, a.view.best_ex, s.chart.total_notes);

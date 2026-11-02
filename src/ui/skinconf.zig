@@ -26,7 +26,6 @@ pub const State = struct {
 };
 
 pub fn open(a: *App, root_in: []const u8, want: i32, back: app_mod.Scene) void {
-    if (root_in.len == 0) return settings.say(a, "The built-in skin has no settings.", .{});
     close(a);
     var arena = std.heap.ArenaAllocator.init(a.gpa);
     const al = arena.allocator();
@@ -109,7 +108,7 @@ pub fn draw(a: *App) void {
         return;
     }
     _ = g.text(tr("Skin settings"), 22 * u, 18 * u, g.scaled(32), gfx.white);
-    g.textRight(std.fs.path.basename(s.root), g.w - 22 * u, 28 * u, g.scaled(16), gfx.dim);
+    g.textRight(if (s.root.len == 0) tr("Built-in") else std.fs.path.basename(s.root), g.w - 22 * u, 28 * u, g.scaled(16), gfx.dim);
 
     const top = 76 * u;
     const help_y = g.h - 44 * u;

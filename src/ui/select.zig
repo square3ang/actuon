@@ -54,6 +54,7 @@ pub const State = struct {
     searching: bool = false,
     status: []const u8 = "",
     status_buf: [128]u8 = undefined,
+    status_fade: Fade = .{},
     autoplay: bool = false,
     sort: u8 = 0,
     scan_thread: ?*c.SDL_Thread = null,
@@ -802,6 +803,22 @@ fn findPreview(al: std.mem.Allocator, song: db_mod.Song) ?[]const u8 {
 }
 
 /// Looks for a preview once the cursor has rested, so scrolling never touches the disk.
+const status_ms = 5000;
+
+/// Clears a message line a while after it last changed, so none of its many setters has to time it.
+pub const Fade = struct {
+    hash: u64 = 0,
+    since: u64 = 0,
+
+    pub fn tick(f: *Fade, text: *[]const u8, now: u64) void {
+        const h = std.hash.Wyhash.hash(0, text.*);
+        if (h != f.hash) {
+            f.hash = h;
+            f.since = now;
+        } else if (text.len > 0 and now - f.since >= status_ms) text.* = "";
+    }
+};
+
 fn updatePreview(a: *App) void {
     const s = &a.sel;
     const now = c.SDL_GetTicks();
@@ -1021,7 +1038,10 @@ fn drawDock(a: *App, dock_y: f32) void {
         .{ .sc = c.SDL_SCANCODE_F10, .label = tr("F10 Settings") },
         .{ .sc = c.SDL_SCANCODE_R, .label = tr("R Replay") },
         .{ .sc = c.SDL_SCANCODE_V, .label = tr("V Versus") },
+        .{ .sc = c.SDL_SCANCODE_P, .label = tr("P Practice") },
+        .{ .sc = c.SDL_SCANCODE_F, .label = tr("F Favorite") },
         .{ .sc = c.SDL_SCANCODE_8, .label = tr("8 Folder") },
+        .{ .sc = c.SDL_SCANCODE_9, .label = tr("9 Target") },
         .{ .sc = c.SDL_SCANCODE_ESCAPE, .label = tr("Esc Back") },
     };
     var name_buf: [4][32]u8 = undefined;
@@ -1045,6 +1065,7 @@ fn drawDock(a: *App, dock_y: f32) void {
         .{ .sc = c.SDL_SCANCODE_7, .label = tr("7 IR page") },
         .{ .sc = c.SDL_SCANCODE_V, .label = tr("V Versus") },
         .{ .sc = c.SDL_SCANCODE_8, .label = tr("8 Folder") },
+        .{ .sc = c.SDL_SCANCODE_9, .label = tr("9 Target") },
         .{ .sc = c.SDL_SCANCODE_6, .label = tr("6 Key config") },
     };
     const cmds: []const Cmd = if (cfg.beatoraja_select) &beatoraja_cmds else &keyboard_cmds;
@@ -1100,6 +1121,7 @@ pub fn draw(a: *App) void {
     blockClickUnderOverlay(a);
     tickBoard(a, c.SDL_GetTicks());
     tickScan(a);
+    a.sel.status_fade.tick(&a.sel.status, c.SDL_GetTicks());
     updatePreview(a);
     tickDownload(a);
     const g = &a.g;
@@ -2585,4 +2607,18 @@ test "the IR key asks for a server first" {
     key(a, c.SDL_SCANCODE_F9);
     try std.testing.expectEqualStrings("Set an IR server in settings first", a.sel.status);
     try std.testing.expect(a.sel.query == null);
+}
+
+test "a status line clears a while after it last changed" {
+    var f: Fade = .{};
+    var text: []const u8 = "one";
+    f.tick(&text, 1000);
+    f.tick(&text, 1000 + status_ms - 1);
+    try std.testing.expectEqualStrings("one", text);
+    text = "two";
+    f.tick(&text, 1000 + status_ms);
+    f.tick(&text, 1000 + 2 * status_ms - 1);
+    try std.testing.expectEqualStrings("two", text);
+    f.tick(&text, 1000 + 2 * status_ms);
+    try std.testing.expectEqualStrings("", text);
 }

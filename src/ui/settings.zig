@@ -71,7 +71,6 @@ const Item = enum {
     language,
     skin,
     skin_slots,
-    scratch_side,
     open_skins,
     green,
     lift,
@@ -106,7 +105,7 @@ const Item = enum {
             .add_table, .update_tables, .table_list => .tables,
             .volume, .bgm_volume, .bgm_set, .sfx_volume, .sound_set, .audio_rate, .audio_frames, .audio_device => .audio,
             .resolution, .fullscreen, .vsync, .fps_limit, .reflex, .bga, .bga_upscale, .language => .display,
-            .skin, .skin_slots, .scratch_side, .open_skins => .skin,
+            .skin, .skin_slots, .open_skins => .skin,
             .green, .lift, .hidden, .judge_offset, .visual_offset => .timing,
             .import_beatoraja, .import_lr2 => .scores,
             .ir_url, .ir_signup, .ir_signin, .ir_rename, .ir_send_failed, .ir_upload, .ir_download, .download_url, .update => .online,
@@ -138,7 +137,6 @@ const Item = enum {
             .bga_upscale => tr("BGA movie upscaling (FSRCNNX)"),
             .skin => tr("Skin"),
             .skin_slots => tr("Skins per screen"),
-            .scratch_side => tr("Scratch side"),
             .open_skins => tr("Open skin folder"),
             .open_data => tr("Open data folder"),
             .language => tr("Language"),
@@ -196,7 +194,6 @@ const Item = enum {
             .open_skins => tr("Put each skin in its own folder here, then pick it under Skin."),
             .open_data => tr("Settings, scores, replays and skins live here."),
             .skin_slots => tr("Enter picks a skin and its settings for each screen and key mode. The rest use the skin above."),
-            .scratch_side => tr("Where the built-in skin puts the scratch lane in single play. osu!mania skins have their own option."),
             .language => tr("The game's language. Applies at once."),
             .skin => tr("Enter or click lists the skins folder. Left/Right steps through them."),
             .green => tr("How long notes stay visible: higher is slower. Enter to type a number, 30 to 2000."),
@@ -232,6 +229,7 @@ pub const State = struct {
     editing: ?Item = null,
     message: []const u8 = "",
     message_buf: [512]u8 = undefined,
+    message_fade: select.Fade = .{},
     /// Which button of which bind group is being captured.
     capture_slot: ?u8 = null,
     capture_group: Item = .bind_7k,
@@ -258,7 +256,7 @@ pub const State = struct {
 
 const items = std.enums.values(Item);
 const poll_rates = [_]u32{ 0, 1000, 2000, 4000, 8000 };
-const fps_limits = [_]u32{ 0, 60, 120, 144, 240, 360, 1000 };
+const fps_limits = [_]u32{ 0, 30, 60, 75, 90, 120, 144, 165, 180, 200, 240, 280, 300, 360, 480, 500, 540, 600, 720, 1000 };
 
 /// A limit typed into config.json shows as the nearest choice at or below it.
 fn fpsIndex(fps: u32) usize {
@@ -754,14 +752,7 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
         .bga_upscale => drawToggle(g, right, y, h, cfg.bga_upscale, on),
         .bga => drawToggle(g, right, y, h, cfg.bga, on),
         .ir_send_failed => drawToggle(g, right, y, h, cfg.ir_send_failed, on),
-        .scratch_side => if (drawChoices(g, right, y, h, &.{ tr("Left"), tr("Right") }, @intFromBool(cfg.scratch_right), on)) |i| {
-            a.sfx(.adjust);
-            cfg.scratch_right = i == 1;
-        },
-        .fps_limit => if (drawChoices(g, right, y, h, &.{ tr("Off"), "60", "120", "144", "240", "360", "1000" }, fpsIndex(cfg.fps_limit), on)) |i| {
-            a.sfx(.adjust);
-            cfg.fps_limit = fps_limits[i];
-        },
+        .fps_limit => step(a, it, drawStepper(g, right, y, h, if (cfg.fps_limit == 0) tr("Off") else std.fmt.bufPrint(&buf, "{d}", .{fps_limits[fpsIndex(cfg.fps_limit)]}) catch "", on)),
         .beatoraja_select => drawToggle(g, right, y, h, cfg.beatoraja_select, on),
         .vsync => if (drawChoices(g, right, y, h, &.{ tr("Off"), tr("On"), tr("Adaptive") }, if (cfg.vsync == 0) 0 else if (cfg.vsync == 1) 1 else 2, on)) |i| {
             a.sfx(.adjust);
@@ -907,6 +898,7 @@ fn drawHelp(a: *App, px: f32, pw: f32, help_y: f32, help_h: f32) void {
     else
         tr("Enter or click to open this tab.");
     g.textClip(help, px + 18 * u, help_y + 8 * u, pw - 36 * u, g.scaled(14), gfx.sky);
+    s.message_fade.tick(&s.message, c.SDL_GetTicks());
     if (s.message.len > 0) g.textClip(s.message, px + 18 * u, help_y + 30 * u, pw - 36 * u, g.scaled(14), gfx.white);
     const hint = if (s.inside) tr("Up/Down select    Left/Right change    Enter edit    Esc or right click back") else tr("Up/Down choose a tab    Enter open    Esc or right click leave");
     _ = g.text(hint, px, g.h - 26 * u, g.scaled(12), gfx.dim);
@@ -980,7 +972,6 @@ fn adjust(a: *App, it: Item, dir: i32) void {
         .beatoraja_select => cfg.beatoraja_select = !cfg.beatoraja_select,
         .bga => cfg.bga = !cfg.bga,
         .ir_send_failed => cfg.ir_send_failed = !cfg.ir_send_failed,
-        .scratch_side => cfg.scratch_right = !cfg.scratch_right,
         .fps_limit => {
             const i = @as(i32, @intCast(fpsIndex(cfg.fps_limit))) + dir;
             cfg.fps_limit = fps_limits[@intCast(std.math.clamp(i, 0, fps_limits.len - 1))];

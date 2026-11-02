@@ -92,8 +92,6 @@ pub const Config = struct {
     ir_token: []const u8 = "",
     /// Off keeps failed plays off the IR, as beatoraja's "Complete song". Versus rounds always send.
     ir_send_failed: bool = true,
-    /// Single play draws the scratch lane right of the keys.
-    scratch_right: bool = false,
     /// Either a direct archive or a JSON answer naming one (see download.packageUrl).
     download_url: []const u8 = default_download_url,
     /// scancode (or joystick code) per physical button: 7 keys, scratch A, scratch B for each side.

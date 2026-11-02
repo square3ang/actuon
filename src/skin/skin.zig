@@ -304,9 +304,15 @@ fn addFileOptions(a: std.mem.Allocator, out: *std.ArrayList(Option), dir: []cons
     } else if (headerOf(a, path)) |h| try addOptions(a, out, dir, h);
 }
 
+pub const scratchRight = osuskin.scratchRight;
+
+/// The built-in skin's single play options; its root is "".
+const builtin_options = [_]Option{.{ .kind = .property, .name = osuskin.scratch_side_name, .choices = &osuskin.scratch_side_choices, .def = "Left" }};
+
 /// What the file `root` uses for screen `want` lets the player set, in the order it declares it.
 /// shortcut: LR2 #CUSTOMFILE and #CUSTOMOFFSET are not offered, their wildcards take the first match.
 pub fn options(a: std.mem.Allocator, root: []const u8, want: i32) ![]const Option {
+    if (root.len == 0) return if (want == playType(.beat7) or want == playType(.beat5)) &builtin_options else &.{};
     const path = find(a, root, want) orelse return &.{};
     var out: std.ArrayList(Option) = .empty;
     try addFileOptions(a, &out, std.fs.path.dirname(path) orelse ".", path);
@@ -516,4 +522,12 @@ test "a Lua header with a huge type has no type" {
     try std.testing.expectEqual(@as(?i32, null), typeOfFile(a, path));
     try fs.write(path, "return { type = 3 }");
     try std.testing.expectEqual(@as(?i32, 3), typeOfFile(a, path));
+}
+
+test "the built-in skin offers the scratch side for single play only" {
+    const a = std.testing.allocator;
+    try std.testing.expectEqualStrings(osuskin.scratch_side_name, (try options(a, "", playType(.beat7)))[0].name);
+    try std.testing.expectEqual(@as(usize, 1), (try options(a, "", playType(.beat5))).len);
+    try std.testing.expectEqual(@as(usize, 0), (try options(a, "", playType(.beat14))).len);
+    try std.testing.expectEqual(@as(usize, 0), (try options(a, "", type_select)).len);
 }
