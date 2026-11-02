@@ -199,9 +199,19 @@ const Lanes = struct {
 
 const top_y: f32 = 0;
 
+/// Fewer lanes get wider ones, so a 4 key gear is not a sliver beside the deck.
+fn keyWidth(mode: core.types.Mode) f32 {
+    return if (mode == .beat4) 92 else 42;
+}
+
+/// With no turntable, 4 keys sit flat under the fingers, not staggered like a beat controller.
+fn flatKeys(mode: core.types.Mode) bool {
+    return mode == .beat4;
+}
+
 fn layoutLanes(g: *gfx.Gfx, mode: core.types.Mode, cfg: *const config.Config) Lanes {
     const u = g.h / 720;
-    const key_w: f32 = 42 * u;
+    const key_w = keyWidth(mode) * u;
     const sc_w: f32 = 72 * u;
     const base_y = g.h * 0.765;
     const lift_px = base_y * cfg.lift;
@@ -335,6 +345,8 @@ fn drawController(g: *gfx.Gfx, l: *const Lanes, snap: *const session_mod.Snapsho
     for (l.order[0..l.n]) |lane| {
         if (l.mode.scratchOf(lane) >= 0) {
             drawTurntable(g, l.xs[lane] + l.ws[lane] / 2, l.pad_y + l.pad_h / 2, @min(l.ws[lane], l.pad_h) / 2 - 3 * u, t, snap.held[lane]);
+        } else if (flatKeys(l.mode)) {
+            drawKey(g, l.xs[lane] + 3 * u, l.pad_y + 8 * u, l.ws[lane] - 6 * u, 76 * u, noteColor(l.mode, lane), snap.held[lane]);
         } else drawKey(g, l.xs[lane] + 3 * u, l.pad_y + (if (noteColor(l.mode, lane).r >= 200) 44 * u else 8 * u), l.ws[lane] - 6 * u, 40 * u, noteColor(l.mode, lane), snap.held[lane]);
     }
     if (l.two_sides) g.rect(l.xs[l.order[l.n / 2]] - l.gap_w, 0, l.gap_w, l.pad_y + l.pad_h, gfx.bg);
@@ -432,6 +444,12 @@ fn noteColor(mode: core.types.Mode, lane: u8) gfx.Color {
     const blue: gfx.Color = .{ .r = 72, .g = 156, .b = 255 };
     const white: gfx.Color = .{ .r = 240, .g = 244, .b = 250 };
     if (mode.scratchOf(lane) >= 0) return scratch_red;
+    // Mirrored, so both hands read the same colors.
+    if (flatKeys(mode)) {
+        const mid = mode.keys() / 2;
+        const from_edge = if (lane < mid) lane else mode.keys() - 1 - lane;
+        return if (from_edge % 2 == 0) white else blue;
+    }
     if (mode == .popn9) return switch (lane) {
         0, 8 => white,
         1, 7 => gfx.amber,
@@ -659,6 +677,13 @@ test "a target's EX and the pace against it" {
     try std.testing.expectEqual(@as(i64, 10), paceDiff(100, 1800, 50, 1000));
     try std.testing.expectEqual(@as(i64, -10), paceDiff(80, 1800, 50, 1000));
     try std.testing.expectEqual(@as(i64, -1000), paceDiff(800, 1800, 2000, 1000));
+}
+
+test "a 4 key gear has wide, mirrored lanes" {
+    try std.testing.expect(keyWidth(.beat4) > keyWidth(.beat7) * 2);
+    try std.testing.expectEqual(noteColor(.beat4, 0), noteColor(.beat4, 3));
+    try std.testing.expectEqual(noteColor(.beat4, 1), noteColor(.beat4, 2));
+    try std.testing.expect(noteColor(.beat4, 0).r != noteColor(.beat4, 1).r);
 }
 
 test "green number maps to visible y" {
