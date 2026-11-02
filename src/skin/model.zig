@@ -294,7 +294,7 @@ pub const button_index: i32 = 91000;
 fn imageRef(ref: i32) i32 {
     return switch (ref) {
         390...399 => ref + 10000,
-        11, 12, 40, 42, 55, 78, 308 => ref + button_index,
+        11, 12, 40, 42, 55, 72, 78, 308 => ref + button_index,
         else => ref,
     };
 }

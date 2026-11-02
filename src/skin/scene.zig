@@ -62,6 +62,8 @@ pub const SelectInfo = struct {
     random_index: i64 = 0,
     hsfix_index: i64 = 0,
     autoshift_index: i64 = 0,
+    /// beatoraja's BGA button: 0 on, 2 off (1, AUTO, is not offered).
+    bga_index: i64 = 0,
     mode_index: i64 = 0,
     sort_index: i64 = 0,
     ln_index: i64 = 0,
@@ -437,6 +439,7 @@ pub const State = struct {
                 m.button_index + 42 => return se.random_index,
                 m.button_index + 55 => return se.hsfix_index,
                 m.button_index + 78 => return se.autoshift_index,
+                m.button_index + 72 => return se.bga_index,
                 71 => return se.ex,
                 76 => return if (se.miss >= 0) se.miss else null,
                 77 => return se.played,
@@ -987,7 +990,7 @@ test "song select tells the skin about the IR" {
 }
 
 test "song select tells the skin its panel and options" {
-    var st: State = .{ .select = .{ .panel = 2, .random_index = 3, .autoshift_index = 4 } };
+    var st: State = .{ .select = .{ .panel = 2, .random_index = 3, .autoshift_index = 4, .bga_index = 2 } };
     try std.testing.expect(State.opt(&st, 22));
     st.select.?.replays = 2;
     st.select.?.replay_slot = 1;
@@ -998,6 +1001,7 @@ test "song select tells the skin its panel and options" {
     try std.testing.expect(!State.opt(&st, 21));
     try std.testing.expectEqual(@as(?i64, 3), State.num(&st, m.button_index + 42));
     try std.testing.expectEqual(@as(?i64, 4), State.num(&st, m.button_index + 78));
+    try std.testing.expectEqual(@as(?i64, 2), State.num(&st, m.button_index + 72));
     st.select.?.sort_index = 5;
     st.select.?.mode_index = 2;
     try std.testing.expectEqual(@as(?i64, 5), State.num(&st, m.button_index + 12));

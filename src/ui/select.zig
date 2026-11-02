@@ -1171,7 +1171,7 @@ fn drawPanel(a: *App) void {
         },
         2 => .{ tr("Nothing to set here yet"), "", "" },
         else => .{
-            std.fmt.bufPrint(&buf[0], "{s}  GAS  {s}", .{ settings.keyName(cfg.p1[1], &names[0]), if (cfg.gauge == config.gas) "ON" else "OFF" }) catch "",
+            std.fmt.bufPrint(&buf[0], "{s}  BGA  {s}    {s}  GAS  {s}", .{ settings.keyName(cfg.p1[0], &names[1]), if (cfg.bga) "ON" else "OFF", settings.keyName(cfg.p1[1], &names[0]), if (cfg.gauge == config.gas) "ON" else "OFF" }) catch "",
             i18n.bufPrint(&buf[1], "{s}, {s}  DURATION  {d} ms", .{ settings.keyName(cfg.p1[3], &names[0]), settings.keyName(cfg.p1[5], &names[1]), cfg.green_ms }) catch "",
             i18n.bufPrint(&buf[2], "{s}, {s}  JUDGE OFFSET  {d} ms", .{ settings.keyName(cfg.p1[4], &names[0]), settings.keyName(cfg.p1[6], &names[1]), cfg.judge_offset_ms }) catch "",
         },
@@ -1263,6 +1263,7 @@ fn fillSkinState(a: *App) void {
     st.select.?.hsfix_index = if (cfg.hs_fix >= 3) 0 else cfg.hs_fix + 1;
     // GAS starts from the gauge picked and falls: beatoraja's "select to under".
     st.select.?.autoshift_index = if (cfg.gauge == config.gas) 4 else 0;
+    st.select.?.bga_index = if (cfg.bga) 0 else 2;
     st.select.?.mode_index = mode_filters[s.mode_filter].skin_index;
     st.select.?.sort_index = s.sort;
     st.select.?.ln_index = @min(cfg.ln_mode, 2);
@@ -1884,6 +1885,7 @@ fn padOption(a: *App, panel: u8, at: usize) void {
             else => return,
         },
         3 => switch (at) {
+            0 => cfg.bga = !cfg.bga,
             1 => cfg.gauge = if (cfg.gauge == config.gas) 4 else config.gas,
             3 => cfg.green_ms = @max(cfg.green_ms, 75) - 25,
             5 => cfg.green_ms += 25,
@@ -2314,6 +2316,8 @@ test "start and select pick the panel, whose keys change options instead of movi
     try std.testing.expectEqual(@as(u8, 4), a.cfg.gauge);
     _ = pad(a, a.cfg.p1[6], true, false);
     try std.testing.expectEqual(@as(i32, 1), a.cfg.judge_offset_ms);
+    _ = pad(a, a.cfg.p1[0], true, false);
+    try std.testing.expect(!a.cfg.bga);
     _ = pad(a, start, false, false);
     try std.testing.expectEqual(@as(u8, 2), panelOf(&a.sel));
     a.scene = .result;
