@@ -447,7 +447,7 @@ fn pendingReplays(a: std.mem.Allocator, d: db_mod.Db, mine: []const MyScore) ![]
     for (mine) |s| if (s.verified) try best.put(a, s.sha256, .{ .ex = s.ex, .clear = s.clear });
     const st = try d.prepare(
         \\SELECT r.id,r.sha256,r.ex,r.clear,COALESCE((SELECT path FROM song s WHERE s.sha256=r.sha256 LIMIT 1),'')
-        \\FROM replay r ORDER BY r.sha256, r.ex DESC, r.clear DESC
+        \\FROM replay r WHERE r.ln_mode=0 ORDER BY r.sha256, r.ex DESC, r.clear DESC
     );
     defer st.deinit();
     var out: std.ArrayList(Pending) = .empty;
@@ -471,7 +471,7 @@ fn pendingClaims(a: std.mem.Allocator, d: db_mod.Db, mine: []const MyScore) ![]M
         const got = try best.getOrPutValue(a, s.sha256, .{ .ex = 0, .clear = 0 });
         got.value_ptr.* = .{ .ex = @max(s.ex, got.value_ptr.ex), .clear = @max(s.clear, got.value_ptr.clear) };
     }
-    const st = try d.prepare("SELECT sha256,ex,clear,min_bp,max_combo,date FROM score WHERE ex>0 OR clear>0");
+    const st = try d.prepare("SELECT sha256,ex,clear,min_bp,max_combo,date FROM score WHERE mode=0 AND (ex>0 OR clear>0)");
     defer st.deinit();
     var out: std.ArrayList(MyScore) = .empty;
     while (try st.step()) {

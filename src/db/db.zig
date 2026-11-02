@@ -103,16 +103,16 @@ pub const schema =
     \\  title TEXT, subtitle TEXT, artist TEXT, subartist TEXT, genre TEXT, level TEXT,
     \\  difficulty INTEGER, mode INTEGER, notes INTEGER, total REAL, judgerank INTEGER,
     \\  min_bpm REAL, max_bpm REAL, length_ms INTEGER, has_ln INTEGER, has_mine INTEGER, has_random INTEGER,
-    \\  stagefile TEXT, banner TEXT, preview TEXT, mtime INTEGER, size INTEGER);
+    \\  stagefile TEXT, banner TEXT, preview TEXT, mtime INTEGER, size INTEGER, has_open_ln INTEGER DEFAULT 0);
     \\CREATE INDEX IF NOT EXISTS song_sha ON song(sha256);
     \\CREATE INDEX IF NOT EXISTS song_md5 ON song(md5);
     \\CREATE INDEX IF NOT EXISTS song_folder ON song(folder);
     \\CREATE TABLE IF NOT EXISTS score(
-    \\  sha256 TEXT PRIMARY KEY, clear INTEGER DEFAULT 0, ex INTEGER DEFAULT 0,
+    \\  sha256 TEXT NOT NULL, mode INTEGER NOT NULL DEFAULT 0, clear INTEGER DEFAULT 0, ex INTEGER DEFAULT 0,
     \\  pg INTEGER DEFAULT 0, gr INTEGER DEFAULT 0, gd INTEGER DEFAULT 0, bd INTEGER DEFAULT 0, pr INTEGER DEFAULT 0, ms INTEGER DEFAULT 0,
     \\  max_combo INTEGER DEFAULT 0, min_bp INTEGER DEFAULT 2147483647, playcount INTEGER DEFAULT 0, clearcount INTEGER DEFAULT 0,
-    \\  date INTEGER DEFAULT 0, source TEXT DEFAULT '');
-    \\CREATE TABLE IF NOT EXISTS replay(id INTEGER PRIMARY KEY, sha256 TEXT, date INTEGER, ex INTEGER, clear INTEGER, data BLOB);
+    \\  date INTEGER DEFAULT 0, source TEXT DEFAULT '', PRIMARY KEY(sha256, mode));
+    \\CREATE TABLE IF NOT EXISTS replay(id INTEGER PRIMARY KEY, sha256 TEXT, date INTEGER, ex INTEGER, clear INTEGER, data BLOB, ln_mode INTEGER NOT NULL DEFAULT 0);
     \\CREATE INDEX IF NOT EXISTS replay_sha ON replay(sha256);
     \\CREATE TABLE IF NOT EXISTS dir(path TEXT PRIMARY KEY, mtime INTEGER);
     \\CREATE TABLE IF NOT EXISTS bms_table(url TEXT PRIMARY KEY, name TEXT, symbol TEXT, fetched INTEGER);
@@ -122,10 +122,52 @@ pub const schema =
     \\CREATE INDEX IF NOT EXISTS table_song_sha ON table_song(sha256);
     \\CREATE TABLE IF NOT EXISTS course(id INTEGER PRIMARY KEY, table_url TEXT, name TEXT, hashes TEXT, constraints TEXT, UNIQUE(table_url, name));
     \\CREATE TABLE IF NOT EXISTS course_score(course_id INTEGER, clear INTEGER, ex INTEGER, date INTEGER, PRIMARY KEY(course_id));
+    \\CREATE TABLE IF NOT EXISTS favorite(sha256 TEXT PRIMARY KEY, date INTEGER);
+    \\CREATE TEMP TABLE IF NOT EXISTS play_setting(ln_mode INTEGER NOT NULL);
+    \\INSERT INTO play_setting SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM play_setting);
 ;
+
+fn hasColumn(d: Db, table: []const u8, column: []const u8) !bool {
+    var buf: [64]u8 = undefined;
+    const st = try d.prepare(try std.fmt.bufPrint(&buf, "PRAGMA table_info({s})", .{table}));
+    defer st.deinit();
+    while (try st.step()) if (std.mem.eql(u8, st.text(1), column)) return true;
+    return false;
+}
+
+/// A database from before CN and HCN had scores of their own. Its rows are all LN plays, and its charts must be
+/// read again to learn which leave the LN type open.
+fn migrateLnModes(d: Db) !void {
+    if (try hasColumn(d, "score", "mode")) return;
+    try d.exec("BEGIN IMMEDIATE");
+    errdefer d.exec("ROLLBACK") catch {};
+    try d.exec(
+        \\ALTER TABLE score RENAME TO score_v0;
+        \\CREATE TABLE score(
+        \\  sha256 TEXT NOT NULL, mode INTEGER NOT NULL DEFAULT 0, clear INTEGER DEFAULT 0, ex INTEGER DEFAULT 0,
+        \\  pg INTEGER DEFAULT 0, gr INTEGER DEFAULT 0, gd INTEGER DEFAULT 0, bd INTEGER DEFAULT 0, pr INTEGER DEFAULT 0, ms INTEGER DEFAULT 0,
+        \\  max_combo INTEGER DEFAULT 0, min_bp INTEGER DEFAULT 2147483647, playcount INTEGER DEFAULT 0, clearcount INTEGER DEFAULT 0,
+        \\  date INTEGER DEFAULT 0, source TEXT DEFAULT '', PRIMARY KEY(sha256, mode));
+        \\INSERT INTO score(sha256,clear,ex,pg,gr,gd,bd,pr,ms,max_combo,min_bp,playcount,clearcount,date,source)
+        \\ SELECT sha256,clear,ex,pg,gr,gd,bd,pr,ms,max_combo,min_bp,playcount,clearcount,date,source FROM score_v0;
+        \\DROP TABLE score_v0;
+    );
+    if (!try hasColumn(d, "replay", "ln_mode")) try d.exec("ALTER TABLE replay ADD COLUMN ln_mode INTEGER NOT NULL DEFAULT 0");
+    if (!try hasColumn(d, "song", "has_open_ln")) try d.exec("ALTER TABLE song ADD COLUMN has_open_ln INTEGER DEFAULT 0; UPDATE song SET mtime=0 WHERE has_ln=1");
+    try d.exec("COMMIT");
+}
 
 pub fn initSchema(d: Db) !void {
     try d.exec(schema);
+    try migrateLnModes(d);
+}
+
+/// The LN mode song select's scores and replays are for, on charts that leave it open. Only this connection sees it.
+pub fn setLnMode(d: Db, mode: u8) !void {
+    const st = try d.prepare("UPDATE temp.play_setting SET ln_mode=?1");
+    defer st.deinit();
+    st.bindInt(1, mode);
+    _ = try st.step();
 }
 
 pub fn openMain(gpa: std.mem.Allocator) !Db {
@@ -135,7 +177,7 @@ pub fn openMain(gpa: std.mem.Allocator) !Db {
     defer gpa.free(p);
     const d = try Db.open(p, gpa, false);
     errdefer d.close();
-    try d.exec(schema);
+    try initSchema(d);
     return d;
 }
 
@@ -180,6 +222,11 @@ fn scanWorker(ud: ?*anyopaque) callconv(.c) c_int {
             core.bms.parse(w.gpa, job.bytes, .{ .is_pms = std.ascii.endsWithIgnoreCase(job.path, ".pms") })) catch continue;
         if (w.progress) |p| _ = p.fetchAdd(1, .monotonic);
     }
+}
+
+fn hasOpenLn(chart: *const core.types.Chart) bool {
+    for (chart.notes) |n| if (n.ln_open) return true;
+    return false;
 }
 
 /// Parses on every core; the inserts stay on this thread, which owns the connection.
@@ -228,6 +275,7 @@ fn insertBatch(gpa: std.mem.Allocator, d: Db, ins: anytype, jobs: []ScanJob, sta
         ins.bindText(24, chart.preview);
         ins.bindInt(25, job.mtime);
         ins.bindInt(26, @intCast(job.size));
+        ins.bindInt(27, @intFromBool(hasOpenLn(chart)));
         _ = try ins.step();
         ins.reset();
         stats.parsed += 1;
@@ -245,8 +293,8 @@ pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: 
     const known = try d.prepare("SELECT mtime, size FROM song WHERE path=?1");
     defer known.deinit();
     const ins = try d.prepare(
-        \\INSERT OR REPLACE INTO song(path,folder,sha256,md5,title,subtitle,artist,subartist,genre,level,difficulty,mode,notes,total,judgerank,min_bpm,max_bpm,length_ms,has_ln,has_mine,has_random,stagefile,banner,preview,mtime,size)
-        \\VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)
+        \\INSERT OR REPLACE INTO song(path,folder,sha256,md5,title,subtitle,artist,subartist,genre,level,difficulty,mode,notes,total,judgerank,min_bpm,max_bpm,length_ms,has_ln,has_mine,has_random,stagefile,banner,preview,mtime,size,has_open_ln)
+        \\VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)
     );
     defer ins.deinit();
 
@@ -348,6 +396,8 @@ pub const Song = struct {
     max_bpm: f64,
     length_ms: i64,
     has_ln: bool,
+    has_open_ln: bool = false,
+    favorite: bool = false,
     stagefile: []const u8,
     banner: []const u8,
     preview: []const u8,
@@ -368,8 +418,10 @@ pub const song_select =
     \\SELECT s.path,s.folder,s.sha256,s.md5,s.title,s.subtitle,s.artist,s.genre,s.level,s.difficulty,s.mode,s.notes,s.min_bpm,s.max_bpm,s.length_ms,s.has_ln,s.stagefile,s.banner,s.preview,
     \\ COALESCE(c.clear,0),COALESCE(c.ex,0),COALESCE(c.min_bp,-1),COALESCE(c.playcount,0),
     \\ (SELECT COALESCE(b.symbol,'')||t.level FROM table_song t JOIN bms_table b ON b.url=t.url
-    \\  WHERE (t.md5=s.md5 AND t.md5<>'') OR (t.sha256=s.sha256 AND t.sha256<>'') ORDER BY b.name LIMIT 1)
-    \\ FROM song s LEFT JOIN score c ON c.sha256=s.sha256
+    \\  WHERE (t.md5=s.md5 AND t.md5<>'') OR (t.sha256=s.sha256 AND t.sha256<>'') ORDER BY b.name LIMIT 1),
+    \\ COALESCE(s.has_open_ln,0),
+    \\ EXISTS(SELECT 1 FROM favorite f WHERE f.sha256=s.sha256)
+    \\ FROM song s LEFT JOIN score c ON c.sha256=s.sha256 AND c.mode=CASE WHEN s.has_open_ln THEN (SELECT ln_mode FROM temp.play_setting) ELSE 0 END
 ;
 
 pub fn readSong(a: std.mem.Allocator, st: Stmt) !Song {
@@ -403,6 +455,8 @@ pub fn readSong(a: std.mem.Allocator, st: Stmt) !Song {
         .miss = st.int(21),
         .played = @intCast(st.int(22)),
         .table_level = try dup(a, st, 23),
+        .has_open_ln = st.int(24) != 0,
+        .favorite = st.int(25) != 0,
     };
 }
 
@@ -410,20 +464,23 @@ pub fn readSong(a: std.mem.Allocator, st: Stmt) !Song {
 pub const max_replays = 4;
 
 /// Drops replays nothing can reach: the song select's newest ones, and the best one IR sync uploads.
-pub fn pruneReplays(d: Db, sha256: []const u8) !void {
+pub fn pruneReplays(d: Db, sha256: []const u8, ln_mode: u8) !void {
     const st = try d.prepare(
-        \\DELETE FROM replay WHERE sha256=?1
-        \\ AND id NOT IN (SELECT id FROM replay WHERE sha256=?1 ORDER BY date DESC, id DESC LIMIT ?2)
-        \\ AND id NOT IN (SELECT id FROM replay WHERE sha256=?1 ORDER BY ex DESC, clear DESC LIMIT 1)
+        \\DELETE FROM replay WHERE sha256=?1 AND ln_mode=?3
+        \\ AND id NOT IN (SELECT id FROM replay WHERE sha256=?1 AND ln_mode=?3 ORDER BY date DESC, id DESC LIMIT ?2)
+        \\ AND id NOT IN (SELECT id FROM replay WHERE sha256=?1 AND ln_mode=?3 ORDER BY ex DESC, clear DESC LIMIT 1)
     );
     defer st.deinit();
     st.bindText(1, sha256);
     st.bindInt(2, max_replays);
+    st.bindInt(3, ln_mode);
     _ = try st.step();
 }
 
 pub const ScoreIn = struct {
     sha256: []const u8,
+    /// 0 LN, 1 CN, 2 HCN. A chart that sets its own LN type is always 0, as in beatoraja.
+    mode: u8 = 0,
     clear: u8,
     ex: u32,
     counts: [6]u32,
@@ -440,9 +497,9 @@ pub const ScoreIn = struct {
 // shortcut: a row remembers one source, so alternating two imports still adds up, keep counts per source if that is reported.
 pub fn recordScore(d: Db, s: ScoreIn) !void {
     const st = try d.prepare(
-        \\INSERT INTO score(sha256,clear,ex,pg,gr,gd,bd,pr,ms,max_combo,min_bp,playcount,clearcount,date,source)
-        \\VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
-        \\ON CONFLICT(sha256) DO UPDATE SET
+        \\INSERT INTO score(sha256,clear,ex,pg,gr,gd,bd,pr,ms,max_combo,min_bp,playcount,clearcount,date,source,mode)
+        \\VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+        \\ON CONFLICT(sha256,mode) DO UPDATE SET
         \\ clear=MAX(clear,excluded.clear),
         \\ pg=CASE WHEN excluded.ex>ex THEN excluded.pg ELSE pg END,
         \\ gr=CASE WHEN excluded.ex>ex THEN excluded.gr ELSE gr END,
@@ -469,6 +526,7 @@ pub fn recordScore(d: Db, s: ScoreIn) !void {
     st.bindInt(13, s.cleared);
     st.bindInt(14, s.date);
     st.bindText(15, s.source);
+    st.bindInt(16, s.mode);
     _ = try st.step();
 }
 
@@ -478,7 +536,7 @@ pub const ImportStats = struct { imported: u32 = 0, skipped: u32 = 0 };
 pub fn importBeatoraja(gpa: std.mem.Allocator, d: Db, path: []const u8) !ImportStats {
     const src = try Db.open(path, gpa, true);
     defer src.close();
-    const st = try src.prepare("SELECT sha256,clear,epg,lpg,egr,lgr,egd,lgd,ebd,lbd,epr,lpr,ems,lms,combo,minbp,playcount,clearcount,date FROM score WHERE mode=0");
+    const st = try src.prepare("SELECT sha256,clear,epg,lpg,egr,lgr,egd,lgd,ebd,lbd,epr,lpr,ems,lms,combo,minbp,playcount,clearcount,date,mode FROM score WHERE mode IN (0,1,2)");
     defer st.deinit();
     var stats: ImportStats = .{};
     try d.exec("BEGIN");
@@ -488,6 +546,7 @@ pub fn importBeatoraja(gpa: std.mem.Allocator, d: Db, path: []const u8) !ImportS
         const gr = st.int(4) + st.int(5);
         try recordScore(d, .{
             .sha256 = st.text(0),
+            .mode = @intCast(st.int(19)),
             .clear = @intCast(std.math.clamp(st.int(1), 0, 10)),
             .ex = @intCast(pg * 2 + gr),
             .counts = .{ @intCast(pg), @intCast(gr), @intCast(st.int(6) + st.int(7)), @intCast(st.int(8) + st.int(9)), @intCast(st.int(10) + st.int(11)), @intCast(st.int(12) + st.int(13)) },
@@ -659,12 +718,51 @@ test "importing the same scores twice does not double the play counts, local pla
     try std.testing.expectEqualStrings("LR2", st.text(2));
 }
 
+test "an old database keeps its scores as LN plays, and each LN mode has its own best" {
+    const d = try Db.open(":memory:", std.testing.allocator, false);
+    defer d.close();
+    try d.exec(
+        \\CREATE TABLE score(sha256 TEXT PRIMARY KEY, clear INTEGER DEFAULT 0, ex INTEGER DEFAULT 0, pg INTEGER DEFAULT 0, gr INTEGER DEFAULT 0, gd INTEGER DEFAULT 0, bd INTEGER DEFAULT 0, pr INTEGER DEFAULT 0, ms INTEGER DEFAULT 0, max_combo INTEGER DEFAULT 0, min_bp INTEGER DEFAULT 2147483647, playcount INTEGER DEFAULT 0, clearcount INTEGER DEFAULT 0, date INTEGER DEFAULT 0, source TEXT DEFAULT '');
+        \\CREATE TABLE replay(id INTEGER PRIMARY KEY, sha256 TEXT, date INTEGER, ex INTEGER, clear INTEGER, data BLOB);
+        \\CREATE TABLE song(path TEXT PRIMARY KEY, folder TEXT NOT NULL, sha256 TEXT NOT NULL, md5 TEXT NOT NULL, has_ln INTEGER, mtime INTEGER, title TEXT, subtitle TEXT, artist TEXT, subartist TEXT, genre TEXT, level TEXT, difficulty INTEGER, mode INTEGER, notes INTEGER, min_bpm REAL, max_bpm REAL, length_ms INTEGER, stagefile TEXT, banner TEXT, preview TEXT);
+        \\INSERT INTO score(sha256,ex) VALUES('a',50);
+        \\INSERT INTO song(path,folder,sha256,md5,has_ln,mtime) VALUES('p','f','a','m',1,9);
+    );
+    try initSchema(d);
+    try initSchema(d);
+    try recordScore(d, .{ .sha256 = "a", .mode = 2, .clear = 1, .ex = 7, .counts = @splat(0), .max_combo = 0, .miss = 0, .date = 1 });
+    const q = try d.prepare("SELECT group_concat(mode||':'||ex) FROM (SELECT mode,ex FROM score ORDER BY mode)");
+    defer q.deinit();
+    try std.testing.expect(try q.step());
+    try std.testing.expectEqualStrings("0:50,2:7", q.text(0));
+    const m = try d.prepare("SELECT mtime FROM song");
+    defer m.deinit();
+    try std.testing.expect(try m.step());
+    try std.testing.expectEqual(@as(i64, 0), m.int(0));
+}
+
+test "song select shows the score of its LN mode only on charts that leave it open" {
+    const gpa = std.testing.allocator;
+    const d = try Db.open(":memory:", gpa, false);
+    defer d.close();
+    try initSchema(d);
+    try d.exec("INSERT INTO song(path,folder,sha256,md5,has_open_ln,title) VALUES('open','f','o','',1,'a'),('set','f','s','',0,'b'); INSERT INTO score(sha256,mode,ex) VALUES('o',0,10),('o',1,20),('s',0,30)");
+    try setLnMode(d, 1);
+    const st = try d.prepare(song_select ++ " ORDER BY s.title");
+    defer st.deinit();
+    try std.testing.expect(try st.step());
+    try std.testing.expectEqual(@as(i64, 20), st.int(20));
+    try std.testing.expect(try st.step());
+    try std.testing.expectEqual(@as(i64, 30), st.int(20));
+}
+
+
 test "pruning keeps the newest replays and the best one" {
     const d = try Db.open(":memory:", std.testing.allocator, false);
     defer d.close();
     try initSchema(d);
     try d.exec("INSERT INTO replay(id,sha256,date,ex,clear) VALUES(1,'a',1,1,1),(2,'a',2,99,1),(3,'a',3,1,1),(4,'a',4,1,1),(5,'a',5,1,1),(6,'a',6,1,1),(7,'a',7,1,1),(8,'b',1,1,1)");
-    try pruneReplays(d, "a");
+    try pruneReplays(d, "a", 0);
     const st = try d.prepare("SELECT group_concat(id) FROM (SELECT id FROM replay ORDER BY id)");
     defer st.deinit();
     try std.testing.expect(try st.step());

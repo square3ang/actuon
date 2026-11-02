@@ -410,10 +410,11 @@ pub const App = struct {
         if (a.preview_pending and a.load_thread == null and a.session == null) a.launchPreview();
     }
 
-    fn bestEx(a: *App, sha: []const u8) u32 {
-        const st = a.db.prepare("SELECT ex FROM score WHERE sha256=?1") catch return 0;
+    fn bestEx(a: *App, sha: []const u8, ln_mode: core.options.LnMode) u32 {
+        const st = a.db.prepare("SELECT ex FROM score WHERE sha256=?1 AND mode=?2") catch return 0;
         defer st.deinit();
         st.bindText(1, sha);
+        st.bindInt(2, @backingInt(ln_mode));
         return if (st.step() catch false) @intCast(st.int(0)) else 0;
     }
 
@@ -574,7 +575,7 @@ pub const App = struct {
             return;
         } };
         a.view.bga = bga.Bga.create(a.gpa, &a.g, s);
-        a.view.best_ex = a.bestEx(&s.chart.sha256);
+        a.view.best_ex = a.bestEx(&s.chart.sha256, s.params.ln_mode);
         // The clock carries on from the loading screen, so what it opened is not replayed.
         if (a.load_skin_at != 0 and a.play_skin != null) a.skin_state.load_ms = elapsed;
         a.skin_state.fromSession(s, &a.cfg);
@@ -1099,6 +1100,7 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
         .sel = .{},
     };
     defer app.db.close();
+    db_mod.setLnMode(app.db, app.cfg.ln_mode) catch |e| std.log.err("LN mode not applied to scores: {t}", .{e});
     defer app.g.deinit();
     defer app.text.deinit(gpa);
     if (opts.shot) |p| {

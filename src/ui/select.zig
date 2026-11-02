@@ -1408,8 +1408,11 @@ fn replaysOf(a: *App, sha256: []const u8) u8 {
     return n;
 }
 
+/// The replays of the LN mode selected, on a chart that leaves it open.
+const replay_mode = "ln_mode=CASE WHEN EXISTS(SELECT 1 FROM song WHERE sha256=?1 AND has_open_ln) THEN (SELECT ln_mode FROM temp.play_setting) ELSE 0 END";
+
 fn countReplays(a: *App, sha256: []const u8) !u8 {
-    const st = try a.db.prepare("SELECT COUNT(*) FROM (SELECT 1 FROM replay WHERE sha256=?1 LIMIT " ++ std.fmt.comptimePrint("{d}", .{max_replays}) ++ ")");
+    const st = try a.db.prepare("SELECT COUNT(*) FROM (SELECT 1 FROM replay WHERE sha256=?1 AND " ++ replay_mode ++ " LIMIT " ++ std.fmt.comptimePrint("{d}", .{max_replays}) ++ ")");
     defer st.deinit();
     st.bindText(1, sha256);
     return if (try st.step()) @intCast(st.int(0)) else 0;
@@ -1420,7 +1423,7 @@ fn loadReplay(a: *App, sha256: []const u8, slot: u8) !core.replay.Replay {
     const s = &a.sel;
     if (s.replay_arena) |*old| old.deinit();
     s.replay_arena = .init(a.gpa);
-    const st = try a.db.prepare("SELECT data FROM replay WHERE sha256=?1 ORDER BY date DESC, id DESC LIMIT 1 OFFSET ?2");
+    const st = try a.db.prepare("SELECT data FROM replay WHERE sha256=?1 AND " ++ replay_mode ++ " ORDER BY date DESC, id DESC LIMIT 1 OFFSET ?2");
     defer st.deinit();
     st.bindText(1, sha256);
     st.bindInt(2, slot);
@@ -1881,7 +1884,11 @@ pub fn key(a: *App, sc: u32) void {
             reload(a);
         },
         c.SDL_SCANCODE_2 => key(a, c.SDL_SCANCODE_F4),
-        c.SDL_SCANCODE_3 => a.cfg.ln_mode = (@min(a.cfg.ln_mode, 2) + 1) % 3,
+        c.SDL_SCANCODE_3 => {
+            a.cfg.ln_mode = (@min(a.cfg.ln_mode, 2) + 1) % 3;
+            db_mod.setLnMode(a.db, a.cfg.ln_mode) catch |e| std.log.err("LN mode not applied to scores: {t}", .{e});
+            reload(a);
+        },
         c.SDL_SCANCODE_4 => nextReplay(a),
         c.SDL_SCANCODE_6 => settings.openControls(a),
         c.SDL_SCANCODE_7 => openChartPage(a),

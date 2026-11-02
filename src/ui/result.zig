@@ -31,7 +31,6 @@ pub const State = struct {
     /// The clear or fail sound, cut when the screen is left; it can be a whole song.
     music_slot: ?u8 = null,
     recorded: bool = false,
-    ln_unranked: bool = false,
     shown_at: u64 = 0,
     /// When a key started the skin's fade out; the screen ends with it.
     leave_at: u64 = 0,
@@ -49,11 +48,13 @@ pub fn dropBoard(a: *App) void {
 /// A score and its replay land together, or the IR would be asked to verify a score with nothing behind it.
 fn saveLocal(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, bytes: []const u8) !void {
     const r = &a.res;
+    const ln_mode = @backingInt(s.params.ln_mode);
     try a.db.exec("BEGIN IMMEDIATE");
     {
-        const look = try a.db.prepare("SELECT ex, clear FROM score WHERE sha256=?1");
+        const look = try a.db.prepare("SELECT ex, clear FROM score WHERE sha256=?1 AND mode=?2");
         defer look.deinit();
         look.bindText(1, &s.chart.sha256);
+        look.bindInt(2, ln_mode);
         if (try look.step()) {
             r.prev_ex = @intCast(look.int(0));
             r.prev_clear = @intCast(look.int(1));
@@ -64,10 +65,9 @@ fn saveLocal(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, bytes
     var counts: [6]u32 = undefined;
     for (&counts, sc.counts) |*d, v| d.* = v[0] + v[1];
     const date = wallClock();
-    // shortcut: scores keep one row per chart, so CN and HCN plays are not saved, add a mode column to rank them.
-    r.ln_unranked = s.params.ln_mode != .ln;
-    if (!r.ln_unranked) try db_mod.recordScore(a.db, .{
+    try db_mod.recordScore(a.db, .{
         .sha256 = &s.chart.sha256,
+        .mode = ln_mode,
         .clear = @backingInt(r.clear),
         .ex = sc.exScore(),
         .counts = counts,
@@ -77,18 +77,19 @@ fn saveLocal(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, bytes
         .date = date,
     });
     {
-        const ins = try a.db.prepare("INSERT INTO replay(sha256,date,ex,clear,data) VALUES(?1,?2,?3,?4,?5)");
+        const ins = try a.db.prepare("INSERT INTO replay(sha256,date,ex,clear,data,ln_mode) VALUES(?1,?2,?3,?4,?5,?6)");
         defer ins.deinit();
         ins.bindText(1, &s.chart.sha256);
         ins.bindInt(2, date);
         ins.bindInt(3, sc.exScore());
         ins.bindInt(4, @backingInt(r.clear));
         ins.bindBlob(5, bytes);
+        ins.bindInt(6, ln_mode);
         _ = try ins.step();
     }
-    try db_mod.pruneReplays(a.db, &s.chart.sha256);
+    try db_mod.pruneReplays(a.db, &s.chart.sha256, ln_mode);
     try a.db.exec("COMMIT");
-    r.recorded = !r.ln_unranked;
+    r.recorded = true;
 }
 
 pub fn capture(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, natural: bool) void {
@@ -101,7 +102,6 @@ pub fn capture(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, nat
     const finished = natural and !snap.failed;
     r.clear = s.sim.clear(finished);
     r.recorded = false;
-    r.ln_unranked = false;
     r.save_failed = false;
     r.prev_ex = 0;
     r.prev_clear = 0;
@@ -129,8 +129,8 @@ pub fn capture(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, nat
         r.save_failed = true;
         return;
     };
-    // A play left early would rank on the server as if it had reached the end.
-    if (natural and !r.ln_unranked and a.cfg.ir_url.len > 0 and a.cfg.ir_token.len > 0) r.board = ir.startUpload(a.gpa, a.cfg.ir_url, a.cfg.ir_token, &s.chart.sha256, s.params.path, bytes);
+    // A play left early would rank on the server as if it had reached the end. The server ranks LN plays only.
+    if (natural and s.params.ln_mode == .ln and a.cfg.ir_url.len > 0 and a.cfg.ir_token.len > 0) r.board = ir.startUpload(a.gpa, a.cfg.ir_url, a.cfg.ir_token, &s.chart.sha256, s.params.path, bytes);
     r.ir_used = r.board != null;
 }
 
@@ -238,8 +238,6 @@ fn drawExPanel(a: *App, ease: f32, ex: u32) void {
         _ = g.text(tr("NOT RECORDED: PAUSED"), 44 * u, 574 * u, g.scaled(14), gfx.amber);
     } else if (r.save_failed) {
         _ = g.text(tr("NOT RECORDED: SAVE FAILED"), 44 * u, 574 * u, g.scaled(14), gfx.amber);
-    } else if (r.ln_unranked) {
-        _ = g.text(tr("NOT RECORDED: LN MODE"), 44 * u, 574 * u, g.scaled(14), gfx.amber);
     } else _ = g.text(tr("NOT RECORDED"), 44 * u, 574 * u, g.scaled(14), gfx.dim);
     const lamp_y = 622 * u;
     if (r.recorded or r.ir_used) g.panel(30 * u, lamp_y, g.w * 0.48 - 44 * u, 48 * u, "");

@@ -70,7 +70,7 @@ Packaging scripts for each OS are in [`packaging/`](packaging). To release, set 
 | <kbd>F5</kbd> | Autoplay |
 | <kbd>F6</kbd> <kbd>F7</kbd> <kbd>F8</kbd> | Search, rescan, update difficulty tables |
 | <kbd>F9</kbd> <kbd>F10</kbd> | IR ranking and rivals, settings |
-| <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> | Key mode filter, sort, LN mode for charts that leave it open (CN and HCN plays are not recorded) |
+| <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> | Key mode filter, sort, LN mode for charts that leave it open (CN and HCN plays have their own scores and replays, and stay off the IR) |
 | <kbd>4</kbd> <kbd>R</kbd> | Replay slot, play that replay |
 | <kbd>6</kbd> <kbd>7</kbd> <kbd>8</kbd> <kbd>0</kbd> | Key settings, the chart's IR page in the browser, the chart's folder, search |
 | Start, Select | With **beatoraja controls** on (Settings, Controls): 7 key inputs work as in beatoraja. Hold for option panels in song select, with a key for speed in play, both for 1 second to quit |
