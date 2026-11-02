@@ -60,6 +60,8 @@ pub const Config = struct {
     random: u8 = 0,
     /// What LNs the chart leaves open become: 0 LN, 1 CN, 2 HCN.
     ln_mode: u8 = 0,
+    /// What a play is measured against, an index into play.pace_targets.
+    pace_target: u8 = 0,
     /// 0 start BPM, 1 max BPM, 2 main BPM (mode of the chart), 3 off (classic HS).
     hs_fix: u8 = 2,
     /// Green number: milliseconds a note is visible at the reference BPM.

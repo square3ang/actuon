@@ -7,6 +7,7 @@ const i18n = @import("i18n.zig");
 const tr = i18n.tr;
 const app_mod = @import("app.zig");
 const result = @import("result.zig");
+const play = @import("play.zig");
 const course_mod = @import("course.zig");
 const table = @import("../table/table.zig");
 const ir = @import("../net/ir.zig");
@@ -290,6 +291,10 @@ test "keys mark a favorite and the favorites folder lists it" {
     try std.testing.expectEqualStrings(&sha, a.sel.rows[0].song.?.sha256);
     key(a, c.SDL_SCANCODE_F);
     try std.testing.expectEqual(@as(usize, 0), a.sel.rows.len);
+    const was = a.cfg.pace_target;
+    key(a, c.SDL_SCANCODE_9);
+    try std.testing.expect(a.cfg.pace_target != was);
+    a.cfg.pace_target = was;
 }
 
 test "search patterns escape LIKE's wildcards" {
@@ -1834,9 +1839,9 @@ pub fn pad(a: *App, code: u16, down: bool, repeat: bool) bool {
             return bound;
         },
         .play => {
-            if (a.session) |play| {
-                const snap = play.snapshot();
-                if ((is_start or is_select) and down and !repeat and !a.pause.open and play.canSkip(snap)) {
+            if (a.session) |session| {
+                const snap = session.snapshot();
+                if ((is_start or is_select) and down and !repeat and !a.pause.open and session.canSkip(snap)) {
                     a.finishPlay(snap, true);
                     return false;
                 }
@@ -1866,7 +1871,7 @@ pub fn tickPad(a: *App, now_ms: u64) void {
                 if (now_ms - s.exit_since_ms >= play_exit_hold_ms) {
                     s.exit_since_ms = 0;
                     s.pad_scroll = 0;
-                    if (a.session) |play| a.finishPlay(play.snapshot(), false);
+                    if (a.session) |session| a.finishPlay(session.snapshot(), false);
                 }
                 return;
             }
@@ -1942,6 +1947,10 @@ pub fn key(a: *App, sc: u32) void {
         },
         c.SDL_SCANCODE_4 => nextReplay(a),
         c.SDL_SCANCODE_F => if (selectedSong(s)) |song| toggleFavorite(a, song),
+        c.SDL_SCANCODE_9 => {
+            a.cfg.pace_target = (@min(a.cfg.pace_target, play.pace_targets.len - 1) + 1) % @as(u8, play.pace_targets.len);
+            s.status = play.paceTargetName(a.cfg.pace_target);
+        },
         c.SDL_SCANCODE_6 => settings.openControls(a),
         c.SDL_SCANCODE_7 => openChartPage(a),
         c.SDL_SCANCODE_8 => if (selectedSong(s)) |song| setFolder(a, song.folder),

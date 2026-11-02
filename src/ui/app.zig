@@ -580,6 +580,11 @@ pub const App = struct {
         } };
         a.view.bga = bga.Bga.create(a.gpa, &a.g, s);
         a.view.best_ex = a.bestEx(&s.chart.sha256, s.params.ln_mode);
+        a.view.target_ex = play.targetEx(a.cfg.pace_target, a.view.best_ex, s.chart.total_notes);
+        a.view.target_label = play.pace_targets[@min(a.cfg.pace_target, play.pace_targets.len - 1)].label;
+        a.skin_state.best_ex = a.view.best_ex;
+        a.skin_state.target_ex = a.view.target_ex;
+        a.skin_state.target_label = a.view.target_label;
         // The clock carries on from the loading screen, so what it opened is not replayed.
         if (a.load_skin_at != 0 and a.play_skin != null) a.skin_state.load_ms = elapsed;
         a.skin_state.fromSession(s, &a.cfg);

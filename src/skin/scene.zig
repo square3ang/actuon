@@ -101,6 +101,10 @@ pub const State = struct {
     /// The lamp held before this play, on the result screen.
     best_clear: u8 = 0,
     best_ex: u32 = 0,
+    target_ex: u32 = 0,
+    target_label: []const u8 = "MAX",
+    /// The opponent's EX is already where they stand now, so it is not scaled to the song's progress.
+    target_live: bool = false,
     last_judge_at: i64 = -1,
     last_seen_judge_at: i64 = std.math.minInt(i64),
     flash_seen: [core.types.max_lanes]i64 = @splat(-10_000_000),
@@ -449,9 +453,8 @@ pub const State = struct {
             165 => @intFromFloat(st.load_frac * 100),
             350...353 => st.note_counts[@intCast(id - 350)],
             12 => st.judge_offset_ms,
-            // There is no rival: the target is always the maximum score.
-            121 => n * 2,
-            153 => @as(i64, sc.exScore()) - @as(i64, st.judgedNotes()) * 2,
+            121, 151 => st.target_ex,
+            153 => if (st.target_live) @as(i64, sc.exScore()) - st.target_ex else play.paceDiff(sc.exScore(), st.target_ex, st.judgedNotes(), st.total_notes),
             423 => blk: {
                 var t: i64 = 0;
                 for (sc.counts[0..5]) |v| t += v[0];
@@ -512,7 +515,7 @@ pub const State = struct {
             112 => st.bestRate() * st.judgedShare(),
             113 => st.bestRate(),
             114 => st.judgedShare(),
-            115 => 1,
+            115 => if (st.total_notes > 0) @min(@as(f32, @floatFromInt(st.target_ex)) / @as(f32, @floatFromInt(st.total_notes * 2)), 1) else 0,
             140...144 => if (st.total_notes > 0) @as(f32, @floatFromInt(sn.score.count(@fromBackingInt(@intCast(id - 140))))) / @as(f32, @floatFromInt(st.total_notes)) else 0,
             145 => if (st.total_notes > 0) @as(f32, @floatFromInt(sn.score.max_combo)) / @as(f32, @floatFromInt(st.total_notes)) else 0,
             else => 0,
@@ -535,7 +538,7 @@ pub const State = struct {
             else => {},
         };
         return switch (id) {
-            1 => "MAX",
+            1 => st.target_label,
             10, 12 => st.title,
             11 => st.subtitle,
             13 => st.genre,

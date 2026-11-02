@@ -20,6 +20,38 @@ pub const judge_colors = [_]gfx.Color{
     .{ .r = 150, .g = 60, .b = 56 },
 };
 
+/// Fractions of the max EX, 0 for the player's own best.
+pub const pace_targets = [_]struct { label: []const u8, ninths: u32 }{
+    .{ .label = "MY BEST", .ninths = 0 },
+    .{ .label = "MAX", .ninths = 9 },
+    .{ .label = "AAA", .ninths = 8 },
+    .{ .label = "AA", .ninths = 7 },
+    .{ .label = "A", .ninths = 6 },
+};
+
+pub fn paceTargetName(target: u8) []const u8 {
+    return switch (target) {
+        1 => tr("Target: MAX"),
+        2 => tr("Target: AAA"),
+        3 => tr("Target: AA"),
+        4 => tr("Target: A"),
+        else => tr("Target: my best"),
+    };
+}
+
+/// The EX a target stands for, rounded up as ranks are.
+pub fn targetEx(target: u8, best_ex: u32, total_notes: u32) u32 {
+    const ninths = pace_targets[@min(target, pace_targets.len - 1)].ninths;
+    if (ninths == 0) return best_ex;
+    return (total_notes * 2 * ninths + 8) / 9;
+}
+
+/// The run against where the target stands by now, not its end of song total.
+pub fn paceDiff(ex: u32, target_ex: u32, judged: u32, total_notes: u32) i64 {
+    if (total_notes == 0) return ex;
+    return @as(i64, ex) - @divTrunc(@as(i64, target_ex) * @min(judged, total_notes), total_notes);
+}
+
 /// BPM the green number refers to, per Config.hs_fix.
 pub fn referenceBpm(chart: *const core.types.Chart, hs_fix: u8) f64 {
     return switch (hs_fix) {
@@ -88,6 +120,10 @@ pub const View = struct {
     last_t: i64 = std.math.minInt(i64),
     bga: ?*bga.Bga = null,
     best_ex: u32 = 0,
+    target_ex: u32 = 0,
+    /// The target is another player's score right now, not a final one to pace against.
+    target_live: bool = false,
+    target_label: []const u8 = "",
     /// referenceBpm is too slow to run per frame on a chart with many tempo changes.
     ref_bpm: f64 = 0,
     ref_hs_fix: u8 = 255,
@@ -601,16 +637,28 @@ fn drawDeck(g: *gfx.Gfx, v: *View, s: *Session, snap: *const session_mod.Snapsho
     const stage_h = read_y - gap - stage_y;
     drawStage(g, v, s, snap, t, x, w, stage_y, stage_h);
     drawReadouts(g, chart, snap, x, w, read_y, read_h, gap);
+    const pace = if (v.target_live) @as(i64, sc.exScore()) - v.target_ex else paceDiff(sc.exScore(), v.target_ex, sc.passed, chart.total_notes);
+    g.fmt(x + 10 * u, read_y + 22 * u, g.scaled(12), if (pace >= 0) gfx.cyan else gfx.amber, "{s} {s}{d}", .{ v.target_label, if (pace >= 0) "+" else "-", @abs(pace) });
 
     // Graphs.
     const a_w = w * 0.26;
     const c_w = w * 0.3;
     const b_w = w - a_w - c_w - gap * 2;
-    drawScoreGraph(g, sc.exScore(), sc.passed, v.best_ex, chart.total_notes, x, graph_y, a_w, graph_h);
+    drawScoreGraph(g, sc.exScore(), sc.passed, v.target_ex, chart.total_notes, x, graph_y, a_w, graph_h);
     const nx = x + a_w + gap;
     drawNotesGraph(g, v, nx, graph_y, b_w, graph_h, frac);
     drawJudgeCounts(g, snap, nx + b_w + gap, graph_y, c_w, graph_h);
     drawTag(g, s, x, w, stage_y);
+}
+
+test "a target's EX and the pace against it" {
+    try std.testing.expectEqual(@as(u32, 77), targetEx(0, 77, 900));
+    try std.testing.expectEqual(@as(u32, 1800), targetEx(1, 77, 900));
+    try std.testing.expectEqual(@as(u32, 1600), targetEx(2, 77, 900));
+    try std.testing.expectEqual(@as(u32, 2), targetEx(2, 0, 1));
+    try std.testing.expectEqual(@as(i64, 10), paceDiff(100, 1800, 50, 1000));
+    try std.testing.expectEqual(@as(i64, -10), paceDiff(80, 1800, 50, 1000));
+    try std.testing.expectEqual(@as(i64, -1000), paceDiff(800, 1800, 2000, 1000));
 }
 
 test "green number maps to visible y" {
