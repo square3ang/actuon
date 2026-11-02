@@ -1,3 +1,0 @@
-# Lets the logged-in user read input devices directly, for kernel-timestamped key events.
-# Any program of that user can then read all keystrokes, so install this only on a machine you trust.
-SUBSYSTEM=="input", KERNEL=="event*", TAG+="uaccess"

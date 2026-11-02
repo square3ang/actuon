@@ -114,7 +114,7 @@ fn realKeys(seconds: u32) void {
     input.startDirect(true);
     c.SDL_Delay(200);
     if (!input.direct_keyboard.load(.acquire)) {
-        std.debug.print("direct input unavailable (see docs: udev rule), real key test skipped\n", .{});
+        std.debug.print("direct input unavailable (on Linux: join the input group), real key test skipped\n", .{});
         return;
     }
     std.debug.print("Press keys for {d} s...\n", .{seconds});

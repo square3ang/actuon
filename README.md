@@ -89,13 +89,13 @@ Key bindings and audio devices are in settings. `actuon latency` measures your s
 
 Windows needs no setup. macOS asks for the Input Monitoring permission; if you refuse, the player uses SDL's keyboard events.
 
-Linux needs no setup either: SDL's keyboard events carry the compositor's timestamps, not the frame's. For more exact kernel timestamps and key polling, turn on **evdev input** in Settings, Controls. It reads `/dev/input` and needs this rule:
+Linux needs no setup either: SDL's keyboard events carry the compositor's timestamps, not the frame's. For more exact kernel timestamps and key polling, turn on **evdev input** in Settings, Controls. It reads `/dev/input`, so add yourself to the `input` group and log in again:
 
 ```sh
-sudo install -m644 packaging/linux/70-actuon-input.rules /etc/udev/rules.d/
+sudo usermod -aG input $USER
 ```
 
-> **Warning:** this lets any program of the logged-in user read all keystrokes. Install it only on a machine you trust.
+> **Warning:** this lets every program you run read all keystrokes. Do it only on a machine you trust.
 
 </details>
 

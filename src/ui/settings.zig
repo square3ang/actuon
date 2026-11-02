@@ -1015,7 +1015,7 @@ fn adjust(a: *App, it: Item, dir: i32) void {
         .beatoraja_select => cfg.beatoraja_select = !cfg.beatoraja_select,
         .bga => cfg.bga = !cfg.bga,
         .evdev_input => {
-            if (!cfg.evdev_input and !input.evdevReadable()) return say(a, "Reading /dev/input needs the udev rule in the README.", .{});
+            if (!cfg.evdev_input and !input.evdevReadable()) return say(a, "Reading /dev/input needs the input group: run sudo usermod -aG input $USER, then log in again.", .{});
             cfg.evdev_input = !cfg.evdev_input;
             input.setEvdev(cfg.evdev_input);
         },
@@ -1811,6 +1811,25 @@ test "a folder added around others takes their place" {
     try std.testing.expectEqualStrings("/bms2", roots[0]);
     try std.testing.expectEqualStrings("/bms", roots[1]);
     try std.testing.expectEqualStrings("C:\\", trimSep("C:\\"));
+}
+
+test "up and down never land on a row the platform hides" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.cfg.evdev_input = false;
+    // Only Windows samples keys without evdev.
+    try std.testing.expectEqual(builtin.os.tag == .windows, rowShown(a, .input_poll));
+    openControls(a);
+    for (0..items.len) |_| {
+        try std.testing.expect(rowShown(a, items[a.set.cursor]));
+        key(a, c.SDL_SCANCODE_DOWN);
+    }
+    for (0..items.len) |_| {
+        try std.testing.expect(rowShown(a, items[a.set.cursor]));
+        key(a, c.SDL_SCANCODE_UP);
+    }
+    a.cfg.evdev_input = true;
+    try std.testing.expectEqual(builtin.os.tag != .macos, rowShown(a, .input_poll));
 }
 
 test "a typed poll rate shows as the nearest choice at or below it, wherever Event sits" {

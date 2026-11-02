@@ -109,11 +109,13 @@ pub fn startDirect(evdev_on: bool) void {
         else => {},
     }
     // shortcut: macOS has no key state sampler and stays on HID events, add CGEventSourceKeyState with a keycode table when it can be tested there.
-    // Linux starts it either way, since evdev can be turned on from settings later.
-    if (builtin.os.tag == .linux or (builtin.os.tag == .windows and direct_keyboard.load(.acquire))) {
-        const t = c.SDL_CreateThread(pollThread, "input-poll", null);
-        if (t != null) c.SDL_DetachThread(t);
-    }
+    // Linux starts it with evdev, which settings can turn on later.
+    if (builtin.os.tag == .windows and direct_keyboard.load(.acquire)) startSampler();
+}
+
+fn startSampler() void {
+    const t = c.SDL_CreateThread(pollThread, "input-poll", null);
+    if (t != null) c.SDL_DetachThread(t);
 }
 
 /// Turns Linux evdev input on or off while the game runs.
@@ -281,6 +283,7 @@ const evdev = if (builtin.os.tag == .linux) struct {
         const t = c.SDL_CreateThread(run, "input-evdev", null) orelse return;
         c.SDL_DetachThread(t);
         started = true;
+        startSampler();
     }
 
     /// Settings never opens over play, so the sampler is not reading these when they close.
