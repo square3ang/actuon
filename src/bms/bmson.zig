@@ -225,6 +225,7 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
     var taken: [types.max_lanes]std.ArrayList(i64) = @splat(.empty);
     const take = struct {
         /// Notes out of order shift the list on every insert; real charts hold a few thousand a lane.
+        /// shortcut: inserts stay O(n) under this cap, move to a balanced tree if a real chart needs more.
         const max_notes = 1 << 15;
         fn f(alloc: std.mem.Allocator, list: *std.ArrayList(i64), y: i64) !void {
             if (list.items.len >= max_notes) return error.TooBig;

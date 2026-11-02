@@ -3,6 +3,7 @@ const std = @import("std");
 const fs = @import("../platform/fs.zig");
 const input = @import("../input/input.zig");
 const core = @import("actuon_core");
+const table = @import("../table/table.zig");
 
 const default_download_url = "https://gingerrush.com/download/package/{md5}";
 
@@ -226,7 +227,17 @@ pub fn load(a: std.mem.Allocator) Config {
     // A hand-edited value would show one mode, play another and read scores under a third.
     cfg.ln_mode = @min(cfg.ln_mode, 2);
     cfg.download_url = migrateDownloadUrl(cfg.download_url);
+    dropPlainIr(&cfg);
     return cfg;
+}
+
+/// Settings refuses plain HTTP to the internet, but an older save may hold one: its token would
+/// go out readable with every request, and the next sign-in its password.
+fn dropPlainIr(cfg: *Config) void {
+    if (!table.sendsInClear(cfg.ir_url)) return;
+    std.log.warn("IR address {s} is plain HTTP on the internet: signed out, back to the default", .{cfg.ir_url});
+    cfg.ir_url = (Config{}).ir_url;
+    cfg.ir_token = "";
 }
 
 /// Saved copies of old defaults: one domain expired, the other caps out near 1 MB/s.
@@ -321,6 +332,17 @@ test "the dead download default is replaced, custom ones stay" {
     try std.testing.expectEqualStrings(default_download_url, migrateDownloadUrl("https://bms.wrigglebug.xyz/download/package/{md5}"));
     try std.testing.expectEqualStrings(default_download_url, migrateDownloadUrl("https://bms.alvorna.com/api/hash?md5={md5}"));
     try std.testing.expectEqualStrings("https://example.com/{md5}", migrateDownloadUrl("https://example.com/{md5}"));
+}
+
+test "a saved plain-HTTP IR on the internet signs out, one at home stays" {
+    var public: Config = .{ .ir_url = "http://ir.example.com", .ir_token = "t" };
+    dropPlainIr(&public);
+    try std.testing.expectEqualStrings((Config{}).ir_url, public.ir_url);
+    try std.testing.expectEqualStrings("", public.ir_token);
+    var home: Config = .{ .ir_url = "http://192.168.0.5:8730", .ir_token = "t" };
+    dropPlainIr(&home);
+    try std.testing.expectEqualStrings("http://192.168.0.5:8730", home.ir_url);
+    try std.testing.expectEqualStrings("t", home.ir_token);
 }
 
 test "lift and the lane cover leave part of the lane open" {

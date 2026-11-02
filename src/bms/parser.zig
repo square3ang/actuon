@@ -70,6 +70,7 @@ const Timelines = struct {
     items: std.ArrayList(*Tl) = .empty,
     /// A Tl is ~350 B, so a hostile chart of distinct positions would need gigabytes.
     /// Real charts stay far below: 999 bars at 192 steps is ~192k.
+    /// shortcut: a chart past this is refused, raise it if a real one is.
     max: usize = 1 << 19,
 
     fn lowerBound(self: *const Timelines, section: f64) usize {
@@ -693,6 +694,7 @@ const LaneState = struct {
     lnlist: [types.max_lanes]std.ArrayList(*Ln) = @splat(.empty),
 
     /// Far more than a lane can hold in one measure of a real chart.
+    /// shortcut: lookups stay a scan of at most this many, move to an interval tree if a real chart needs more.
     const max_live = 1024;
 
     fn addLn(st: *LaneState, a: std.mem.Allocator, key: usize, ln: *Ln) !void {
