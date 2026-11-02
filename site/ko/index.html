@@ -52,7 +52,7 @@
   <section class="moment">
     <div>
       <h2>프레임이 아니라, 누른 순간으로 판정해요.</h2>
-      <p>노트는 프레임 레이트와 상관없이 틱 클럭으로 움직여요. Windows와 macOS는 전용 스레드에서 키 입력 시각을 재고, Linux는 컴포지터가 찍은 시각을 그대로 써요. 어느 쪽도 프레임을 기다리지 않아요.</p>
+      <p>노트는 프레임 레이트와 상관없이 틱 클럭으로 움직여요. Windows와 macOS는 전용 스레드에서 키 입력 시각을 재요. Linux는 컴포지터가 찍은 시각을 쓰고, evdev를 켜면 더 정확한 커널 시각을 써요. 어느 쪽도 프레임을 기다리지 않아요.</p>
       <p class="sky"><code>actuon latency</code>로 내 환경의 지연을 잴 수 있어요.</p>
     </div>
     <img class="screen" src="/screens/play.webp" width="1280" height="720" loading="lazy" alt="채보를 오토플레이하는 중, 레인 옆에서 BGA가 재생된다">

@@ -52,7 +52,7 @@
   <section class="moment">
     <div>
       <h2>判定看你按下的那一刻，而不是帧何时运行。</h2>
-      <p>音符按独立于帧率的 tick 时钟运行。Windows 和 macOS 由专用线程记录按键时刻，Linux 直接使用合成器给出的时间戳。都不必等待下一帧。</p>
+      <p>音符按独立于帧率的 tick 时钟运行。Windows 和 macOS 由专用线程记录按键时刻。Linux 使用合成器给出的时间戳，开启 evdev 后改用更精确的内核时间戳。都不必等待下一帧。</p>
       <p class="sky"><code>actuon latency</code> 可测量你的设备环境。</p>
     </div>
     <img class="screen" src="/screens/play.webp" width="1280" height="720" loading="lazy" alt="谱面自动游玩中，BGA 在轨道旁播放">
