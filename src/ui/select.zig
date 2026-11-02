@@ -36,7 +36,7 @@ pub const State = struct {
     arena: ?std.heap.ArenaAllocator = null,
     rows: []Row = &.{},
     cursor: usize = 0,
-    view: enum { root, library, folder, table, level, courses } = .root,
+    view: enum { root, library, folder, table, level, courses, favorites } = .root,
     table_url: []const u8 = "",
     table_buf: [1024]u8 = undefined,
     level: []const u8 = "",
@@ -273,6 +273,25 @@ fn likePattern(al: std.mem.Allocator, word: []const u8, anywhere: bool) ![]const
     return pat.items;
 }
 
+test "keys mark a favorite and the favorites folder lists it" {
+    const t = @import("testing.zig");
+    const a = try t.open();
+    defer t.close(a);
+    a.sel.view = .folder;
+    a.sel.folder = "/a";
+    reload(a);
+    key(a, c.SDL_SCANCODE_F);
+    var sha: [4]u8 = undefined;
+    @memcpy(&sha, a.sel.rows[a.sel.cursor].song.?.sha256);
+    try std.testing.expect(a.sel.rows[a.sel.cursor].song.?.favorite);
+    a.sel.view = .favorites;
+    reload(a);
+    try std.testing.expectEqual(@as(usize, 1), a.sel.rows.len);
+    try std.testing.expectEqualStrings(&sha, a.sel.rows[0].song.?.sha256);
+    key(a, c.SDL_SCANCODE_F);
+    try std.testing.expectEqual(@as(usize, 0), a.sel.rows.len);
+}
+
 test "search patterns escape LIKE's wildcards" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -330,6 +349,7 @@ fn searchRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row), words: 
 
 fn rootRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
     try rows.append(al, .{ .label = tr("Library"), .kind = .group });
+    try rows.append(al, .{ .label = tr("Favorites"), .kind = .group, .id = 2 });
     const st = try a.db.prepare("SELECT url,name,symbol FROM bms_table ORDER BY name");
     defer st.deinit();
     while (try st.step()) {
@@ -356,6 +376,17 @@ fn folderRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
     const st = try a.db.prepare(sql);
     defer st.deinit();
     st.bindText(1, s.folder);
+    while (try st.step()) {
+        const song = try db_mod.readSong(al, st);
+        try rows.append(al, .{ .label = song.title, .song = song });
+    }
+}
+
+fn favoriteRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
+    const s = &a.sel;
+    const sql = try std.fmt.allocPrint(al, "{s} WHERE s.sha256 IN (SELECT sha256 FROM favorite) GROUP BY s.sha256{s}", .{ db_mod.song_select, orderBy(s.sort) });
+    const st = try a.db.prepare(sql);
+    defer st.deinit();
     while (try st.step()) {
         const song = try db_mod.readSong(al, st);
         try rows.append(al, .{ .label = song.title, .song = song });
@@ -434,6 +465,7 @@ fn buildRows(a: *App, al: std.mem.Allocator) ![]Row {
         .table => try tableRows(a, al, &rows),
         .level => try levelRows(a, al, &rows),
         .courses => try courseRows(a, al, &rows),
+        .favorites => try favoriteRows(a, al, &rows),
     }
     return rows.toOwnedSlice(al);
 }
@@ -803,6 +835,7 @@ fn drawWheel(a: *App, wheel_x: f32, dock_y: f32) void {
             // The number carries the difficulty colour; on the accent row only white holds up.
             g.textCentered(song.shownLevel(), x + 34 * u, centeredY(y, h, g.scaled(18)), g.scaled(18), if (on) gfx.white else diffColor(song.difficulty));
             g.textClip(row.label, x + 70 * u, ty, @max(g.w - x - 210 * u, 0), tsize, gfx.white);
+            if (song.favorite) g.disc(x + 60 * u, y + h / 2, 3 * u, gfx.amber);
             if (song.clear > 0) {
                 g.textRight(std.fmt.bufPrint(&ex_buf, "{d}", .{song.ex}) catch "", g.w - 92 * u, centeredY(y, h, g.scaled(12)), g.scaled(12), gfx.white);
                 g.textRight(result.rankOf(song.ex, song.notes), g.w - 42 * u, centeredY(y, h, g.scaled(14)), g.scaled(14), gfx.white);
@@ -1106,6 +1139,7 @@ fn fillSkinState(a: *App) void {
             .table => tr("TABLE"),
             .level => s.level,
             .courses => tr("COURSES"),
+            .favorites => tr("Favorites"),
         },
         .search = a.text.items,
         .clear = bar.clear,
@@ -1266,8 +1300,9 @@ fn back(a: *App, view: @TypeOf(a.sel.view)) void {
     go(a, view);
     for (s.rows, 0..) |row, i| {
         const opened = switch (from) {
+            .favorites => row.kind == .group and row.id == 2,
             .root => false,
-            .library => row.kind == .group and row.id != 1,
+            .library => row.kind == .group and row.id == 0,
             .courses => row.kind == .group and row.id == 1,
             .folder => row.kind == .folder and std.mem.eql(u8, row.target, s.folder),
             .table => row.kind == .table and std.mem.eql(u8, row.target, s.table_url),
@@ -1490,6 +1525,18 @@ fn startSongWith(a: *App, song: db_mod.Song, replay: ?core.replay.Replay) void {
     a.decidePlay(params, true);
 }
 
+fn toggleFavorite(a: *App, song: db_mod.Song) void {
+    var ms: c.SDL_Time = 0;
+    _ = c.SDL_GetCurrentTime(&ms);
+    a.sel.status = if (db_mod.toggleFavorite(a.db, song.sha256, @divTrunc(ms, std.time.ns_per_s))) |on|
+        (if (on) tr("Added to favorites") else tr("Removed from favorites"))
+    else |e| blk: {
+        std.log.err("favorite not saved: {t}", .{e});
+        break :blk tr("Could not save the favorite");
+    };
+    reload(a);
+}
+
 fn closeQuery(a: *App) void {
     if (a.sel.query) |q| q.destroy();
     a.sel.query = null;
@@ -1620,7 +1667,11 @@ fn openRow(a: *App) void {
     if (row.song) |song| return startSong(a, song);
     switch (row.kind) {
         .folder => setFolder(a, row.target),
-        .group => go(a, if (row.id == 1) .courses else .library),
+        .group => go(a, switch (row.id) {
+            1 => .courses,
+            2 => .favorites,
+            else => .library,
+        }),
         .table => {
             const n = @min(row.target.len, s.table_buf.len);
             @memcpy(s.table_buf[0..n], row.target[0..n]);
@@ -1647,7 +1698,7 @@ fn goBack(a: *App) void {
         reload(a);
     } else switch (s.view) {
         .root => a.running = false,
-        .library, .courses, .table => back(a, .root),
+        .library, .courses, .table, .favorites => back(a, .root),
         .folder => back(a, .library),
         .level => back(a, .table),
     }
@@ -1890,6 +1941,7 @@ pub fn key(a: *App, sc: u32) void {
             reload(a);
         },
         c.SDL_SCANCODE_4 => nextReplay(a),
+        c.SDL_SCANCODE_F => if (selectedSong(s)) |song| toggleFavorite(a, song),
         c.SDL_SCANCODE_6 => settings.openControls(a),
         c.SDL_SCANCODE_7 => openChartPage(a),
         c.SDL_SCANCODE_8 => if (selectedSong(s)) |song| setFolder(a, song.folder),
@@ -1937,7 +1989,7 @@ test "the cursor wraps at the ends and pages stop at them" {
 test "enter walks into folders and escape comes back to the row it opened" {
     const a = try testing.open();
     defer testing.close(a);
-    try expectRows(a, &.{ "Library", "Table", "Courses" });
+    try expectRows(a, &.{ "Library", "Favorites", "Table", "Courses" });
     key(a, c.SDL_SCANCODE_RETURN);
     try std.testing.expectEqual(.library, a.sel.view);
     try expectRows(a, &.{ "Alpha  (3)", "Delta  (1)" });
@@ -1960,6 +2012,7 @@ test "a table opens by level and lists charts the library lacks" {
     const a = try testing.open();
     defer testing.close(a);
     key(a, c.SDL_SCANCODE_DOWN);
+    key(a, c.SDL_SCANCODE_DOWN);
     key(a, c.SDL_SCANCODE_RETURN);
     try std.testing.expectEqual(.table, a.sel.view);
     try expectRows(a, &.{"Level 3  (2)"});
@@ -1975,7 +2028,7 @@ test "a table opens by level and lists charts the library lacks" {
     try std.testing.expectEqual(.table, a.sel.view);
     key(a, c.SDL_SCANCODE_ESCAPE);
     try std.testing.expectEqual(.root, a.sel.view);
-    try std.testing.expectEqual(@as(usize, 1), a.sel.cursor);
+    try std.testing.expectEqual(@as(usize, 2), a.sel.cursor);
 }
 
 test "the courses row lists courses by table" {
@@ -1986,7 +2039,7 @@ test "the courses row lists courses by table" {
     try std.testing.expectEqual(.courses, a.sel.view);
     try expectRows(a, &.{"Table: Dan"});
     key(a, c.SDL_SCANCODE_ESCAPE);
-    try std.testing.expectEqual(@as(usize, 2), a.sel.cursor);
+    try std.testing.expectEqual(@as(usize, 3), a.sel.cursor);
 }
 
 test "function keys cycle the options and wrap" {
@@ -2304,14 +2357,14 @@ test "escape drops a search before it leaves the view" {
     try expectRows(a, &.{"Delta"});
     key(a, c.SDL_SCANCODE_ESCAPE);
     try std.testing.expect(a.running);
-    try expectRows(a, &.{ "Library", "Table", "Courses" });
+    try expectRows(a, &.{ "Library", "Favorites", "Table", "Courses" });
     key(a, c.SDL_SCANCODE_F6);
     a.gpa.free(a.sel.search);
     a.sel.search = try a.gpa.dupe(u8, "elt");
     reload(a);
     key(a, c.SDL_SCANCODE_ESCAPE);
     try std.testing.expect(!a.sel.searching);
-    try expectRows(a, &.{ "Library", "Table", "Courses" });
+    try expectRows(a, &.{ "Library", "Favorites", "Table", "Courses" });
 }
 
 test "a chart's ranking is asked for once the cursor rests, and only when signed in" {

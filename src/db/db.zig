@@ -460,6 +460,21 @@ pub fn readSong(a: std.mem.Allocator, st: Stmt) !Song {
     };
 }
 
+/// By chart hash, so a favorite survives moving the files. Returns whether it is one now.
+pub fn toggleFavorite(d: Db, sha256: []const u8, date: i64) !bool {
+    const del = try d.prepare("DELETE FROM favorite WHERE sha256=?1");
+    defer del.deinit();
+    del.bindText(1, sha256);
+    _ = try del.step();
+    if (c.sqlite3_changes(d.h) > 0) return false;
+    const ins = try d.prepare("INSERT INTO favorite(sha256,date) VALUES(?1,?2)");
+    defer ins.deinit();
+    ins.bindText(1, sha256);
+    ins.bindInt(2, date);
+    _ = try ins.step();
+    return true;
+}
+
 /// Replays offered per chart, as beatoraja's slots.
 pub const max_replays = 4;
 
@@ -756,6 +771,24 @@ test "song select shows the score of its LN mode only on charts that leave it op
     try std.testing.expectEqual(@as(i64, 30), st.int(20));
 }
 
+test "a favorite toggles and shows in the song list" {
+    const d = try Db.open(":memory:", std.testing.allocator, false);
+    defer d.close();
+    try initSchema(d);
+    try d.exec("INSERT INTO song(path,folder,sha256,md5) VALUES('p','f','a','')");
+    try std.testing.expect(try toggleFavorite(d, "a", 1));
+    {
+        const st = try d.prepare(song_select);
+        defer st.deinit();
+        try std.testing.expect(try st.step());
+        try std.testing.expectEqual(@as(i64, 1), st.int(25));
+    }
+    try std.testing.expect(!try toggleFavorite(d, "a", 2));
+    const st = try d.prepare(song_select);
+    defer st.deinit();
+    try std.testing.expect(try st.step());
+    try std.testing.expectEqual(@as(i64, 0), st.int(25));
+}
 
 test "pruning keeps the newest replays and the best one" {
     const d = try Db.open(":memory:", std.testing.allocator, false);
