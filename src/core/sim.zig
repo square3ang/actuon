@@ -217,6 +217,11 @@ pub const Sim = struct {
         const ls = &s.lanes[ev.lane];
         if (ls.down[key] == ev.down) return;
         ls.down[key] = ev.down;
+        // The lead-in is beatoraja's READY, which judges nothing: a key there only lights its lane.
+        if (ev.time_us < 0) {
+            if (ev.down) s.emit(.{ .kind = .press_empty, .lane = ev.lane });
+            return;
+        }
         if (ev.down) s.onPress(ev.lane, key, ev.time_us) else s.onRelease(ev.lane, key, ev.time_us);
         s.endPhase(ev.time_us);
         s.checkFailed();
@@ -723,6 +728,26 @@ test "empty POOR only within 1s before a note and keeps combo" {
     s.input(.{ .time_us = 2_000_000, .lane = 0, .down = true });
     try testing.expectEqual(@as(u32, 1), s.score.count(.pg));
     try testing.expectEqual(@as(u32, 1), s.score.combo);
+}
+
+test "a key in the lead-in before the song judges nothing" {
+    const src =
+        \\#BPM 240
+        \\#WAV01 a.wav
+        \\#00011:0100
+    ;
+    var c = try chartFrom(src);
+    defer c.deinit();
+    const note = c.notes[0].time_us;
+    const s = try Sim.create(testing.allocator, &c, .{});
+    defer s.destroy();
+    // Within a second of the note, so once the song plays this press would be an empty POOR.
+    try testing.expect(note < 600_000);
+    s.input(.{ .time_us = -400_000, .lane = 0, .down = true });
+    s.input(.{ .time_us = -300_000, .lane = 0, .down = false });
+    try testing.expectEqual(@as(u32, 0), s.score.count(.ms));
+    s.input(.{ .time_us = note, .lane = 0, .down = true });
+    try testing.expectEqual(@as(u32, 1), s.score.count(.pg));
 }
 
 test "LR2 LN: one note, judged at release; early release is BAD" {

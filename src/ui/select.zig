@@ -1362,6 +1362,11 @@ fn setFolder(a: *App, f: []const u8) void {
     s.folder = s.folder_buf[0..n];
     s.view = .folder;
     s.cursor = 0;
+    // A search would keep listing its matches in place of the folder that was asked for.
+    if (s.search.len > 0) {
+        a.gpa.free(s.search);
+        s.search = "";
+    }
     reload(a);
 }
 
@@ -2142,8 +2147,9 @@ test "a chart's folder opened from another library folder goes back to its own" 
     reload(a);
     key(a, c.SDL_SCANCODE_8);
     try std.testing.expectEqualStrings("/b", a.sel.library_root);
-    // The first Esc ends the search, the next two climb to the root.
-    for (0..3) |_| key(a, c.SDL_SCANCODE_ESCAPE);
+    try expectRows(a, &.{"Delta"});
+    key(a, c.SDL_SCANCODE_ESCAPE);
+    key(a, c.SDL_SCANCODE_ESCAPE);
     try std.testing.expectEqual(.root, a.sel.view);
     try std.testing.expectEqual(@as(usize, 1), a.sel.cursor);
 }
