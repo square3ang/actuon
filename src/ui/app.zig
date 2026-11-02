@@ -73,6 +73,8 @@ pub const App = struct {
     /// A key press a click asked for. Applied after drawing, because keys can replace what is being drawn.
     click_key: ?u32 = null,
     last_pump_ns: u64 = 0,
+    /// When the next frame may start under the FPS limit.
+    next_frame_ns: u64 = 0,
     db: db_mod.Db,
     scene: Scene = .select,
     running: bool = true,
@@ -587,7 +589,7 @@ pub const App = struct {
             a.scene = .select;
             return;
         } };
-        a.view.bga = bga.Bga.create(a.gpa, &a.g, s);
+        a.view.bga = if (a.cfg.bga) bga.Bga.create(a.gpa, &a.g, s) else null;
         a.view.best_ex = a.bestEx(&s.chart.sha256, s.params.ln_mode);
         const pace_target = play.paceTarget(a.cfg.pace_target, s.params.practice != null);
         a.view.target_ex = play.targetEx(pace_target, a.view.best_ex, s.chart.total_notes);
@@ -1021,6 +1023,11 @@ pub const App = struct {
         a.start_ms = c.SDL_GetTicks();
         a.sfx_thread = c.SDL_CreateThread(sfxThread, "sfx", a);
         while (a.running) {
+            if (a.cfg.fps_limit > 0) {
+                const now = c.SDL_GetTicksNS();
+                if (a.next_frame_ns > now) c.SDL_DelayPrecise(a.next_frame_ns - now);
+                a.next_frame_ns = @max(a.next_frame_ns, now) + 1_000_000_000 / @as(u64, a.cfg.fps_limit);
+            }
             a.g.waitFrame();
             // Key events carry their own timestamps, so a finer poll wouldn't change judgement.
             const pump_now = c.SDL_GetTicksNS();

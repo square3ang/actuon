@@ -39,10 +39,14 @@ pub const Config = struct {
     height: u32 = 720,
     fullscreen: bool = false,
     vsync: i32 = 1,
+    /// Frames per second at most; 0 leaves it to VSync.
+    fps_limit: u32 = 0,
     /// 0 off, 1 on, 2 on with Boost.
     reflex: i32 = 0,
     /// Deblocks BGA movies and upscales them with FSRCNNX instead of plain filtering.
     bga_upscale: bool = true,
+    /// Off skips loading BGA images and movies.
+    bga: bool = true,
     audio_rate: u32 = 48000,
     audio_frames: u32 = 128,
     /// PortAudio name of an output. Empty picks the output automatically.

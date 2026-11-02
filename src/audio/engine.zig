@@ -152,10 +152,10 @@ pub const Engine = struct {
         return e.openNull();
     }
 
-    /// Moves to another output, keeping the rate that loaded sounds were decoded at. Not during play:
-    /// the song clock would jump. Does nothing under --null-audio or when `device` is already asked for.
-    pub fn switchDevice(e: *Engine, frames: u32, device: []const u8) void {
-        if (!e.pa_ready or std.mem.eql(u8, e.device, device)) return;
+    /// Reopens on another output or buffer size, keeping the rate that loaded sounds were decoded at.
+    /// Not during play: the song clock would jump. Does nothing under --null-audio or when nothing changed.
+    pub fn reopen(e: *Engine, frames: u32, device: []const u8) void {
+        if (!e.pa_ready or (std.mem.eql(u8, e.device, device) and @min(frames, feed_max) == e.feed_frames)) return;
         e.close();
         e.open(e.rate, frames, false, device) catch |err| std.log.err("audio reopen failed: {t}", .{err});
     }
@@ -225,6 +225,9 @@ pub const Engine = struct {
             .hostApiSpecificStreamInfo = null,
         };
         if (builtin.os.tag == .windows) {
+            // PortAudio's ASIO sizes the driver buffer from the suggested latency, so the default
+            // one kept the driver's preferred size whatever Buffer size said.
+            if (ty == c.paASIO) out.suggestedLatency = @as(f64, @floatFromInt(frames)) / @as(f64, @floatFromInt(rate));
             if (ty == c.paWASAPI and exclusive) {
                 var wasapi: c.PaWasapiStreamInfo = std.mem.zeroes(c.PaWasapiStreamInfo);
                 wasapi.size = @sizeOf(c.PaWasapiStreamInfo);

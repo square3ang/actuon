@@ -47,6 +47,9 @@ pub const State = struct {
     /// Empty means the root. Lives in folder_buf, because rows are rebuilt under it.
     folder: []const u8 = "",
     folder_buf: [4096]u8 = undefined,
+    /// The library folder open in the library view; empty lists every folder.
+    library_root: []const u8 = "",
+    library_root_buf: [4096]u8 = undefined,
     search: []const u8 = "",
     searching: bool = false,
     status: []const u8 = "",
@@ -385,7 +388,10 @@ fn searchRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row), words: 
 }
 
 fn rootRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
-    try rows.append(al, .{ .label = tr("Library"), .kind = .group });
+    const roots = try db_mod.outerRoots(al, a.cfg.roots);
+    // Without folders, scores imported or left from removed folders still have a place.
+    if (roots.len == 0) try rows.append(al, .{ .label = tr("Library"), .kind = .group });
+    for (roots) |r| try rows.append(al, .{ .label = rootName(r), .kind = .group, .target = r });
     try rows.append(al, .{ .label = tr("Favorites"), .kind = .group, .id = 2 });
     const st = try a.db.prepare("SELECT url,name,symbol FROM bms_table ORDER BY name");
     defer st.deinit();
@@ -395,9 +401,19 @@ fn rootRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
     try rows.append(al, .{ .label = tr("Courses"), .kind = .group, .id = 1 });
 }
 
+fn rootName(root: []const u8) []const u8 {
+    const name = std.fs.path.basename(root);
+    return if (name.len > 0) name else root;
+}
+
 fn libraryRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
-    const st = try a.db.prepare("SELECT folder, MIN(title), COUNT(*) FROM song GROUP BY folder ORDER BY MIN(title)");
+    const root = a.sel.library_root;
+    const st = try a.db.prepare("SELECT folder, MIN(title), COUNT(*) FROM song WHERE ?1='' OR folder=?1 OR folder LIKE ?2 ESCAPE '\\' GROUP BY folder ORDER BY MIN(title)");
     defer st.deinit();
+    st.bindText(1, root);
+    // The separator keeps /mnt/bms from also listing /mnt/bms2.
+    const under = if (root.len > 0 and std.fs.path.isSep(root[root.len - 1])) root else try std.fmt.allocPrint(al, "{s}{c}", .{ root, std.fs.path.sep });
+    st.bindText(2, try db_mod.likePrefix(al, under));
     while (try st.step()) {
         try rows.append(al, .{
             .label = try std.fmt.allocPrint(al, "{s}  ({d})", .{ st.text(1), st.int(2) }),
@@ -1179,7 +1195,7 @@ fn fillSkinState(a: *App) void {
         .kind = if (s.searching) .search else bar.kind,
         .directory = switch (s.view) {
             .root => "",
-            .library => tr("LIBRARY"),
+            .library => if (s.library_root.len > 0) rootName(s.library_root) else tr("LIBRARY"),
             .folder => std.fs.path.basename(s.folder),
             .table => tr("TABLE"),
             .level => s.level,
@@ -1322,8 +1338,22 @@ fn drawQuery(a: *App) void {
     }
 }
 
+fn setLibraryRoot(a: *App, root: []const u8) void {
+    const s = &a.sel;
+    const n = @min(root.len, s.library_root_buf.len);
+    std.mem.copyForwards(u8, s.library_root_buf[0..n], root[0..n]);
+    s.library_root = s.library_root_buf[0..n];
+}
+
 fn setFolder(a: *App, f: []const u8) void {
     const s = &a.sel;
+    // A folder opened from a chart: going back must land in the library folder that holds it.
+    const root = s.library_root;
+    if (root.len > 0 and !std.mem.eql(u8, f, root) and !db_mod.isUnder(f, root)) {
+        setLibraryRoot(a, for (a.cfg.roots) |r| {
+            if (std.mem.eql(u8, f, r) or db_mod.isUnder(f, r)) break r;
+        } else "");
+    }
     const n = @min(f.len, s.folder_buf.len);
     std.mem.copyForwards(u8, s.folder_buf[0..n], f[0..n]);
     s.folder = s.folder_buf[0..n];
@@ -1347,7 +1377,7 @@ fn back(a: *App, view: @TypeOf(a.sel.view)) void {
         const opened = switch (from) {
             .favorites => row.kind == .group and row.id == 2,
             .root => false,
-            .library => row.kind == .group and row.id == 0,
+            .library => row.kind == .group and row.id == 0 and std.mem.eql(u8, row.target, s.library_root),
             .courses => row.kind == .group and row.id == 1,
             .folder => row.kind == .folder and std.mem.eql(u8, row.target, s.folder),
             .table => row.kind == .table and std.mem.eql(u8, row.target, s.table_url),
@@ -1736,11 +1766,14 @@ fn openRow(a: *App) void {
     if (row.song) |song| return startSong(a, song);
     switch (row.kind) {
         .folder => setFolder(a, row.target),
-        .group => go(a, switch (row.id) {
-            1 => .courses,
-            2 => .favorites,
-            else => .library,
-        }),
+        .group => {
+            if (row.id == 0) setLibraryRoot(a, row.target);
+            go(a, switch (row.id) {
+                1 => .courses,
+                2 => .favorites,
+                else => .library,
+            });
+        },
         .table => {
             const n = @min(row.target.len, s.table_buf.len);
             @memcpy(s.table_buf[0..n], row.target[0..n]);
@@ -2080,6 +2113,19 @@ test "the cursor wraps at the ends and pages stop at them" {
     try std.testing.expectEqual(a.sel.rows.len - 1, a.sel.cursor);
     key(a, c.SDL_SCANCODE_PAGEUP);
     try std.testing.expectEqual(@as(usize, 0), a.sel.cursor);
+}
+
+test "each library folder is its own row and lists only what it holds" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.cfg.roots = &.{ "/a", "/b", "/a/inner" };
+    reload(a);
+    try expectRows(a, &.{ "a", "b", "Favorites", "Table", "Courses" });
+    key(a, c.SDL_SCANCODE_DOWN);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try expectRows(a, &.{"Delta  (1)"});
+    key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expectEqual(@as(usize, 1), a.sel.cursor);
 }
 
 test "enter walks into folders and escape comes back to the row it opened" {

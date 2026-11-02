@@ -24,6 +24,7 @@ const Section = enum {
     tables,
     audio,
     display,
+    skin,
     timing,
     scores,
     online,
@@ -35,6 +36,7 @@ const Section = enum {
             .tables => tr("Tables"),
             .audio => tr("Audio"),
             .display => tr("Display"),
+            .skin => tr("Skin"),
             .timing => tr("Timing"),
             .scores => tr("Scores"),
             .online => tr("Online"),
@@ -46,7 +48,7 @@ const Section = enum {
 // Declared in section order: the cursor walks this list.
 const Item = enum {
     add_root,
-    clear_roots,
+    remove_root,
     open_data,
     add_table,
     update_tables,
@@ -62,12 +64,14 @@ const Item = enum {
     resolution,
     fullscreen,
     vsync,
+    fps_limit,
     reflex,
+    bga,
     bga_upscale,
+    language,
     skin,
     skin_slots,
     open_skins,
-    language,
     green,
     lift,
     hidden,
@@ -96,10 +100,11 @@ const Item = enum {
 
     fn section(it: Item) Section {
         return switch (it) {
-            .add_root, .clear_roots, .open_data => .library,
+            .add_root, .remove_root, .open_data => .library,
             .add_table, .update_tables, .table_list => .tables,
             .volume, .bgm_volume, .bgm_set, .sfx_volume, .sound_set, .audio_rate, .audio_frames, .audio_device => .audio,
-            .resolution, .fullscreen, .vsync, .reflex, .bga_upscale, .skin, .skin_slots, .open_skins, .language => .display,
+            .resolution, .fullscreen, .vsync, .fps_limit, .reflex, .bga, .bga_upscale, .language => .display,
+            .skin, .skin_slots, .open_skins => .skin,
             .green, .lift, .hidden, .judge_offset, .visual_offset => .timing,
             .import_beatoraja, .import_lr2 => .scores,
             .ir_url, .ir_signup, .ir_signin, .ir_rename, .ir_upload, .ir_download, .download_url, .update => .online,
@@ -110,7 +115,7 @@ const Item = enum {
     fn name(it: Item) []const u8 {
         return switch (it) {
             .add_root => tr("Add folder"),
-            .clear_roots => tr("Remove all folders"),
+            .remove_root => tr("Remove a folder"),
             .add_table => tr("Add by address"),
             .update_tables => tr("Update all"),
             .table_list => tr("Tables"),
@@ -126,6 +131,8 @@ const Item = enum {
             .fullscreen => tr("Fullscreen"),
             .vsync => tr("VSync"),
             .reflex => tr("NVIDIA Reflex"),
+            .bga => tr("BGA"),
+            .fps_limit => tr("FPS limit"),
             .bga_upscale => tr("BGA movie upscaling (FSRCNNX)"),
             .skin => tr("Skin"),
             .skin_slots => tr("Skins per screen"),
@@ -163,7 +170,7 @@ const Item = enum {
     fn help(it: Item) []const u8 {
         return switch (it) {
             .add_root => tr("Choose a folder. It is scanned for charts right away."),
-            .clear_roots => tr("Forgets the folder list. Scores and chart files stay."),
+            .remove_root => tr("Takes a folder, or all of them, out of the library. Scores and chart files stay."),
             .add_table => tr("Paste a table's web address with Ctrl+V. It loads right away."),
             .update_tables => tr("Downloads every added table again. F8 in song select does the same."),
             .table_list => tr("Enter adds or removes the selected table. Removing keeps chart scores."),
@@ -173,18 +180,20 @@ const Item = enum {
             .bgm_volume => tr("The loop behind song select and settings: the skin's own music if it has any."),
             .sfx_volume => tr("Cursor, confirm and result sounds."),
             .audio_rate => tr("Takes effect after a restart."),
-            .audio_frames => tr("Smaller is lower latency, too small crackles. Takes effect after a restart."),
-            .audio_device => tr("Falls back to Default if it will not open. Applies when you leave settings."),
+            .audio_frames => tr("Smaller is lower latency, too small crackles. Applies at once."),
+            .audio_device => tr("Falls back to Default if it will not open. Applies at once."),
             .resolution => tr("Applies at once. Fullscreen always fills the screen."),
             .fullscreen => tr("Applies at once."),
             .vsync => tr("Applies at once. Off lowers input latency and may tear."),
+            .bga => tr("Off plays without background images and movies, from the next chart."),
+            .fps_limit => tr("Applies at once. Off leaves the frame rate to VSync. Judging does not depend on it."),
             .bga_upscale => tr("Cleaner, sharper movies when they are enlarged, for a little CPU and GPU time per movie frame. Applies to the next chart for deblocking."),
             .reflex => tr("NVIDIA GPUs only. Boost holds GPU clocks high and uses more power."),
             .open_skins => tr("Put each skin in its own folder here, then pick it under Skin."),
             .open_data => tr("Settings, scores, replays and skins live here."),
             .skin_slots => tr("Enter picks a skin and its settings for each screen and key mode. The rest use the skin above."),
             .language => tr("The game's language. Applies at once."),
-            .skin => tr("Enter or click lists the skins folder, or picks a skin elsewhere. Left/Right steps through them."),
+            .skin => tr("Enter or click lists the skins folder. Left/Right steps through them."),
             .green => tr("How long notes stay visible: higher is slower. Enter to type a number, 30 to 2000."),
             .lift => tr("Raises the judge line. Home and End change it during play."),
             .hidden => tr("Hides notes just above the judge line. Insert and Delete change it during play."),
@@ -243,6 +252,16 @@ pub const State = struct {
 
 const items = std.enums.values(Item);
 const poll_rates = [_]u32{ 0, 1000, 2000, 4000, 8000 };
+const fps_limits = [_]u32{ 0, 60, 120, 144, 240, 360, 1000 };
+
+/// A limit typed into config.json shows as the nearest choice at or below it.
+fn fpsIndex(fps: u32) usize {
+    var best: usize = 0;
+    for (fps_limits, 0..) |f, i| {
+        if (f <= fps) best = i;
+    }
+    return best;
+}
 const resolutions = [_][2]u32{ .{ 1280, 720 }, .{ 1600, 900 }, .{ 1920, 1080 }, .{ 2560, 1440 }, .{ 3840, 2160 } };
 
 /// A size typed into config.json or dragged steps to the nearest choice in that direction.
@@ -287,7 +306,7 @@ var db_filter = [_]c.SDL_DialogFileFilter{
 };
 
 fn usesPicker(it: Item) bool {
-    return it == .add_root or it == .import_beatoraja or it == .import_lr2 or it == .skin or it == .bgm_set or it == .sound_set;
+    return it == .add_root or it == .import_beatoraja or it == .import_lr2 or it == .bgm_set or it == .sound_set;
 }
 
 fn openPicker(a: *App, it: Item) void {
@@ -440,7 +459,6 @@ fn startEditing(a: *App, it: Item) void {
     a.startText(switch (it) {
         .ir_url => a.cfg.ir_url,
         .download_url => a.cfg.download_url,
-        .skin => a.cfg.skin,
         .bgm_set => a.cfg.bgm_root,
         .sound_set => a.cfg.sound_root,
         .green => std.fmt.bufPrint(&green_buf, "{d}", .{greenShown(a.cfg.green_ms)}) catch "",
@@ -537,7 +555,7 @@ fn drawDropValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, value: [
 }
 
 fn hasDrop(it: Item) bool {
-    return it == .audio_frames or it == .audio_device or it == .skin or it == .bgm_set or it == .sound_set;
+    return it == .audio_frames or it == .audio_device or it == .skin or it == .bgm_set or it == .sound_set or it == .remove_root;
 }
 
 fn openDrop(a: *App, it: Item) void {
@@ -569,7 +587,6 @@ fn openDrop(a: *App, it: Item) void {
         },
         .skin => {
             now = a.cfg.skin;
-            last = tr("Pick a skin elsewhere...");
             labels.append(al, tr("Built-in")) catch return;
             values.append(al, "") catch return;
             const root = skin_mod.skinsDir(al) catch break :fill;
@@ -578,6 +595,16 @@ fn openDrop(a: *App, it: Item) void {
                 labels.append(al, n) catch return;
                 values.append(al, std.fs.path.join(al, &.{ root, n }) catch return) catch return;
             }
+        },
+        .remove_root => {
+            if (a.cfg.roots.len == 0) return say(a, "No library folders yet", .{});
+            for (a.cfg.roots) |r| {
+                labels.append(al, r) catch return;
+                values.append(al, r) catch return;
+            }
+            labels.append(al, tr("Remove all folders")) catch return;
+            values.append(al, "") catch return;
+            now = "\x00";
         },
         .bgm_set, .sound_set => {
             now = if (it == .bgm_set) a.cfg.bgm_path else a.cfg.sound_path;
@@ -609,12 +636,17 @@ fn chooseDrop(a: *App, i: usize) void {
     if (i >= s.drop_values.len) return openPicker(a, it);
     const v = s.drop_values[i];
     switch (it) {
-        .audio_frames => a.cfg.audio_frames = std.fmt.parseInt(u32, v, 10) catch return,
+        .audio_frames => {
+            a.cfg.audio_frames = std.fmt.parseInt(u32, v, 10) catch return;
+            a.engine.reopen(a.cfg.audio_frames, a.cfg.audio_device);
+        },
         .audio_device => {
             a.cfg.audio_device = v;
+            a.engine.reopen(a.cfg.audio_frames, a.cfg.audio_device);
             say(a, "{s}", .{if (v.len > 0) v else tr("Default")});
         },
         .skin => a.cfg.skin = v,
+        .remove_root => a.cfg.roots = withoutRoot(a.arena.allocator(), a.cfg.roots, v) catch return,
         .bgm_set, .sound_set => {
             if (it == .bgm_set) a.cfg.bgm_path = v else a.cfg.sound_path = v;
             a.refreshBgm();
@@ -710,6 +742,11 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
         .resolution => step(a, it, drawStepper(g, right, y, h, std.fmt.bufPrint(&buf, "{d}x{d}", .{ cfg.width, cfg.height }) catch "", on)),
         .fullscreen => drawToggle(g, right, y, h, cfg.fullscreen, on),
         .bga_upscale => drawToggle(g, right, y, h, cfg.bga_upscale, on),
+        .bga => drawToggle(g, right, y, h, cfg.bga, on),
+        .fps_limit => if (drawChoices(g, right, y, h, &.{ tr("Off"), "60", "120", "144", "240", "360", "1000" }, fpsIndex(cfg.fps_limit), on)) |i| {
+            a.sfx(.adjust);
+            cfg.fps_limit = fps_limits[i];
+        },
         .beatoraja_select => drawToggle(g, right, y, h, cfg.beatoraja_select, on),
         .vsync => if (drawChoices(g, right, y, h, &.{ tr("Off"), tr("On"), tr("Adaptive") }, if (cfg.vsync == 0) 0 else if (cfg.vsync == 1) 1 else 2, on)) |i| {
             a.sfx(.adjust);
@@ -738,6 +775,7 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
             cfg.audio_rate = if (i == 0) 44100 else 48000;
         },
         .audio_frames => drawDropValue(a, it, x, right, y, h, i18n.bufPrint(&buf, "{d} frames", .{cfg.audio_frames}) catch "", on),
+        .remove_root => drawDropValue(a, it, x, right, y, h, "", on),
         .green => {
             step(a, it, drawStepper(g, right, y, h, std.fmt.bufPrint(&buf, "{d}", .{greenShown(cfg.green_ms)}) catch "", on));
             g.textCentered(std.fmt.bufPrint(&buf, "{d} ms", .{cfg.green_ms}) catch "", right - 80 * u, y + h - 17 * u, g.scaled(12), if (on) gfx.white else gfx.dim);
@@ -887,7 +925,7 @@ pub fn draw(a: *App) void {
 fn rowActs(it: Item) bool {
     return switch (it) {
         // Lists open from their value or with Enter, not from anywhere on the row.
-        .volume, .bgm_volume, .sfx_volume, .audio_rate, .audio_frames, .audio_device, .resolution, .vsync, .reflex, .language, .input_poll, .lift, .hidden, .judge_offset, .visual_offset, .skin, .bgm_set, .sound_set => false,
+        .volume, .bgm_volume, .sfx_volume, .audio_rate, .audio_frames, .audio_device, .resolution, .vsync, .fps_limit, .reflex, .language, .input_poll, .lift, .hidden, .judge_offset, .visual_offset, .skin, .bgm_set, .sound_set => false,
         else => true,
     };
 }
@@ -904,6 +942,7 @@ fn adjust(a: *App, it: Item, dir: i32) void {
         .audio_frames => {
             const v = @as(i64, cfg.audio_frames) + 32 * @as(i64, dir);
             cfg.audio_frames = @intCast(std.math.clamp(v, 32, 4096));
+            a.engine.reopen(cfg.audio_frames, cfg.audio_device);
         },
         .audio_device => cycleDevice(a, dir),
         .volume => {
@@ -925,6 +964,11 @@ fn adjust(a: *App, it: Item, dir: i32) void {
         },
         .language => setLanguage(a, @fromBackingInt(@intCast(@mod(@as(i32, @backingInt(i18n.current)) + dir, @as(i32, i18n.names.len))))),
         .beatoraja_select => cfg.beatoraja_select = !cfg.beatoraja_select,
+        .bga => cfg.bga = !cfg.bga,
+        .fps_limit => {
+            const i = @as(i32, @intCast(fpsIndex(cfg.fps_limit))) + dir;
+            cfg.fps_limit = fps_limits[@intCast(std.math.clamp(i, 0, fps_limits.len - 1))];
+        },
         .bga_upscale => {
             cfg.bga_upscale = !cfg.bga_upscale;
             a.g.upscale_on = cfg.bga_upscale;
@@ -975,6 +1019,7 @@ fn cycleDevice(a: *App, dir: i32) void {
     const names = a.engine.outputDevices(tmp.allocator());
     if (names.len == 0) return say(a, "No audio outputs found", .{});
     a.cfg.audio_device = a.arena.allocator().dupe(u8, skin_sound.nextSet(a.cfg.audio_device, names, dir)) catch return;
+    a.engine.reopen(a.cfg.audio_frames, a.cfg.audio_device);
     a.saveConfig();
     say(a, "{s}", .{if (a.cfg.audio_device.len > 0) a.cfg.audio_device else tr("Default")});
 }
@@ -1181,6 +1226,28 @@ fn drawTableList(a: *App, item_index: usize, x: f32, w: f32, top: f32, bottom: f
     }
 }
 
+/// "/bms/" and "/bms" are one folder; a drive root like "C:\\" keeps its separator.
+fn trimSep(dir: []const u8) []const u8 {
+    var d = dir;
+    while (d.len > 1 and std.fs.path.isSep(d[d.len - 1]) and d[d.len - 2] != ':') d = d[0 .. d.len - 1];
+    return d;
+}
+
+/// Adds a folder, dropping folders inside it: the new one holds their charts.
+fn withRoot(al: std.mem.Allocator, roots: []const []const u8, dir: []const u8) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    for (roots) |r| if (!db_mod.isUnder(r, dir)) try out.append(al, r);
+    try out.append(al, dir);
+    return out.toOwnedSlice(al);
+}
+
+/// An empty `dir` removes every folder.
+fn withoutRoot(al: std.mem.Allocator, roots: []const []const u8, dir: []const u8) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    if (dir.len > 0) for (roots) |r| if (!std.mem.eql(u8, r, dir)) try out.append(al, r);
+    return out.toOwnedSlice(al);
+}
+
 fn commit(a: *App, it: Item) void {
     // Before the trim below and the arena copy: a password is sent as typed and not kept.
     if (a.set.account_name) |name| {
@@ -1192,10 +1259,11 @@ fn commit(a: *App, it: Item) void {
     switch (it) {
         .add_root => {
             if (v.len == 0) return;
-            const roots = al.alloc([]const u8, a.cfg.roots.len + 1) catch return;
-            @memcpy(roots[0..a.cfg.roots.len], a.cfg.roots);
-            roots[a.cfg.roots.len] = v;
-            a.cfg.roots = roots;
+            const dir = trimSep(v);
+            for (a.cfg.roots) |r| {
+                if (std.mem.eql(u8, dir, r) or db_mod.isUnder(dir, r)) return say(a, "Already in the library under {s}", .{r});
+            }
+            a.cfg.roots = withRoot(al, a.cfg.roots, dir) catch return;
             a.saveConfig();
             select.startScan(a);
         },
@@ -1234,7 +1302,6 @@ fn commit(a: *App, it: Item) void {
             a.startText("");
         },
         .download_url => a.cfg.download_url = v,
-        .skin => a.cfg.skin = v,
         .bgm_set => pickSetRoot(a, &a.cfg.bgm_path, &a.cfg.bgm_root, v, skin_sound.musicSets),
         .sound_set => pickSetRoot(a, &a.cfg.sound_path, &a.cfg.sound_root, v, skin_sound.soundSets),
         else => {},
@@ -1302,7 +1369,6 @@ fn keyTabs(a: *App, it: Item, sc: u32) void {
         c.SDL_SCANCODE_ESCAPE => {
             a.sfxOr(a.sfx_option_close, .back);
             a.saveConfig();
-            a.engine.switchDevice(a.cfg.audio_frames, a.cfg.audio_device);
             a.scene = .select;
         },
         else => {},
@@ -1321,10 +1387,6 @@ fn activate(a: *App, it: Item) void {
     if (hasDrop(it)) return openDrop(a, it);
     if (usesPicker(it)) return openPicker(a, it);
     switch (it) {
-        .clear_roots => {
-            a.cfg.roots = &.{};
-            a.saveConfig();
-        },
         .update_tables => {
             if (tablesBusy(a)) return;
             select.startTableFetch(a, null);
@@ -1468,7 +1530,7 @@ test "up and down stay inside a tab" {
     key(a, c.SDL_SCANCODE_DOWN);
     try std.testing.expectEqual(.add_root, items[a.set.cursor]);
     key(a, c.SDL_SCANCODE_DOWN);
-    try std.testing.expectEqual(.clear_roots, items[a.set.cursor]);
+    try std.testing.expectEqual(.remove_root, items[a.set.cursor]);
 }
 
 test "the table list moves row by row before it leaves" {
@@ -1670,11 +1732,26 @@ test "the language row steps through every language, wraps and is saved" {
     try std.testing.expectEqualStrings("zh", a.cfg.language);
 }
 
-test "clearing library folders empties the list" {
+test "a folder comes out of the library alone, or all of them" {
     const a = try testing.open();
     defer testing.close(a);
-    a.cfg.roots = &.{"/lib"};
-    openItem(a, .clear_roots);
-    key(a, c.SDL_SCANCODE_RETURN);
+    a.cfg.roots = &.{ "/lib", "/other" };
+    // The list itself needs fonts to open; its values are the folders, then "" for all of them.
+    a.set.drop_for = .remove_root;
+    a.set.drop_values = &.{ "/lib", "/other", "" };
+    chooseDrop(a, 0);
+    try std.testing.expectEqual(@as(usize, 1), a.cfg.roots.len);
+    try std.testing.expectEqualStrings("/other", a.cfg.roots[0]);
+    chooseDrop(a, 2);
     try std.testing.expectEqual(@as(usize, 0), a.cfg.roots.len);
+}
+
+test "a folder added around others takes their place" {
+    const al = std.testing.allocator;
+    const roots = try withRoot(al, &.{ "/bms/a", "/bms2", "/bms/b" }, trimSep("/bms/"));
+    defer al.free(roots);
+    try std.testing.expectEqual(@as(usize, 2), roots.len);
+    try std.testing.expectEqualStrings("/bms2", roots[0]);
+    try std.testing.expectEqualStrings("/bms", roots[1]);
+    try std.testing.expectEqualStrings("C:\\", trimSep("C:\\"));
 }

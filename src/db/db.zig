@@ -320,7 +320,8 @@ pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: 
     var batch: std.ArrayList(ScanJob) = .empty;
     var stack: std.ArrayList([]const u8) = .empty;
     var unread: std.ArrayList([]const u8) = .empty;
-    for (roots) |r| try stack.append(arena.allocator(), try arena.allocator().dupe(u8, r));
+    const outer = try outerRoots(arena.allocator(), roots);
+    for (outer) |r| try stack.append(arena.allocator(), try arena.allocator().dupe(u8, r));
     while (stack.pop()) |dir| {
         var it = std.heap.ArenaAllocator.init(gpa);
         defer it.deinit();
@@ -357,7 +358,7 @@ pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: 
     errdefer d.exec("ROLLBACK") catch {};
     // Drop rows only under the scanned roots: an unplugged library must not vanish because
     // its root is gone, so a folder that could not be read keeps its rows.
-    for (roots) |r| {
+    for (outer) |r| {
         const sel = try d.prepare("SELECT path FROM song WHERE path LIKE ?1 ESCAPE '\\'");
         defer sel.deinit();
         const del = try d.prepare("DELETE FROM song WHERE path=?1");
@@ -381,13 +382,26 @@ pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: 
     return stats;
 }
 
+/// The roots no other root holds, each once: a folder added inside another would be scanned
+/// and listed twice.
+pub fn outerRoots(a: std.mem.Allocator, roots: []const []const u8) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    for (roots, 0..) |r, i| {
+        const held = for (roots, 0..) |o, j| {
+            if (isUnder(r, o) or (j < i and std.mem.eql(u8, r, o))) break true;
+        } else false;
+        if (!held) try out.append(a, r);
+    }
+    return out.toOwnedSlice(a);
+}
+
 /// A whole folder name must match: /mnt/bms does not hold /mnt/bms2/a.bms.
-fn isUnder(path: []const u8, dir: []const u8) bool {
+pub fn isUnder(path: []const u8, dir: []const u8) bool {
     if (dir.len == 0 or path.len <= dir.len or !std.mem.startsWith(u8, path, dir)) return false;
     return std.fs.path.isSep(dir[dir.len - 1]) or std.fs.path.isSep(path[dir.len]);
 }
 
-fn likePrefix(a: std.mem.Allocator, prefix: []const u8) ![]u8 {
+pub fn likePrefix(a: std.mem.Allocator, prefix: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     for (prefix) |ch| {
         if (ch == '%' or ch == '_' or ch == '\\') try out.append(a, '\\');
@@ -708,6 +722,15 @@ test "scan parses in parallel, stores every chart and skips them next time" {
     try std.testing.expect(try count.step());
     try std.testing.expectEqual(@as(i64, first.parsed), count.int(0));
     try std.testing.expectEqual(@as(u32, 0), (try scan(gpa, d, &roots, null)).parsed);
+}
+
+test "a root inside another, or added twice, is scanned once" {
+    const a = std.testing.allocator;
+    const outer = try outerRoots(a, &.{ "/bms/pack", "/bms", "/bms2", "/bms" });
+    defer a.free(outer);
+    try std.testing.expectEqual(@as(usize, 2), outer.len);
+    try std.testing.expectEqualStrings("/bms", outer[0]);
+    try std.testing.expectEqualStrings("/bms2", outer[1]);
 }
 
 test "a scan drops gone charts only in folders it could read" {
