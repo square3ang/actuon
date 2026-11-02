@@ -1,0 +1,16 @@
+[Unit]
+Description=actuon IR backup to the bucket
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /opt/actuon/bin/backup.sh once
+# The server's user: SQLite needs to write ir.db-shm even to read the database.
+User=actuon
+EnvironmentFile=/etc/actuon/backup.env
+Environment=DATA_DIR=/var/lib/actuon HOME=/tmp
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ReadWritePaths=/var/lib/actuon
+ProtectHome=yes
+PrivateTmp=yes

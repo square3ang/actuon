@@ -5,11 +5,6 @@ process with a 30 s limit, and stores the score it computes itself, not one the 
 
 Scores and accounts live in SQLite in WAL mode (`ir.db`), and uploaded charts next to it in the data directory.
 
-```sh
-cd server
-docker compose up -d --build
-```
-
 It listens on `127.0.0.1:8730` over plain HTTP, so put a TLS proxy in front before opening it to the internet. Use one
 that buffers request bodies, as nginx does by default: a worker waits for the whole body, so a few very slow clients could
 otherwise hold all eight.
@@ -20,7 +15,7 @@ with notes. Two chart or replay checks run at once, one per player, and four pas
 one ends. Each check runs in a child process with a 1 GiB address space limit, a 30 s CPU limit and no way to open files.
 A PMS score is refused when reading the chart as BMS finds more notes, because PMS parsing drops channels it has no lane for.
 
-To run it without Docker:
+To run it by hand:
 
 ```sh
 zig build core -Doptimize=ReleaseSafe
@@ -32,26 +27,22 @@ Run one instance on a local disk: WAL does not work over a network filesystem, a
 process, so a restart resets them. A database from an older server opens as it is.
 
 To install or update it on a Linux host over SSH, fill in `server/.env` from `server/.env.example`, then run
-`server/deploy.sh root@HOST`. It builds the images with Docker locally, copies them and the working tree to `/opt/actuon`,
-installs Podman and podman-compose with dnf, starts the server and runs one backup to prove the bucket works. The host must
-be RHEL-like, such as Rocky Linux.
+`server/deploy.sh root@HOST`. It builds static binaries of the server and the web page here, which needs
+`rustup target add x86_64-unknown-linux-musl`. It copies them to `/opt/actuon/bin` and installs them as the systemd services
+`actuon-ir` and `actuon-web`. The data lives in `/var/lib/actuon`, and one backup runs to prove the bucket works. The host
+must be RHEL-like, such as Rocky Linux. A host set up by the old Docker deploy has its data moved out of the Podman volume
+once, and the volume is kept.
 
 Behind Cloudflare's proxy, run `server/cloudflare_firewall.sh` as root on a firewalld host so only Cloudflare can reach ports
 80 and 443. Run it again when Cloudflare's address list changes. Set Cloudflare's SSL mode to Full (strict).
 
 ## Backups
 
-The `backup` service sends the database and charts to any S3-compatible storage, such as Cloudflare R2, every 6 hours.
-It keeps database copies for 30 days and charts for good. The bucket must exist. In `server/`:
+The `actuon-backup.timer` sends the database and charts to any S3-compatible storage, such as Cloudflare R2, every 6
+hours. It keeps database copies for 30 days and charts for good. The bucket must exist, and `server/.env` names it.
 
-```sh
-cp .env.example .env    # then fill in the S3 values
-docker compose up -d --build
-docker compose logs backup
-```
-
-A failed backup is only logged, as `backup failed`, and tried again in 6 hours. Backups hold password and token hashes
-and are not encrypted, so keep the bucket private.
+A failed backup shows in `systemctl --failed` and `journalctl -u actuon-backup`, and the timer tries again in 6 hours.
+Backups hold password and token hashes and are not encrypted, so keep the bucket private.
 
 A database with no accounts is not uploaded, so an empty one cannot become the newest copy.
 
@@ -59,9 +50,10 @@ To restore the newest copy, stop the server first. Add a name from the bucket's 
 older one. The database it replaces stays as `ir.db.before-restore-TIME`, even when it is corrupt.
 
 ```sh
-docker compose stop ir
-docker compose run --rm --no-deps backup restore
-docker compose up -d
+systemctl stop actuon-ir
+systemd-run --wait --pipe -p User=actuon -p EnvironmentFile=/etc/actuon/backup.env -E DATA_DIR=/var/lib/actuon \
+    sh /opt/actuon/bin/backup.sh restore
+systemctl start actuon-ir
 ```
 
 Scores saved since the last backup are lost, but players can send them again with IR sync.

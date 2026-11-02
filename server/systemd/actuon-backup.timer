@@ -1,0 +1,10 @@
+[Unit]
+Description=actuon IR backup every 6 hours
+
+[Timer]
+OnCalendar=00/6:00
+# A backup missed while the host was down runs at the next boot.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

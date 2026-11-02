@@ -1,6 +1,6 @@
 #!/bin/sh
-# Copies the IR data directory to the rclone remote "backup". With no argument it repeats every 6 hours.
-# Usage: backup.sh [once|restore [NAME]]
+# Copies the IR data directory to the rclone remote "backup". A systemd timer runs it every 6 hours.
+# Usage: backup.sh once|restore [NAME]
 set -eu
 data=${DATA_DIR:-/data}
 remote=backup:${S3_BUCKET:?set S3_BUCKET}
@@ -53,18 +53,11 @@ restore() {
 	echo "restored $name"
 }
 
-case ${1:-loop} in
+case ${1:-} in
 once) once ;;
 restore) restore "${2:-}" ;;
-loop)
-	while :; do
-		# A child process: inside "||" the shell would ignore set -e, and a failed step would not stop the rest.
-		sh "$0" once || echo "backup failed, next try in 6 hours" >&2
-		sleep 21600
-	done
-	;;
 *)
-	echo "usage: backup.sh [once|restore [NAME]]" >&2
+	echo "usage: backup.sh once|restore [NAME]" >&2
 	exit 2
 	;;
 esac

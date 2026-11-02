@@ -1,0 +1,22 @@
+[Unit]
+Description=actuon internet ranking server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Plain HTTP: put a TLS proxy in front before opening this to the internet.
+ExecStart=/opt/actuon/bin/actuon-ir 127.0.0.1:8730 /var/lib/actuon
+User=actuon
+Restart=always
+# The server and two checks at their 1 GiB limit.
+MemoryMax=3G
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ReadWritePaths=/var/lib/actuon
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+
+[Install]
+WantedBy=multi-user.target

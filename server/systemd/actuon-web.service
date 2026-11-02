@@ -1,0 +1,17 @@
+[Unit]
+Description=actuon ranking web page
+After=actuon-ir.service
+
+[Service]
+ExecStart=/opt/actuon/bin/actuon-web 127.0.0.1:8731 http://127.0.0.1:8730
+DynamicUser=yes
+Restart=always
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+
+[Install]
+WantedBy=multi-user.target
