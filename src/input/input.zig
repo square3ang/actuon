@@ -174,11 +174,16 @@ const evdev = if (builtin.os.tag == .linux) struct {
     // EVIOCGKEY(16 bytes): the keys held right now, for codes below 128.
     const EVIOCGKEY: u32 = 0x80104518;
 
+    const max_events = 64;
+
     var fds: [32]linux.pollfd = undefined;
-    var n: usize = 0;
+    /// The /dev/input number behind each slot of fds.
+    var event_nums: [fds.len]u8 = undefined;
+    /// The sampler reads this while the evdev thread adds devices.
+    var n: std.atomic.Value(usize) = .init(0);
 
     fn sample(bits: *KeyBits) void {
-        for (fds[0..n]) |f| {
+        for (fds[0..n.load(.acquire)]) |f| {
             var one: KeyBits = @splat(0);
             if (linux.errno(linux.ioctl(f.fd, EVIOCGKEY, @intFromPtr(&one))) != .SUCCESS) continue;
             for (bits, one) |*b, o| b.* |= o;
@@ -191,11 +196,20 @@ const evdev = if (builtin.os.tag == .linux) struct {
         return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
     }
 
-    // shortcut: devices are listed once, so a keyboard plugged in later is dead during play until restart, rescan on SDL_EVENT_KEYBOARD_ADDED when players report it.
-    fn start() void {
+    /// The first slot an unplugged device left, else the next unused one.
+    fn freeSlot(used: []const linux.pollfd) ?usize {
+        for (used, 0..) |f, i| if (f.fd < 0) return i;
+        return if (used.len < fds.len) used.len else null;
+    }
+
+    /// Opens every keyboard not open yet, so one plugged in during play works at once.
+    fn openKeyboards() void {
+        var open: std.StaticBitSet(max_events) = .empty;
+        for (fds[0..n.load(.monotonic)], event_nums[0..n.load(.monotonic)]) |f, num| if (f.fd >= 0) open.set(num);
         var path_buf: [32]u8 = undefined;
-        for (0..64) |i| {
-            if (n == fds.len) break;
+        for (0..max_events) |i| {
+            if (open.isSet(i)) continue;
+            const slot = freeSlot(fds[0..n.load(.monotonic)]) orelse return;
             const path = std.fmt.bufPrintSentinel(&path_buf, "/dev/input/event{d}", .{i}, 0) catch continue;
             const rc = linux.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0);
             if (linux.errno(rc) != .SUCCESS) continue;
@@ -207,10 +221,15 @@ const evdev = if (builtin.os.tag == .linux) struct {
             }
             var clock: i32 = @backingInt(linux.clockid_t.MONOTONIC);
             _ = linux.ioctl(fd, EVIOCSCLOCKID, @intFromPtr(&clock));
-            fds[n] = .{ .fd = fd, .events = linux.POLL.IN, .revents = 0 };
-            n += 1;
+            event_nums[slot] = @intCast(i);
+            fds[slot] = .{ .fd = fd, .events = linux.POLL.IN, .revents = 0 };
+            if (slot == n.load(.monotonic)) n.store(slot + 1, .release);
         }
-        if (n == 0) return; // no permission: stay on SDL keyboard events; docs explain the udev rule
+    }
+
+    fn start() void {
+        openKeyboards();
+        if (n.load(.acquire) == 0) return; // no permission: stay on SDL keyboard events; docs explain the udev rule
         direct_keyboard.store(true, .release);
         const t = c.SDL_CreateThread(run, "input-evdev", null);
         if (t != null) c.SDL_DetachThread(t);
@@ -218,11 +237,18 @@ const evdev = if (builtin.os.tag == .linux) struct {
 
     fn run(_: ?*anyopaque) callconv(.c) c_int {
         var evs: [64]InputEvent = undefined;
+        var opened_at = c.SDL_GetTicks();
         while (true) {
-            _ = linux.poll(&fds, n, -1);
+            const count = n.load(.monotonic);
+            _ = linux.poll(&fds, count, 1000);
+            // Events carry kernel timestamps, so the time this takes cannot move a judgement.
+            if (c.SDL_GetTicks() - opened_at >= 1000) {
+                opened_at = c.SDL_GetTicks();
+                openKeyboards();
+            }
             // SDL's tick clock and CLOCK_MONOTONIC share a rate, so a fresh delta per wake is exact enough.
             const delta = @as(i128, c.SDL_GetTicksNS()) - monoNs();
-            for (fds[0..n]) |*f| {
+            for (fds[0..count]) |*f| {
                 // An unplugged device reports HUP forever: without dropping it this loop would spin.
                 if (f.revents & (linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL) != 0) {
                     _ = linux.close(f.fd);
@@ -268,6 +294,16 @@ test "sampling pushes one event per changed key" {
     try std.testing.expectEqual(@as(u64, 7), z.mono_ns);
     try std.testing.expectEqual(@as(u16, 44), pop().?.code);
     try std.testing.expect(pop() == null);
+}
+
+test "a keyboard plugged in later reuses an unplugged one's slot" {
+    if (builtin.os.tag != .linux) return;
+    const PollFd = std.os.linux.pollfd;
+    const open: PollFd = .{ .fd = 3, .events = 0, .revents = 0 };
+    const gone: PollFd = .{ .fd = -1, .events = 0, .revents = 0 };
+    try std.testing.expectEqual(@as(?usize, 1), evdev.freeSlot(&.{ open, gone, open }));
+    try std.testing.expectEqual(@as(?usize, 2), evdev.freeSlot(&.{ open, open }));
+    try std.testing.expectEqual(@as(?usize, null), evdev.freeSlot(&(@as([evdev.fds.len]PollFd, @splat(open)))));
 }
 
 test "scancode table" {
