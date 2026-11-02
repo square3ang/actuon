@@ -572,6 +572,7 @@ fn build(d: *Decoder, maxsec: usize) !void {
     for (sections, 0..) |*s, i| {
         try tempoEvents(d, &tls, s, d.bars[i].items);
         (try tls.get(s.sectionnum)).bar = true;
+        state.dropEnded(s.sectionnum);
         for (d.bars[i].items) |line| try channelLine(d, &tls, s, line, cassign, &state);
     }
 
@@ -688,7 +689,28 @@ fn tempoEvents(d: *Decoder, tls: *Timelines, s: *Section, lines: []const []const
 
 const LaneState = struct {
     start: [types.max_lanes]?*Ln = @splat(null),
+    /// LNs that still reach the current measure, so each lookup stays short.
     lnlist: [types.max_lanes]std.ArrayList(*Ln) = @splat(.empty),
+
+    /// Far more than a lane can hold in one measure of a real chart.
+    const max_live = 1024;
+
+    fn addLn(st: *LaneState, a: std.mem.Allocator, key: usize, ln: *Ln) !void {
+        if (st.lnlist[key].items.len >= max_live) return error.TooBig;
+        try st.lnlist[key].append(a, ln);
+    }
+
+    /// Measures only move forward, so an LN that ended before this one can hold none of its notes.
+    fn dropEnded(st: *LaneState, section: f64) void {
+        for (&st.lnlist) |*list| {
+            var kept: usize = 0;
+            for (list.items) |ln| if (ln.pair.?.section >= section) {
+                list.items[kept] = ln;
+                kept += 1;
+            };
+            list.shrinkRetainingCapacity(kept);
+        }
+    }
 };
 
 fn setPair(a: *Ln, b: *Ln) void {
@@ -789,14 +811,14 @@ fn channelLine(d: *Decoder, tls: *Timelines, s: *const Section, line: []const u8
                                 end.* = .{ .wav = -2, .section = tl.section };
                                 tl.slot[k] = .{ .long = end };
                                 setPair(ln, end);
-                                try c.st.lnlist[k].append(c.a, ln);
+                                try c.st.addLn(c.a, k, ln);
                             },
                             .long => |note| if (note.pair == null) {
                                 const end = try c.a.create(Ln);
                                 end.* = .{ .wav = -2, .section = tl.section };
                                 tl.slot[k] = .{ .long = end };
                                 setPair(note, end);
-                                try c.st.lnlist[k].append(c.a, note);
+                                try c.st.addLn(c.a, k, note);
                                 c.st.start[k] = null;
                             },
                             else => {},
@@ -849,7 +871,7 @@ fn channelLine(d: *Decoder, tls: *Timelines, s: *const Section, line: []const u8
                         end.* = .{ .wav = if (start.wav != wav) wav else -2, .section = tl.section };
                         tl.slot[k] = .{ .long = end };
                         setPair(start, end);
-                        try c.st.lnlist[k].append(c.a, start);
+                        try c.st.addLn(c.a, k, start);
                         c.st.start[k] = null;
                     }
                 } else if (c.st.start[k] == null) {
@@ -1021,6 +1043,23 @@ test "nested random with fixed selection" {
     try std.testing.expectEqual(@as(u8, 2), b.notes[0].lane);
     try std.testing.expectError(error.BadRandom, parse(std.testing.allocator, src, .{ .selected_random = &.{99} }));
     try std.testing.expectError(error.BadRandom, parse(std.testing.allocator, src, .{ .selected_random = &.{0} }));
+}
+
+test "LNs that ended stop counting toward a lane's live limit, and one measure past it is refused" {
+    const gpa = std.testing.allocator;
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(gpa);
+    try src.appendSlice(gpa, "#BPM 120\n#WAV01 a.wav\n#00151:");
+    for (0..600) |_| try src.appendSlice(gpa, "0101");
+    try src.appendSlice(gpa, "\n#00251:");
+    for (0..600) |_| try src.appendSlice(gpa, "0101");
+    try src.appendSlice(gpa, "\n");
+    var c = try parse(gpa, src.items, .{});
+    defer c.deinit();
+    try std.testing.expectEqual(@as(u32, 1200), c.total_notes);
+    try src.appendSlice(gpa, "#00351:");
+    for (0..LaneState.max_live + 1) |_| try src.appendSlice(gpa, "0101");
+    try std.testing.expectError(error.TooBig, parse(gpa, src.items, .{}));
 }
 
 test "deep #IF nesting keeps a live inner branch dead under a dead outer one" {

@@ -238,6 +238,12 @@ fn isPrivateHost(written: []const u8) bool {
         (octets[0] == 172 and octets[1] >= 16 and octets[1] <= 31) or (octets[0] == 192 and octets[1] == 168);
 }
 
+/// Plain HTTP past the player's own network: a password or IR token sent there could be read on the way.
+pub fn sendsInClear(url: []const u8) bool {
+    if (!std.ascii.startsWithIgnoreCase(url, "http://")) return false;
+    return !isPrivateHost(urlHost(url) orelse return true);
+}
+
 /// The player chose the table's own host, so a table on the home network can still use it.
 fn refAllowed(table_url: []const u8, ref_url: []const u8) bool {
     const host = urlHost(ref_url) orelse return false;
@@ -304,6 +310,15 @@ test "a table cannot point at the player's own network" {
     try std.testing.expect(refAllowed(table, "http://172.32.0.1/x"));
     try std.testing.expect(refAllowed(table, "https://cafe.example/d.json"));
     try std.testing.expect(refAllowed("http://192.168.0.5/t.html", "http://192.168.0.5/d.json"));
+}
+
+test "plain HTTP is only for an IR on this machine or network" {
+    try std.testing.expect(sendsInClear("http://ir.example.com"));
+    try std.testing.expect(sendsInClear("HTTP://8.8.8.8:8730"));
+    try std.testing.expect(!sendsInClear("https://ir.example.com"));
+    try std.testing.expect(!sendsInClear("http://127.0.0.1:8730"));
+    try std.testing.expect(!sendsInClear("http://192.168.0.5:8730"));
+    try std.testing.expect(!sendsInClear("http://localhost:8730"));
 }
 
 test "meta tag and level order" {

@@ -224,7 +224,10 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
     // per lane, sorted y of every placed note, so LN blocking is a binary search
     var taken: [types.max_lanes]std.ArrayList(i64) = @splat(.empty);
     const take = struct {
+        /// Notes out of order shift the list on every insert; real charts hold a few thousand a lane.
+        const max_notes = 1 << 15;
         fn f(alloc: std.mem.Allocator, list: *std.ArrayList(i64), y: i64) !void {
+            if (list.items.len >= max_notes) return error.TooBig;
             try list.insert(alloc, std.sort.partitionPoint(i64, list.items, y, below), y);
         }
         fn below(y: i64, v: i64) bool {
@@ -456,6 +459,18 @@ test "numbers past what timing can hold are refused or skipped" {
     defer c.deinit();
     try std.testing.expectEqual(@as(u32, 1), c.total_notes);
     try std.testing.expectEqual(@as(f64, 120), c.max_bpm);
+}
+
+test "a lane with more notes than a chart could play is refused" {
+    const gpa = std.testing.allocator;
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(gpa);
+    try src.appendSlice(gpa, "{\"info\":{\"init_bpm\":120,\"resolution\":240},\"sound_channels\":[{\"name\":\"a\",\"notes\":[");
+    // Descending y: the order that would shift the whole list on every note.
+    var y: usize = (1 << 15) + 1;
+    while (y > 0) : (y -= 1) try src.print(gpa, "{{\"x\":1,\"y\":{d}}},", .{y * 10});
+    try src.appendSlice(gpa, "{\"x\":1,\"y\":0}]}]}");
+    try std.testing.expectError(error.TooBig, parse(gpa, src.items));
 }
 
 test "keysound offsets past i64 saturate instead of overflowing" {

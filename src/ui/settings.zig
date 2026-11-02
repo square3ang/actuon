@@ -16,6 +16,7 @@ const select = @import("select.zig");
 const db_mod = @import("../db/db.zig");
 const input = @import("../input/input.zig");
 const ir = @import("../net/ir.zig");
+const table = @import("../table/table.zig");
 const update = @import("../net/update.zig");
 const testing = @import("testing.zig");
 const App = app_mod.App;
@@ -1346,7 +1347,10 @@ fn commit(a: *App, it: Item) void {
             a.saveConfig();
         },
         // A bare host is what people type, and a password must not go out over plain HTTP by accident.
-        .ir_url => a.cfg.ir_url = if (v.len == 0 or isWebUrl(v)) v else std.fmt.allocPrint(al, "https://{s}", .{v}) catch return,
+        .ir_url => {
+            if (table.sendsInClear(v)) return say(a, "An IR on the internet needs https://", .{});
+            a.cfg.ir_url = if (v.len == 0 or isWebUrl(v)) v else std.fmt.allocPrint(al, "https://{s}", .{v}) catch return;
+        },
         .ir_rename => {
             if (v.len == 0) return;
             a.set.account = ir.startAccount(a.gpa, a.cfg.ir_url, v, a.cfg.ir_token, .rename);

@@ -244,6 +244,7 @@ const rows = [_]Row{
     .{ "Import failed: {t}", "가져오기 실패: {t}", "取り込み失敗: {t}", "导入失败：{t}" },
     .{ "Imported {d} scores", "점수 {d}개를 가져왔어요", "スコアを {d} 件取り込みました", "已导入 {d} 个成绩" },
     .{ "Imported {d} scores, {d} charts not in library", "점수 {d}개를 가져왔어요. 라이브러리에 없는 채보 {d}개", "スコアを {d} 件取り込みました。ライブラリにない譜面 {d} 件", "已导入 {d} 个成绩，{d} 张谱面不在曲库中" },
+    .{ "An IR on the internet needs https://", "인터넷의 IR은 https://로 접속해야 해요", "インターネット上のIRには https:// が必要です", "互联网上的 IR 须使用 https://" },
     .{ "A table address starts with http:// or https://", "난이도표 주소는 http:// 또는 https://로 시작해야 해요", "難易度表のURLは http:// か https:// で始まります", "难度表地址须以 http:// 或 https:// 开头" },
     .{ "That table is already added", "이미 추가한 난이도표예요", "その難易度表は追加済みです", "该难度表已添加" },
     .{ "Type a number from {d} to {d}", "{d}~{d} 사이 숫자를 입력하세요", "{d} から {d} までの数字を入力してください", "请输入 {d} 到 {d} 的数字" },
