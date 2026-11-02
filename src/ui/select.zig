@@ -1575,7 +1575,8 @@ fn loadReplay(a: *App, sha256: []const u8, slot: u8) !core.replay.Replay {
 fn nextReplay(a: *App) void {
     const s = &a.sel;
     const song = selectedSong(s) orelse return;
-    s.replay_slot = @intCast((@min(s.replay_slot, max_replays - 1) + 1) % @max(replaysOf(a, song.sha256), 1));
+    // @min with a constant narrows to u2, where slot 3 + 1 overflows.
+    s.replay_slot = (@as(u8, @min(s.replay_slot, max_replays - 1)) + 1) % @max(replaysOf(a, song.sha256), 1);
     a.sfx(.adjust);
 }
 
@@ -2466,10 +2467,11 @@ test "the 3 and 4 keys step the LN mode and the replay slot" {
         key(a, c.SDL_SCANCODE_3);
         try std.testing.expectEqual(want, a.cfg.ln_mode);
     }
-    try a.db.exec("INSERT INTO replay(sha256,date,data) VALUES('sha1',1,x'00'),('sha1',2,x'00')");
+    // Four replays: stepping past the last slot wraps instead of overflowing.
+    try a.db.exec("INSERT INTO replay(sha256,date,data) VALUES('sha1',1,x'00'),('sha1',2,x'00'),('sha1',3,x'00'),('sha1',4,x'00')");
     _ = pad(a, a.cfg.p1[0], true, false);
     _ = pad(a, a.cfg.p1[0], true, false);
-    for ([_]u8{ 1, 0 }) |want| {
+    for ([_]u8{ 1, 2, 3, 0 }) |want| {
         key(a, c.SDL_SCANCODE_4);
         try std.testing.expectEqual(want, a.sel.replay_slot);
     }
