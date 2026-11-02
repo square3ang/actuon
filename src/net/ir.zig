@@ -14,6 +14,8 @@ pub const Upload = struct {
     sha: []u8,
     chart_path: []u8,
     replay: []u8,
+    /// A versus room this play counts for, or empty.
+    room: []u8,
     board: *Board,
 };
 
@@ -179,7 +181,7 @@ fn bearer(a: std.mem.Allocator, token: []const u8) ![]const std.http.Header {
 
 /// Submit, and when the server has never seen this chart (428) upload it and submit again.
 /// `prev_rank` gets the player's place from before this score, when the caller wants it.
-pub fn submit(gpa: std.mem.Allocator, client: *std.http.Client, base: []const u8, token: []const u8, sha: []const u8, chart_path: []const u8, replay: []const u8, prev_rank: ?*i64) !u16 {
+pub fn submit(gpa: std.mem.Allocator, client: *std.http.Client, base: []const u8, token: []const u8, sha: []const u8, chart_path: []const u8, replay: []const u8, room: []const u8, prev_rank: ?*i64) !u16 {
     // Without the file nothing says how the chart should be parsed.
     if (chart_path.len == 0) return error.NoChart;
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -187,7 +189,7 @@ pub fn submit(gpa: std.mem.Allocator, client: *std.http.Client, base: []const u8
     const a = arena.allocator();
     const hs = try bearer(a, token);
     const format = chartFormat(chart_path);
-    const url = try std.fmt.allocPrint(a, "{s}/scores/{s}?format={d}", .{ base, sha, format });
+    const url = try std.fmt.allocPrint(a, "{s}/scores/{s}?format={d}{s}{s}", .{ base, sha, format, if (room.len > 0) "&room=" else "", room });
     var r = try http.send(client, a, .POST, url, replay, hs);
     if (r.status == 428) {
         const chart = try fs.readAlloc(a, chart_path, 16 << 20);
@@ -210,7 +212,7 @@ fn uploadThread(ud: ?*anyopaque) callconv(.c) c_int {
     const a = arena.allocator();
     var client = http.client(u.gpa);
     defer client.deinit();
-    const code = submit(u.gpa, &client, u.base, u.token, u.sha, u.chart_path, u.replay, &u.board.prev_rank) catch |e| blk: {
+    const code = submit(u.gpa, &client, u.base, u.token, u.sha, u.chart_path, u.replay, u.room, &u.board.prev_rank) catch |e| blk: {
         std.log.warn("IR upload: {t}", .{e});
         break :blk 0;
     };
@@ -224,6 +226,7 @@ fn uploadThread(ud: ?*anyopaque) callconv(.c) c_int {
     gpa.free(u.sha);
     gpa.free(u.chart_path);
     gpa.free(u.replay);
+    gpa.free(u.room);
     gpa.destroy(u);
     _ = detached_threads.fetchSub(1, .acq_rel);
     return 0;
@@ -292,7 +295,7 @@ pub fn startRanking(gpa: std.mem.Allocator, base: []const u8, token: []const u8,
 }
 
 /// The caller owns one reference to the answer and gives it back with release.
-pub fn startUpload(gpa: std.mem.Allocator, base: []const u8, token: []const u8, sha: []const u8, chart_path: []const u8, replay: []const u8) ?*Board {
+pub fn startUpload(gpa: std.mem.Allocator, base: []const u8, token: []const u8, sha: []const u8, chart_path: []const u8, replay: []const u8, room: []const u8) ?*Board {
     const board = gpa.create(Board) catch return null;
     board.* = .{ .gpa = gpa };
     const u = gpa.create(Upload) catch return null;
@@ -303,6 +306,7 @@ pub fn startUpload(gpa: std.mem.Allocator, base: []const u8, token: []const u8, 
         .sha = gpa.dupe(u8, sha) catch return null,
         .chart_path = gpa.dupe(u8, chart_path) catch return null,
         .replay = gpa.dupe(u8, replay) catch return null,
+        .room = gpa.dupe(u8, room) catch return null,
         .board = board,
     };
     if (!runDetached(uploadThread, "ir-upload", u)) {
@@ -542,7 +546,7 @@ const Push = struct {
 fn submitPatiently(s: *Sync, client: *std.http.Client, p: Pending, replay: []const u8) u16 {
     var tries: u32 = 1;
     while (true) : (tries += 1) {
-        const code = submit(s.gpa, client, s.base, s.token, p.sha, p.path, replay, null) catch |e| switch (e) {
+        const code = submit(s.gpa, client, s.base, s.token, p.sha, p.path, replay, "", null) catch |e| switch (e) {
             error.NoChart => return 0,
             else => @as(u16, 0),
         };

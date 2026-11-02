@@ -73,6 +73,7 @@ Packaging scripts for each OS are in [`packaging/`](packaging). To release, set 
 | <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> | Key mode filter, sort, LN mode for charts that leave it open (CN and HCN plays have their own scores and replays, and stay off the IR) |
 | <kbd>4</kbd> <kbd>R</kbd> | Replay slot, play that replay |
 | <kbd>F</kbd> <kbd>9</kbd> <kbd>P</kbd> | Favorite the chart, change the score target, practice a section of the chart |
+| <kbd>V</kbd> | Versus room: create one for the chart, or join by code. Needs an IR account |
 | <kbd>F12</kbd> | Screenshot, on any screen, into `screenshots/` in the data folder |
 | <kbd>T</kbd> | Timing graph over a skin's result screen |
 | <kbd>6</kbd> <kbd>7</kbd> <kbd>8</kbd> <kbd>0</kbd> | Key settings, the chart's IR page in the browser, the chart's folder, search |

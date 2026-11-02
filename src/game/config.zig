@@ -62,6 +62,8 @@ pub const Config = struct {
     ln_mode: u8 = 0,
     /// What a play is measured against, an index into play.pace_targets.
     pace_target: u8 = 0,
+    /// The versus score board sits on the left instead of the right.
+    versus_panel_left: bool = false,
     /// 0 start BPM, 1 max BPM, 2 main BPM (mode of the chart), 3 off (classic HS).
     hs_fix: u8 = 2,
     /// Green number: milliseconds a note is visible at the reference BPM.

@@ -176,7 +176,7 @@ pub fn capture(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, nat
         return;
     };
     // A play left early would rank on the server as if it had reached the end. The server ranks LN plays only.
-    if (natural and s.params.ln_mode == .ln and a.cfg.ir_url.len > 0 and a.cfg.ir_token.len > 0) r.board = ir.startUpload(a.gpa, a.cfg.ir_url, a.cfg.ir_token, &s.chart.sha256, s.params.path, bytes);
+    if (natural and s.params.ln_mode == .ln and a.cfg.ir_url.len > 0 and a.cfg.ir_token.len > 0) r.board = ir.startUpload(a.gpa, a.cfg.ir_url, a.cfg.ir_token, &s.chart.sha256, s.params.path, bytes, if (a.versus.in_round) &a.versus.view.code else "");
     r.ir_used = r.board != null;
 }
 

@@ -9,6 +9,7 @@ const app_mod = @import("app.zig");
 const result = @import("result.zig");
 const play = @import("play.zig");
 const practice = @import("practice.zig");
+const versus = @import("versus.zig");
 const course_mod = @import("course.zig");
 const table = @import("../table/table.zig");
 const ir = @import("../net/ir.zig");
@@ -1825,7 +1826,7 @@ fn padPlay(a: *App, at: ?usize, down: bool, repeat: bool) void {
 /// Start and Select are tracked on every screen: their release may come after a screen has gone.
 /// shortcut: reads only the 1P 7 key layout, add the others if a controller needs them here.
 pub fn pad(a: *App, code: u16, down: bool, repeat: bool) bool {
-    if (!a.cfg.beatoraja_select) return false;
+    if (!a.cfg.beatoraja_select or a.practice.open or a.versus.open) return false;
     const s = &a.sel;
     const was = panelOf(s);
     const is_start = code == a.cfg.start_select[0];
@@ -1924,6 +1925,7 @@ fn tickPadScroll(a: *App, now_ms: u64) void {
 pub fn key(a: *App, sc: u32) void {
     const s = &a.sel;
     if (a.practice.open) return practice.key(a, sc);
+    if (a.versus.open) return versus.key(a, sc);
     if (s.query != null) return keyQuery(a, sc);
     if (s.searching and keySearching(a, sc)) return;
     keySound(a, sc);
@@ -1971,6 +1973,7 @@ pub fn key(a: *App, sc: u32) void {
         c.SDL_SCANCODE_4 => nextReplay(a),
         c.SDL_SCANCODE_F => if (selectedSong(s)) |song| toggleFavorite(a, song),
         c.SDL_SCANCODE_P => if (selectedSong(s)) |song| practice.open(a, song),
+        c.SDL_SCANCODE_V => versus.openScreen(a),
         c.SDL_SCANCODE_9 => {
             a.cfg.pace_target = (@min(a.cfg.pace_target, play.pace_targets.len - 1) + 1) % @as(u8, play.pace_targets.len);
             s.status = play.paceTargetName(a.cfg.pace_target);

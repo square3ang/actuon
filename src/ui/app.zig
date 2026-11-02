@@ -16,6 +16,7 @@ const preview_mod = @import("../audio/preview.zig");
 const db_mod = @import("../db/db.zig");
 const play = @import("play.zig");
 const practice = @import("practice.zig");
+const versus = @import("versus.zig");
 const select = @import("select.zig");
 const result = @import("result.zig");
 const settings = @import("settings.zig");
@@ -104,6 +105,7 @@ pub const App = struct {
     joy_axis_at: [32]u64 = @splat(0),
     /// Headless capture for tests: save a frame after N ms, then quit.
     practice: practice.State = .{},
+    versus: versus.State = .{},
     shot_wanted: bool = false,
     /// A short message over any screen.
     notice: []const u8 = "",
@@ -556,6 +558,8 @@ pub const App = struct {
             const least: i64 = std.math.clamp(sk.loadend_ms, 0, 5000);
             if (a.load_skin_at != 0 and a.load_params.start_us == 0 and elapsed < least) return;
         }
+        // shortcut: a player who loads after the clock starts late and plays behind, send seek time if that is common.
+        if (a.versus.in_round and c.SDL_GetTicks() < a.versus.view.start_tick) return;
         c.SDL_WaitThread(a.load_thread, null);
         a.load_thread = null;
         const s = a.load_result orelse {
@@ -1025,20 +1029,32 @@ pub const App = struct {
             a.pollEditor();
             settings.pollUpdate(a);
             a.g.beginFrame();
+            versus.tick(a);
             const scene_now = a.scene;
             switch (scene_now) {
                 .select => {
                     if (a.last_scene != .select) a.select_shown_at = c.SDL_GetTicks();
                     select.draw(a);
                     practice.draw(a);
+                    versus.draw(a);
                     if (a.select_skin == null) {
                         const alpha = fadeInAlpha(c.SDL_GetTicks() - a.select_shown_at);
                         if (alpha > 0) a.g.rect(0, 0, a.g.w, a.g.h, .{ .r = 0, .g = 0, .b = 0, .a = alpha });
                     }
                 },
-                .loading => a.tickLoading(),
-                .play => a.tickPlay(),
-                .result => result.draw(a),
+                .loading => {
+                    a.tickLoading();
+                    versus.drawCountdown(a);
+                },
+                .play => {
+                    versus.fillTarget(a);
+                    a.tickPlay();
+                    versus.drawPlayBoard(a);
+                },
+                .result => {
+                    result.draw(a);
+                    versus.drawResult(a);
+                },
                 .settings => {
                     a.g.backdrop();
                     settings.draw(a);

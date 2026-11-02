@@ -20,3 +20,11 @@ Not implemented, so skins using them look incomplete:
 
 - LR2 fonts packed in encrypted `.dxa` archives (unpacked `.lr2font` works, as in beatoraja).
 - Pop-up and rarely used beatoraja Lua API: stubs return defaults.
+
+## Versus
+
+In a room, the leading opponent fills the skin's target slots (numbers 121, 151, 153; text 1; float 115), so existing
+skins show them with no change. With three or more players the game draws its own score board over the skin.
+A skin can show every player itself with private ids, one per player in room order: numbers 90200+ (EX) and
+90210+ (notes judged), text 90220+ (name), option 90230+ (seat taken). The game's board stays off for a skin
+that uses the EX numbers.

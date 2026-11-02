@@ -1,5 +1,6 @@
 //! Skin values for the play and result scenes, and the skinned play renderer.
 const std = @import("std");
+const room = @import("../net/room.zig");
 const c = @import("c");
 const core = @import("actuon_core");
 const gfx = @import("../ui/gfx.zig");
@@ -101,10 +102,13 @@ pub const State = struct {
     /// The lamp held before this play, on the result screen.
     best_clear: u8 = 0,
     best_ex: u32 = 0,
+    /// What the play is measured against: a pace target, or the live score of a versus opponent.
     target_ex: u32 = 0,
     target_label: []const u8 = "MAX",
     /// The opponent's EX is already where they stand now, so it is not scaled to the song's progress.
     target_live: bool = false,
+    /// The room of a versus round, for skins that show every player.
+    versus: ?*const room.View = null,
     last_judge_at: i64 = -1,
     last_seen_judge_at: i64 = std.math.minInt(i64),
     flash_seen: [core.types.max_lanes]i64 = @splat(-10_000_000),
@@ -284,6 +288,8 @@ pub const State = struct {
         const sn = &st.snap;
         const sc = &sn.score;
         const rate = st.scoreRate();
+        if (st.versusPlayer(id, m.versus_present)) |_| return true;
+        if (id >= m.versus_present and id < m.versus_present + room.max_players) return false;
         if (st.select) |se| switch (id) {
             1 => return se.kind == .folder or se.kind == .table or se.kind == .command,
             2 => return se.kind == .song or se.kind == .missing,
@@ -398,8 +404,16 @@ pub const State = struct {
         return @as(f32, @floatFromInt(st.snap.score.exScore())) / @as(f32, @floatFromInt(st.total_notes * 2));
     }
 
+    fn versusPlayer(st: *const State, id: i32, base: i32) ?*const room.Player {
+        const v = st.versus orelse return null;
+        if (id < base or id >= base + v.count) return null;
+        return &v.players[@intCast(id - base)];
+    }
+
     fn num(ud: *anyopaque, id: i32) ?i64 {
         const st = fromUd(ud);
+        if (st.versusPlayer(id, m.versus_ex)) |p| return p.final_ex orelse p.ex;
+        if (st.versusPlayer(id, m.versus_judged)) |p| return p.judged;
         const sn = &st.snap;
         const sc = &sn.score;
         const n: i64 = st.total_notes;
@@ -532,6 +546,7 @@ pub const State = struct {
 
     fn str(ud: *anyopaque, id: i32) []const u8 {
         const st = fromUd(ud);
+        if (st.versusPlayer(id, m.versus_name)) |p| return p.name();
         if (st.select) |se| switch (id) {
             30 => return se.search,
             1000 => return se.directory,

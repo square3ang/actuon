@@ -92,6 +92,37 @@ scroll the list through the first 1000 places.
 
 Replays played in CN or HCN mode on a chart that leaves its LN type open are refused: they change the note count, so they cannot rank on the chart's board.
 
+## Versus rooms
+
+Players on one server race the same chart with the same seed. Rooms live in memory, so a restart ends them.
+
+| Request | Does |
+| --- | --- |
+| `POST /rooms` `{sha256,title}` | Creates a room, returns `code` |
+| `POST /rooms/CODE/join`, `/leave` | Enters or leaves. A player is in one room at a time |
+| `POST /rooms/CODE/chart` `{sha256,title}` | Host only: changes the chart |
+| `POST /rooms/CODE/start` | Host only: starts a round after 8 seconds |
+| `POST /rooms/CODE/report` `{round,has_chart,ex,judged,gauge,done}` | Sends this player's live numbers, returns the room |
+
+The responses to `POST /rooms` and `/join` also hold `key` and `udp`. With `IR_UDP_PUBLIC=host:port` set, the server listens
+on `IR_UDP_BIND` (default `0.0.0.0:8740`) and clients send their live numbers there ten times a second, in little-endian:
+
+| Packet | Layout |
+| --- | --- |
+| Request, 47 bytes | `AU1Q`, code (6), key (16), seq, round, ex, judged, gauge (f32), flags (u8: 1 has chart, 2 done) |
+| Reply | `AU1R`, seq, round, ms until start (`0xFFFFFFFF` for none), count (u8), then per player: id, ex, judged, gauge (f32), done (u8) |
+
+A packet without a player's key gets no reply, so a forged source address cannot aim replies at someone else. With no UDP
+reply for 2 seconds, as on a network that blocks it, the client reports over HTTP four times a second instead. Without
+`IR_UDP_PUBLIC`, every client does. HTTP still carries names, the chart, the seed and final scores.
+
+UDP cannot pass through Cloudflare's proxy, and the address in `IR_UDP_PUBLIC` is given to every player in a room. Pointing
+it at the origin reveals an address the proxy otherwise hides, so use a separate host or address if that matters. Open the
+port too: `firewall-cmd --permanent --add-port=8740/udp && firewall-cmd --reload`.
+
+Reported numbers are only shown while the round runs. A round is decided by `final_ex`, which is set when the
+player's replay passes the usual check: `POST /scores/SHA?format=N&room=CODE`.
+
 ## Web page
 
 `web/` renders recent verified scores and each chart's ranking as plain HTML from this API, with no script in the browser. `GET /recent?limit=` (1 to 100, default 50) is the public feed behind it.

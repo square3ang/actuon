@@ -308,6 +308,11 @@ pub const combo_on: i32 = 90110;
 pub const acc_whole: i32 = 90111;
 pub const acc_frac: i32 = 90112;
 pub const key_held: i32 = 90120;
+/// Private ids, one per versus player in room order: EX (the checked score once there is one), notes judged, name, seat taken.
+pub const versus_ex: i32 = 90200;
+pub const versus_judged: i32 = 90210;
+pub const versus_name: i32 = 90220;
+pub const versus_present: i32 = 90230;
 
 const center_x = [_]f32{ 0.5, 0, 0.5, 1, 0, 0.5, 1, 0, 0.5, 1 };
 const center_y = [_]f32{ 0.5, 1, 1, 1, 0.5, 0.5, 0.5, 0, 0, 0 };

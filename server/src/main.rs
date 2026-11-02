@@ -1,6 +1,7 @@
 //! actuon internet ranking server. Clients never report scores: they upload a replay and the chart
 //! it needs, and the score is what re-simulating that replay with the shared Zig core produces.
 mod core;
+mod rooms;
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
@@ -67,6 +68,9 @@ struct Ctx {
     /// The players with a check running, so one player cannot hold every slot.
     checks: Mutex<HashSet<i64>>,
     hashes: AtomicUsize,
+    rooms: Mutex<rooms::Rooms>,
+    /// Where clients send live scores, when that port is open.
+    udp_public: Option<String>,
 }
 
 /// Holds the slot of naming old charts: no account has this id.
@@ -550,6 +554,9 @@ fn submit(req: &mut Request, db: &Connection, ctx: &Ctx, sha: &str) -> ApiResult
     if !v.ok {
         return Err(ApiError::new(422, "replay could not be verified"));
     }
+    if let Some(code) = query_of(req.url()).get("room") {
+        lock_rooms(ctx).record_final(code, user, sha, v.ex_score as u32);
+    }
     let (prev_rank, _, _) = standing(db, sha, Some(user))?;
     db.execute(
         "INSERT INTO score(user,sha256,clear,ex,max_combo,miss,notes,gauge_type,date) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
@@ -561,6 +568,106 @@ fn submit(req: &mut Request, db: &Connection, ctx: &Ctx, sha: &str) -> ApiResult
     Ok(
         json!({"clear": v.clear, "ex": v.ex_score, "max_combo": v.max_combo, "miss": v.miss, "notes": v.total_notes, "prev_rank": prev_rank}),
     )
+}
+
+fn lock_rooms(ctx: &Ctx) -> std::sync::MutexGuard<'_, rooms::Rooms> {
+    ctx.rooms.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn room_error(e: rooms::RoomError) -> ApiError {
+    match e {
+        rooms::RoomError::NotFound => ApiError::new(404, "no such room"),
+        rooms::RoomError::Full => ApiError::new(409, "room is full"),
+        rooms::RoomError::NotHost => ApiError::new(403, "only the host can do that"),
+        rooms::RoomError::TooMany => ApiError::new(503, "too many rooms"),
+    }
+}
+
+/// What a player needs for live scores. Sent only over the authenticated API.
+fn live_fields(ctx: &Ctx, code: &str, user: i64) -> Value {
+    let key = lock_rooms(ctx).live_key(code, user);
+    let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+    json!({"code": code, "key": hex, "udp": ctx.udp_public})
+}
+
+fn user_name(db: &Connection, user: i64) -> Result<String, ApiError> {
+    Ok(db.query_row("SELECT name FROM user WHERE id=?1", [user], |r| r.get(0))?)
+}
+
+#[derive(Deserialize)]
+struct RoomChart {
+    sha256: String,
+    title: String,
+}
+
+#[derive(Deserialize)]
+struct RoomReport {
+    round: u32,
+    has_chart: bool,
+    ex: u32,
+    judged: u32,
+    gauge: f32,
+    done: bool,
+}
+
+fn read_room_chart(req: &mut Request) -> Result<RoomChart, ApiError> {
+    let c: RoomChart = serde_json::from_slice(&read_body(req, MAX_JSON)?)
+        .map_err(|_| ApiError::new(400, "bad json"))?;
+    if !valid_sha(&c.sha256) || c.title.chars().count() > 256 {
+        return Err(ApiError::new(400, "bad chart"));
+    }
+    Ok(c)
+}
+
+fn create_room(req: &mut Request, db: &Connection, ctx: &Ctx) -> ApiResult {
+    let user = auth(req, db)?;
+    let chart = read_room_chart(req)?;
+    let name = user_name(db, user)?;
+    let mut raw = [0u8; 6];
+    getrandom::getrandom(&mut raw).map_err(|_| ApiError::new(500, "internal error"))?;
+    let code = rooms::code_from(&raw);
+    lock_rooms(ctx)
+        .create(code.clone(), user, &name, &chart.sha256, &chart.title, Instant::now())
+        .map_err(room_error)?;
+    Ok(live_fields(ctx, &code, user))
+}
+
+fn route_room(req: &mut Request, db: &Connection, ctx: &Ctx, code: &str, action: &str) -> ApiResult {
+    if !rooms::valid_code(code) {
+        return Err(ApiError::new(404, "no such room"));
+    }
+    let user = auth(req, db)?;
+    let now = Instant::now();
+    match action {
+        "join" => {
+            let name = user_name(db, user)?;
+            lock_rooms(ctx).join(code, user, &name, now).map_err(room_error)?;
+            return Ok(live_fields(ctx, code, user));
+        }
+        "leave" => lock_rooms(ctx).leave(user),
+        "chart" => {
+            let chart = read_room_chart(req)?;
+            lock_rooms(ctx)
+                .set_chart(code, user, &chart.sha256, &chart.title)
+                .map_err(room_error)?;
+        }
+        "start" => {
+            let mut raw = [0u8; 8];
+            getrandom::getrandom(&mut raw).map_err(|_| ApiError::new(500, "internal error"))?;
+            // The client carries it as a decimal string: JSON numbers lose the top bits.
+            lock_rooms(ctx)
+                .start(code, user, u64::from_le_bytes(raw), now)
+                .map_err(room_error)?;
+        }
+        "report" => {
+            let r: RoomReport = serde_json::from_slice(&read_body(req, MAX_JSON)?)
+                .map_err(|_| ApiError::new(400, "bad json"))?;
+            let report = rooms::Report { round: r.round, has_chart: r.has_chart, ex: r.ex, judged: r.judged, gauge: r.gauge, done: r.done };
+            return lock_rooms(ctx).report(code, user, &report, now).map_err(room_error);
+        }
+        _ => return Err(ApiError::new(404, "not found")),
+    }
+    Ok(json!({"ok": true}))
 }
 
 /// The player's place on a chart (0 when they have no score there), the row count, and the clear counts.
@@ -818,6 +925,8 @@ fn route(req: &mut Request, db: &Connection, ctx: &Ctx) -> ApiResult {
         (Method::Put, ["rivals", name]) => add_rival(req, db, &percent_decode(name)?),
         (Method::Delete, ["rivals", name]) => remove_rival(req, db, &percent_decode(name)?),
         (Method::Post, ["table-ranking"]) => table_ranking(req, db),
+        (Method::Post, ["rooms"]) => create_room(req, db, ctx),
+        (Method::Post, ["rooms", code, action]) => route_room(req, db, ctx, code, action),
         _ => Err(ApiError::new(404, "not found")),
     }
 }
@@ -938,6 +1047,39 @@ fn initialize(db: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+fn serve_live(socket: std::net::UdpSocket, ctx: Arc<Ctx>) {
+    // Larger than any valid packet, so a longer one arrives cut and still fails the exact length check.
+    let mut buf = [0u8; 64];
+    loop {
+        let (n, from) = match socket.recv_from(&mut buf) {
+            Ok(got) => got,
+            Err(e) => {
+                eprintln!("live scores: {e}");
+                continue;
+            }
+        };
+        let reply = lock_rooms(&ctx).live(&buf[..n], Instant::now());
+        if let Some(reply) = reply {
+            if let Err(e) = socket.send_to(&reply, from) {
+                eprintln!("live scores: {e}");
+            }
+        }
+    }
+}
+
+/// Live scores stay off without a public address, and clients then report over HTTP.
+fn bind_live() -> Option<(std::net::UdpSocket, String)> {
+    let public = std::env::var("IR_UDP_PUBLIC").ok().filter(|p| !p.is_empty())?;
+    let bind = std::env::var("IR_UDP_BIND").unwrap_or_else(|_| "0.0.0.0:8740".to_string());
+    match std::net::UdpSocket::bind(&bind) {
+        Ok(socket) => Some((socket, public)),
+        Err(e) => {
+            eprintln!("live scores off, cannot bind {bind}: {e}");
+            None
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--verify") {
@@ -959,12 +1101,21 @@ fn main() {
     let db_path = data.join("ir.db");
     initialize(&open_db(&db_path).expect("open database")).expect("initialize database");
     let server = Arc::new(Server::http(&addr).expect("bind address"));
+    let mut secret = [0u8; 32];
+    getrandom::getrandom(&mut secret).expect("random bytes");
+    let live = bind_live();
     let ctx = Arc::new(Ctx {
         data,
         attempts: Mutex::new(HashMap::new()),
         checks: Mutex::new(HashSet::new()),
         hashes: AtomicUsize::new(0),
+        rooms: Mutex::new(rooms::Rooms::with_secret(secret)),
+        udp_public: live.as_ref().map(|l| l.1.clone()),
     });
+    if let Some((socket, _)) = live {
+        let live_ctx = ctx.clone();
+        std::thread::spawn(move || serve_live(socket, live_ctx));
+    }
     eprintln!("actuon IR on http://{addr}");
     let threads: Vec<_> = (0..8)
         .map(|_| {
@@ -1057,6 +1208,8 @@ mod tests {
             attempts: Mutex::new(HashMap::new()),
             checks: Mutex::new(HashSet::new()),
             hashes: AtomicUsize::new(0),
+        rooms: Mutex::default(),
+        udp_public: None,
         }
     }
 

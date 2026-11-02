@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """End-to-end IR test: server re-simulation decides the score. Usage: ir_e2e.py SERVER_BIN MKREPLAY CHART WORKDIR"""
-import hashlib, json, os, sqlite3, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+import hashlib, json, os, socket, sqlite3, struct, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 
 server, mkreplay, chart, work = sys.argv[1:5]
 base = "http://127.0.0.1:18731"
@@ -24,7 +24,8 @@ sha, notes = out.stderr.split()[0], int(out.stderr.split()[1])
 replay = open(replay_path, "rb").read()
 
 def start_server():
-    started = subprocess.Popen([server, "127.0.0.1:18731", os.path.join(work, "ir")], stderr=subprocess.DEVNULL)
+    env = {**os.environ, "IR_UDP_PUBLIC": "127.0.0.1:18732", "IR_UDP_BIND": "127.0.0.1:18732"}
+    started = subprocess.Popen([server, "127.0.0.1:18731", os.path.join(work, "ir")], stderr=subprocess.DEVNULL, env=env)
     for _ in range(100):
         try:
             if call("GET", "/health")[0] == 200:
@@ -165,6 +166,41 @@ try:
     pms_sha, pms_chart, pms_replay = bms("real.pms", ["11", "22"])
     assert call("PUT", f"/charts/{pms_sha}?format=2", pms_chart, bob)[0] == 200
     assert call("POST", f"/scores/{pms_sha}?format=2", pms_replay, bob)[0] == 200, "a real PMS chart still ranks"
+
+    host = call("POST", "/register", {"name": "roomhost", "password": "correct horse"})[1]["token"]
+    guest = call("POST", "/register", {"name": "roomguest", "password": "correct horse"})[1]["token"]
+    assert call("POST", "/rooms", {"sha256": "../x", "title": "t"}, host)[0] == 400, "a room's chart hash is checked"
+    room = call("POST", "/rooms", {"sha256": sha, "title": "t"}, host)[1]["code"]
+    assert call("POST", "/rooms/ZZZZZZ/join", None, guest)[0] == 404
+    assert call("POST", "/rooms/a%2Fb/join", None, guest)[0] == 404, "a bad code is refused"
+    assert call("POST", f"/rooms/{room}/join", None)[0] == 401, "a room needs a player"
+    joined = call("POST", f"/rooms/{room}/join", None, guest)
+    assert joined[0] == 200 and joined[1]["udp"] == "127.0.0.1:18732"
+    assert call("POST", f"/rooms/{room}/start", None, guest)[0] == 403, "only the host starts"
+    assert call("POST", f"/rooms/{room}/start", None, host)[0] == 200
+    claim = {"round": 1, "has_chart": True, "ex": 999999, "judged": 1, "gauge": 100, "done": True}
+    seen = call("POST", f"/rooms/{room}/report", claim, guest)[1]
+    assert 0 < seen["starts_in_ms"] and seen["seed"] == call("POST", f"/rooms/{room}/report", claim, host)[1]["seed"]
+    assert all(p["final_ex"] is None for p in seen["players"]), "a reported score decides nothing"
+    live = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    live.settimeout(1)
+    live.connect(("127.0.0.1", 18732))
+    def live_packet(key):
+        return b"AU1Q" + room.encode() + key + struct.pack("<IIIIfB", 1, 1, 1234, 5, 50.0, 1)
+    live.send(live_packet(b"\0" * 16))
+    try:
+        live.recv(512)
+        assert False, "a live packet without a key gets no reply"
+    except TimeoutError:
+        pass
+    live.send(live_packet(bytes.fromhex(joined[1]["key"])))
+    answer = live.recv(512)
+    assert answer[:4] == b"AU1R" and answer[16] == 2 and 0 < struct.unpack("<I", answer[12:16])[0] <= 8000, answer
+    seen = call("POST", f"/rooms/{room}/report", claim, host)[1]
+    assert [p["ex"] for p in seen["players"] if p["name"] == "roomguest"] == [1234], "a live score reaches the room"
+    assert call("POST", f"/scores/{sha}?format=1&room={room}", replay, guest)[0] == 200
+    seen = call("POST", f"/rooms/{room}/report", claim, host)[1]
+    assert [p["final_ex"] for p in seen["players"] if p["name"] == "roomguest"] == [notes * 2], "the checked replay decides"
 
     hoarder = call("POST", "/register", {"name": "hoarder", "password": "correct horse"})[1]["token"]
     def claims(start):
