@@ -2091,7 +2091,7 @@ pub fn key(a: *App, sc: u32) void {
         },
         c.SDL_SCANCODE_2 => key(a, c.SDL_SCANCODE_F4),
         c.SDL_SCANCODE_3 => {
-            a.cfg.ln_mode = (@min(a.cfg.ln_mode, 2) + 1) % 3;
+            a.cfg.ln_mode = (@as(u8, @min(a.cfg.ln_mode, 2)) + 1) % 3;
             db_mod.setLnMode(a.db, a.cfg.ln_mode) catch |e| std.log.err("LN mode not applied to scores: {t}", .{e});
             s.replay_slot = 0;
             reload(a);
@@ -2101,7 +2101,7 @@ pub fn key(a: *App, sc: u32) void {
         c.SDL_SCANCODE_P => if (selectedSong(s)) |song| practice.open(a, song),
         c.SDL_SCANCODE_V => versus.openScreen(a),
         c.SDL_SCANCODE_9 => {
-            a.cfg.pace_target = (@min(a.cfg.pace_target, play.pace_targets.len - 1) + 1) % @as(u8, play.pace_targets.len);
+            a.cfg.pace_target = (@as(u8, @min(a.cfg.pace_target, play.pace_targets.len - 1)) + 1) % @as(u8, play.pace_targets.len);
             s.status = play.paceTargetName(a.cfg.pace_target);
         },
         c.SDL_SCANCODE_6 => settings.openControls(a),

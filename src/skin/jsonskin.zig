@@ -706,6 +706,23 @@ test "hostile numbers in a JSON skin are bounded" {
     try std.testing.expectEqual(@as(i32, m.max_parts), skin.objects[skin.objects.len - 1].parts);
 }
 
+test "a destination's mouseRect is read, and one without has none" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const root = try std.json.parseFromSliceLeaky(J, arena.allocator(),
+        \\{"value":[{"id":"n"}],
+        \\ "destination":[
+        \\  {"id":"n","dst":[{"x":1}],"mouseRect":{"x":2,"y":3,"w":40,"h":5}},
+        \\  {"id":"n","dst":[{"x":1}]}
+        \\]}
+    , .{});
+    var skin: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
+    defer skin.arena.deinit();
+    _ = try fromJson(&skin, root, root, ".", &noneEnabled, .{});
+    try std.testing.expectEqual(@as(?[4]f32, .{ 2, 3, 40, 5 }), skin.objects[skin.objects.len - 2].mouse_rect);
+    try std.testing.expectEqual(@as(?[4]f32, null), skin.objects[skin.objects.len - 1].mouse_rect);
+}
+
 test "wildcards resolve to the default, or the closest name" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
