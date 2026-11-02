@@ -127,7 +127,7 @@ const rows = [_]Row{
     .{ "The loop behind song select and settings: the skin's own music if it has any.", "곡 선택과 설정 화면에 깔리는 음악이에요. 스킨에 음악이 있으면 그걸 틀어요.", "選曲と設定で流れる音楽。スキンに音楽があればそれを使います。", "选曲和设置界面的背景音乐。皮肤自带音乐时优先使用。" },
     .{ "Cursor, confirm and result sounds.", "커서, 결정, 결과 화면 소리예요.", "カーソル、決定、リザルトの効果音。", "光标、确认和结算音效。" },
     .{ "Takes effect after a restart.", "다시 시작하면 적용돼요.", "再起動後に反映されます。", "重启后生效。" },
-    .{ "Smaller is lower latency, too small crackles. Applies at once.", "작을수록 지연이 줄지만 너무 작으면 소리가 튀어요. 바로 적용돼요.", "小さいほど低遅延ですが、小さすぎると音割れします。すぐに反映されます。", "越小延迟越低，过小会爆音。立即生效。" },
+    .{ "Smaller is lower latency, too small crackles. A pick from the list applies at once, Left/Right when you leave settings.", "작을수록 지연이 줄지만 너무 작으면 소리가 튀어요. 목록에서 고르면 바로, 좌우 키로 바꾸면 설정을 나갈 때 적용돼요.", "小さいほど低遅延ですが、小さすぎると音割れします。一覧から選ぶとすぐに、左右キーでは設定を出ると反映されます。", "越小延迟越低，过小会爆音。从列表选择立即生效，左右键调整在离开设置时生效。" },
     .{ "Falls back to Default if it will not open. Applies at once.", "안 열리면 기본값을 써요. 바로 적용돼요.", "開けないときは既定を使います。すぐに反映されます。", "无法打开时使用默认值。立即生效。" },
     .{ "The room did not take that", "방이 그 요청을 받지 않았어요", "ルームがその操作を受け付けませんでした", "房间未接受该操作" },
     .{ "Applies at once.", "바로 적용돼요.", "すぐに反映されます。", "立即生效。" },

@@ -1348,10 +1348,13 @@ fn setLibraryRoot(a: *App, root: []const u8) void {
 fn setFolder(a: *App, f: []const u8) void {
     const s = &a.sel;
     // A folder opened from a chart: going back must land in the library folder that holds it.
-    const root = s.library_root;
-    if (root.len > 0 and !std.mem.eql(u8, f, root) and !db_mod.isUnder(f, root)) {
-        setLibraryRoot(a, for (a.cfg.roots) |r| {
-            if (std.mem.eql(u8, f, r) or db_mod.isUnder(f, r)) break r;
+    if (s.library_root.len > 0 and !db_mod.holds(s.library_root, f)) {
+        // Only the roots that have a row: a root inside another has none to go back to.
+        var tmp = std.heap.ArenaAllocator.init(a.gpa);
+        defer tmp.deinit();
+        const roots = db_mod.outerRoots(tmp.allocator(), a.cfg.roots) catch &.{};
+        setLibraryRoot(a, for (roots) |r| {
+            if (db_mod.holds(r, f)) break r;
         } else "");
     }
     const n = @min(f.len, s.folder_buf.len);
@@ -2125,6 +2128,23 @@ test "each library folder is its own row and lists only what it holds" {
     key(a, c.SDL_SCANCODE_RETURN);
     try expectRows(a, &.{"Delta  (1)"});
     key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expectEqual(@as(usize, 1), a.sel.cursor);
+}
+
+test "a chart's folder opened from another library folder goes back to its own" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.cfg.roots = &.{ "/b/inner", "/a", "/b" };
+    reload(a);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expectEqualStrings("/a", a.sel.library_root);
+    a.sel.search = try a.gpa.dupe(u8, "Delta");
+    reload(a);
+    key(a, c.SDL_SCANCODE_8);
+    try std.testing.expectEqualStrings("/b", a.sel.library_root);
+    // The first Esc ends the search, the next two climb to the root.
+    for (0..3) |_| key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expectEqual(.root, a.sel.view);
     try std.testing.expectEqual(@as(usize, 1), a.sel.cursor);
 }
 

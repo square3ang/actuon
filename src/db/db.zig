@@ -395,6 +395,11 @@ pub fn outerRoots(a: std.mem.Allocator, roots: []const []const u8) ![]const []co
     return out.toOwnedSlice(a);
 }
 
+/// `path` is `dir` itself or inside it.
+pub fn holds(dir: []const u8, path: []const u8) bool {
+    return std.mem.eql(u8, dir, path) or isUnder(path, dir);
+}
+
 /// A whole folder name must match: /mnt/bms does not hold /mnt/bms2/a.bms.
 pub fn isUnder(path: []const u8, dir: []const u8) bool {
     if (dir.len == 0 or path.len <= dir.len or !std.mem.startsWith(u8, path, dir)) return false;

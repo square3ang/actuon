@@ -180,7 +180,7 @@ const Item = enum {
             .bgm_volume => tr("The loop behind song select and settings: the skin's own music if it has any."),
             .sfx_volume => tr("Cursor, confirm and result sounds."),
             .audio_rate => tr("Takes effect after a restart."),
-            .audio_frames => tr("Smaller is lower latency, too small crackles. Applies at once."),
+            .audio_frames => tr("Smaller is lower latency, too small crackles. A pick from the list applies at once, Left/Right when you leave settings."),
             .audio_device => tr("Falls back to Default if it will not open. Applies at once."),
             .resolution => tr("Applies at once. Fullscreen always fills the screen."),
             .fullscreen => tr("Applies at once."),
@@ -604,6 +604,7 @@ fn openDrop(a: *App, it: Item) void {
             }
             labels.append(al, tr("Remove all folders")) catch return;
             values.append(al, "") catch return;
+            // Matches no value, so the list never opens on "Remove all folders", whose value is "".
             now = "\x00";
         },
         .bgm_set, .sound_set => {
@@ -646,7 +647,10 @@ fn chooseDrop(a: *App, i: usize) void {
             say(a, "{s}", .{if (v.len > 0) v else tr("Default")});
         },
         .skin => a.cfg.skin = v,
-        .remove_root => a.cfg.roots = withoutRoot(a.arena.allocator(), a.cfg.roots, v) catch return,
+        .remove_root => {
+            a.cfg.roots = withoutRoot(a.arena.allocator(), a.cfg.roots, v) catch return;
+            select.reload(a);
+        },
         .bgm_set, .sound_set => {
             if (it == .bgm_set) a.cfg.bgm_path = v else a.cfg.sound_path = v;
             a.refreshBgm();
@@ -942,7 +946,6 @@ fn adjust(a: *App, it: Item, dir: i32) void {
         .audio_frames => {
             const v = @as(i64, cfg.audio_frames) + 32 * @as(i64, dir);
             cfg.audio_frames = @intCast(std.math.clamp(v, 32, 4096));
-            a.engine.reopen(cfg.audio_frames, cfg.audio_device);
         },
         .audio_device => cycleDevice(a, dir),
         .volume => {
@@ -1261,10 +1264,12 @@ fn commit(a: *App, it: Item) void {
             if (v.len == 0) return;
             const dir = trimSep(v);
             for (a.cfg.roots) |r| {
-                if (std.mem.eql(u8, dir, r) or db_mod.isUnder(dir, r)) return say(a, "Already in the library under {s}", .{r});
+                if (db_mod.holds(r, dir)) return say(a, "Already in the library under {s}", .{r});
             }
             a.cfg.roots = withRoot(al, a.cfg.roots, dir) catch return;
             a.saveConfig();
+            // The scan reloads only when charts change, and the folder rows come from the list.
+            select.reload(a);
             select.startScan(a);
         },
         .import_beatoraja => {
@@ -1369,6 +1374,8 @@ fn keyTabs(a: *App, it: Item, sc: u32) void {
         c.SDL_SCANCODE_ESCAPE => {
             a.sfxOr(a.sfx_option_close, .back);
             a.saveConfig();
+            // Left/Right steps the buffer without reopening the driver on every press.
+            a.engine.reopen(a.cfg.audio_frames, a.cfg.audio_device);
             a.scene = .select;
         },
         else => {},
@@ -1742,6 +1749,8 @@ test "a folder comes out of the library alone, or all of them" {
     chooseDrop(a, 0);
     try std.testing.expectEqual(@as(usize, 1), a.cfg.roots.len);
     try std.testing.expectEqualStrings("/other", a.cfg.roots[0]);
+    // Song select shows the change without waiting for a scan.
+    try std.testing.expectEqualStrings("other", a.sel.rows[0].label);
     chooseDrop(a, 2);
     try std.testing.expectEqual(@as(usize, 0), a.cfg.roots.len);
 }
