@@ -16,7 +16,7 @@ pub const Options = struct {
     seed: u64 = 0,
 };
 
-pub const Error = error{ NoBpm, OutOfMemory };
+pub const Error = error{ NoBpm, BadRandom, TooBig, OutOfMemory };
 
 const P1_KEY = 37;
 const P2_KEY = 73;
@@ -68,6 +68,9 @@ const Tl = struct {
 const Timelines = struct {
     gpa: std.mem.Allocator,
     items: std.ArrayList(*Tl) = .empty,
+    /// A Tl is ~350 B, so a hostile chart of distinct positions would need gigabytes.
+    /// Real charts stay far below: 999 bars at 192 steps is ~192k.
+    max: usize = 1 << 19,
 
     fn lowerBound(self: *const Timelines, section: f64) usize {
         var lo: usize = 0;
@@ -82,6 +85,7 @@ const Timelines = struct {
     fn get(self: *Timelines, section: f64) !*Tl {
         const idx = self.lowerBound(section);
         if (idx < self.items.items.len and self.items.items[idx].section == section) return self.items.items[idx];
+        if (self.items.items.len >= self.max) return error.TooBig;
         const lower = self.items.items[idx - 1];
         const stop_part: f64 = @floatFromInt(lower.stop);
         const time = lower.time + stop_part + (240000.0 * 1000.0 * (section - lower.section)) / lower.bpm;
@@ -248,7 +252,13 @@ fn pickBranch(a: std.mem.Allocator, line: []const u8, is_set: bool, opts: Option
     const r = parseI(line[off..]) orelse return null;
     const v: i32 = blk: {
         if (is_set) break :blk r;
-        if (opts.selected_random) |sel| if (values.items.len < sel.len) break :blk sel[values.items.len];
+        if (opts.selected_random) |sel| if (values.items.len < sel.len) {
+            // A replay is untrusted: a value no roll gives would skip every #IF and drop their notes.
+            // Rng.below gives 1 for a range of 0 or less, so such a roll is 2.
+            const s = sel[values.items.len];
+            if (s < 1 or s > (if (r >= 1) r else 2)) return error.BadRandom;
+            break :blk s;
+        };
         break :blk rng.below(r) + 1;
     };
     try values.append(a, v);
@@ -284,7 +294,18 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8, opts: Options) Error!Char
 
     var rng: Rng = .{ .s = opts.seed };
     var random_values: std.ArrayList(i32) = .empty;
-    const Frame = struct { value: i32, matched: bool, active: bool };
+    // `outer` caches whether every frame below is active, so the live check is O(1) at any depth.
+    const Frame = struct {
+        value: i32,
+        matched: bool,
+        active: bool,
+        outer: bool,
+        fn live(stack: []const @This()) bool {
+            if (stack.len == 0) return true;
+            const top = stack[stack.len - 1];
+            return top.outer and top.active;
+        }
+    };
     var rnd_stack: std.ArrayList(i32) = .empty;
     var if_stack: std.ArrayList(Frame) = .empty;
     var sw_stack: std.ArrayList(Frame) = .empty;
@@ -338,16 +359,16 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8, opts: Options) Error!Char
             if (cur) |value| {
                 const cond = if (line.len > 4) parseI(line[3..]) else null;
                 const hit = cond != null and cond.? == value;
-                try if_stack.append(a, .{ .value = value, .matched = hit, .active = hit });
+                try if_stack.append(a, .{ .value = value, .matched = hit, .active = hit, .outer = Frame.live(if_stack.items) });
             } else {
-                try if_stack.append(a, .{ .value = 0, .matched = false, .active = false });
+                try if_stack.append(a, .{ .value = 0, .matched = false, .active = false, .outer = Frame.live(if_stack.items) });
             }
             continue;
         }
         if (reserve(line, "SWITCH") or reserve(line, "SETSWITCH")) {
             const is_set = reserve(line, "SETSWITCH");
             const v = (try pickBranch(a, line, is_set, opts, &rng, &random_values)) orelse continue;
-            try sw_stack.append(a, .{ .value = v, .matched = false, .active = false });
+            try sw_stack.append(a, .{ .value = v, .matched = false, .active = false, .outer = Frame.live(sw_stack.items) });
             chart.has_random = true;
             continue;
         }
@@ -381,10 +402,7 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8, opts: Options) Error!Char
         }
 
         // A line is live only when every enclosing conditional is live.
-        var live = true;
-        for (if_stack.items) |f| live = live and f.active;
-        for (sw_stack.items) |f| live = live and f.active;
-        if (!live) continue;
+        if (!Frame.live(if_stack.items) or !Frame.live(sw_stack.items)) continue;
 
         const c = line[1];
         if (c >= '0' and c <= '9' and line.len > 6) {
@@ -598,22 +616,13 @@ fn collectTable(d: *Decoder, out: *std.ArrayList(Pending), line: []const u8, tab
     const Ctx = struct { d: *Decoder, out: *std.ArrayList(Pending), table: *const std.AutoHashMapUnmanaged(i32, f64) };
     try each(d, line, Ctx{ .d = d, .out = out, .table = table }, struct {
         fn f(c: Ctx, pos: f64, v: i32) !void {
-            if (c.table.get(v)) |x| try putPending(c.d, c.out, pos, x);
+            if (c.table.get(v)) |x| try c.out.append(c.d.a, .{ .pos = pos, .value = x });
         }
     }.f);
 }
 
-/// TreeMap semantics: one value per position, later definitions win.
-fn putPending(d: *Decoder, out: *std.ArrayList(Pending), pos: f64, value: f64) !void {
-    for (out.items) |*p| {
-        if (p.pos == pos) {
-            p.value = value;
-            return;
-        }
-    }
-    try out.append(d.a, .{ .pos = pos, .value = value });
-}
-
+/// TreeMap semantics, later definitions win: the sort is stable, so tempoEvents applies
+/// equal positions in file order and the last one overwrites the rest.
 fn sortPending(items: []Pending) void {
     std.mem.sort(Pending, items, {}, struct {
         fn lt(_: void, x: Pending, y: Pending) bool {
@@ -635,7 +644,7 @@ fn tempoEvents(d: *Decoder, tls: *Timelines, s: *Section, lines: []const []const
                     fn f(c: Ctx, pos: f64, v0: i32) !void {
                         const v = if (c.d.base == 62) rebase36(v0) else v0;
                         const hex = @divTrunc(v, 36) * 16 + @rem(v, 36);
-                        try putPending(c.d, c.out, pos, @floatFromInt(hex));
+                        try c.out.append(c.d.a, .{ .pos = pos, .value = @floatFromInt(hex) });
                     }
                 }.f);
             },
@@ -1010,6 +1019,42 @@ test "nested random with fixed selection" {
     defer b.deinit();
     try std.testing.expectEqual(@as(u32, 1), b.total_notes);
     try std.testing.expectEqual(@as(u8, 2), b.notes[0].lane);
+    try std.testing.expectError(error.BadRandom, parse(std.testing.allocator, src, .{ .selected_random = &.{99} }));
+    try std.testing.expectError(error.BadRandom, parse(std.testing.allocator, src, .{ .selected_random = &.{0} }));
+}
+
+test "deep #IF nesting keeps a live inner branch dead under a dead outer one" {
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(std.testing.allocator);
+    const gpa = std.testing.allocator;
+    try src.appendSlice(gpa, "#BPM 120\n#WAV01 a.wav\n#SETRANDOM 1\n");
+    for (0..200) |_| try src.appendSlice(gpa, "#IF 1\n");
+    try src.appendSlice(gpa, "#IF 2\n#IF 1\n#00111:01\n#ENDIF\n#ELSE\n#00112:01\n#ENDIF\n");
+    for (0..200) |_| try src.appendSlice(gpa, "#ENDIF\n");
+    try src.appendSlice(gpa, "#00113:01\n");
+    var c = try parse(gpa, src.items, .{});
+    defer c.deinit();
+    try std.testing.expectEqual(@as(u32, 2), c.total_notes);
+    try std.testing.expectEqual(@as(u8, 1), c.notes[0].lane);
+}
+
+test "the later of two BPM changes at one position wins" {
+    var c = try parse(std.testing.allocator, "#BPM 60\n#WAV01 a.wav\n#00103:3C\n#00103:78\n#00211:01", .{});
+    defer c.deinit();
+    // measure 0 at 60 BPM is 4s, measure 1 at 0x78 = 120 BPM is 2s
+    try std.testing.expectEqual(@as(i64, 6_000_000), c.notes[0].time_us);
+}
+
+test "timeline count past the cap is an error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var base: Tl = .{ .section = 0, .time = 0, .micro = 0, .bpm = 120 };
+    var tls: Timelines = .{ .gpa = a, .max = 2 };
+    try tls.items.append(a, &base);
+    _ = try tls.get(0.5);
+    _ = try tls.get(0.5);
+    try std.testing.expectError(error.TooBig, tls.get(0.25));
 }
 
 test "lnobj and channel 5x LN" {

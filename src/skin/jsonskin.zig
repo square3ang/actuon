@@ -221,7 +221,9 @@ const Loader = struct {
     files: std.StringHashMapUnmanaged([]const u8) = .empty,
     includes: u32 = 0,
 
-    fn testOp(l: *Loader, v: J) bool {
+    /// std.json parses any nesting without recursion, so this bounds its own.
+    fn testOp(l: *Loader, v: J, depth: u32) bool {
+        if (depth > 32) return false;
         switch (v) {
             .integer, .float => {
                 const op = int(v, 0);
@@ -230,7 +232,7 @@ const Loader = struct {
                 return if (op < 0) !on else on;
             },
             .array => |list| {
-                for (list.items) |x| if (!l.testOp(x)) return false;
+                for (list.items) |x| if (!l.testOp(x, depth + 1)) return false;
                 return true;
             },
             else => return false,
@@ -248,7 +250,7 @@ const Loader = struct {
                         const o = item.object;
                         if (o.get("if")) |cond| {
                             if (o.get("value") != null or o.get("values") != null) {
-                                if (!l.testOp(cond)) continue;
+                                if (!l.testOp(cond, 0)) continue;
                                 if (o.get("value")) |x| try out.append(try l.expand(x, depth + 1));
                                 for (arr(o.get("values"))) |x| try out.append(try l.expand(x, depth + 1));
                                 continue;
@@ -704,6 +706,16 @@ test "hostile numbers in a JSON skin are bounded" {
     try std.testing.expectEqual(@as(i32, m.max_div), number.src.divx);
     try std.testing.expectEqual(@as(i32, 32), number.digits);
     try std.testing.expectEqual(@as(i32, m.max_parts), skin.objects[skin.objects.len - 1].parts);
+    // A condition nested past the stack: refused, not followed.
+    const opens = try a.alloc(u8, 100_000);
+    @memset(opens, '[');
+    const closes = try a.alloc(u8, opens.len);
+    @memset(closes, ']');
+    const text = try std.mem.concat(a, u8, &.{ "{\"destination\":[{\"if\":", opens, "1", closes, ",\"value\":{\"id\":\"n\"}}]}" });
+    const nested = try std.json.parseFromSliceLeaky(J, a, text, .{});
+    var skin2: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
+    defer skin2.arena.deinit();
+    _ = try fromJson(&skin2, nested, nested, ".", &noneEnabled, .{});
 }
 
 test "a destination's mouseRect is read, and one without has none" {

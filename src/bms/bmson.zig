@@ -206,9 +206,31 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
     var wavs: std.ArrayList([]const u8) = .empty;
     var bg: std.ArrayList(types.BgSound) = .empty;
     var hidden: std.ArrayList(types.Hidden) = .empty;
-    const Lnr = struct { start: i64, end: i64 };
+    const Lnr = struct {
+        start: i64,
+        end: i64,
+        // spans on a lane never overlap (a new LN is refused when it would), so only the last one starting before y can hold y
+        fn holds(list: []const @This(), y: i64) bool {
+            const i = std.sort.partitionPoint(@This(), list, y, startsBefore);
+            return i > 0 and y <= list[i - 1].end;
+        }
+        fn startsBefore(y: i64, sp: @This()) bool {
+            return sp.start < y;
+        }
+    };
+    // per lane, kept sorted by start so lookups are binary searches
     var spans: [types.max_lanes]std.ArrayList(Lnr) = @splat(.empty);
     var placed: std.ArrayList(Placed) = .empty;
+    // per lane, sorted y of every placed note, so LN blocking is a binary search
+    var taken: [types.max_lanes]std.ArrayList(i64) = @splat(.empty);
+    const take = struct {
+        fn f(alloc: std.mem.Allocator, list: *std.ArrayList(i64), y: i64) !void {
+            try list.insert(alloc, std.sort.partitionPoint(i64, list.items, y, below), y);
+        }
+        fn below(y: i64, v: i64) bool {
+            return v <= y;
+        }
+    };
     // first note at (lane, y) wins, as with TimeLine.setNote guards
     var occupied: std.AutoHashMapUnmanaged(u128, void) = .empty;
     const occKey = struct {
@@ -217,7 +239,8 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
         }
     }.f;
     // late-defined "up" sounds for LN ends
-    var ups: std.ArrayList(struct { lane: u8, y: i64, wav: i32, start: i64, dur: i64 }) = .empty;
+    // keyed by occKey; a later "up" at the same spot overwrites, as the old last-match scan did
+    var ups: std.AutoHashMapUnmanaged(u128, struct { wav: i32, start: i64, dur: i64 }) = .empty;
 
     var id: i32 = 0;
     for (root.sound_channels) |*sc| {
@@ -235,7 +258,8 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
             const tl = try tls.get(n.y);
             var dur: i64 = 0;
             if (next) |m| if (m.c) {
-                dur = (try tls.get(m.y)).micro - tl.micro;
+                // saturate: hostile y/bpm push micro near i64 limits, and offsets add up per note
+                dur = (try tls.get(m.y)).micro -| tl.micro;
             };
             const key = laneOf(n.x, assign, keys);
             if (key < 0) {
@@ -243,22 +267,16 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
             } else {
                 const lane: u8 = @intCast(key);
                 if (n.up) {
-                    try ups.append(a, .{ .lane = lane, .y = n.y, .wav = id, .start = start_time, .dur = dur });
+                    try ups.put(a, occKey(lane, n.y), .{ .wav = id, .start = start_time, .dur = dur });
                 } else {
-                    var inside = false;
-                    for (spans[lane].items) |sp| if (sp.start < n.y and n.y <= sp.end) {
-                        inside = true;
-                    };
-                    if (inside) {
+                    if (Lnr.holds(spans[lane].items, n.y)) {
                         try bg.append(a, .{ .time_us = tl.micro, .wav = id, .wav_start_us = start_time, .wav_dur_us = dur });
                     } else if (n.l > 0) {
                         const end = try tls.get(n.y + n.l);
                         if (!occupied.contains(occKey(lane, n.y))) {
-                            var blocked = false;
-                            for (placed.items) |p| if (p.lane == lane and p.y > n.y and p.y <= n.y + n.l) {
-                                blocked = true;
-                            };
-                            if (blocked) {
+                            const ys = taken[lane].items;
+                            const after = std.sort.partitionPoint(i64, ys, n.y, take.below);
+                            if (after < ys.len and ys[after] <= n.y + n.l) {
                                 try bg.append(a, .{ .time_us = tl.micro, .wav = id, .wav_start_us = start_time, .wav_dur_us = dur });
                             } else {
                                 const ty: types.LnType = switch (n.t) {
@@ -272,7 +290,9 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
                                 try occupied.put(a, occKey(lane, n.y + n.l), {});
                                 try placed.append(a, .{ .y = n.y, .lane = lane, .note = .{ .time_us = tl.micro, .y = 0, .wav = id, .lane = lane, .kind = .ln_start, .ln_type = ty, .ln_open = ln_open, .wav_start_us = start_time, .wav_dur_us = dur } });
                                 try placed.append(a, .{ .y = n.y + n.l, .lane = lane, .note = .{ .time_us = end.micro, .y = 0, .wav = -2, .lane = lane, .kind = .ln_end, .ln_type = ty, .ln_open = ln_open } });
-                                try spans[lane].append(a, .{ .start = n.y, .end = n.y + n.l });
+                                try take.f(a, &taken[lane], n.y);
+                                try take.f(a, &taken[lane], n.y + n.l);
+                                try spans[lane].insert(a, std.sort.partitionPoint(Lnr, spans[lane].items, n.y, Lnr.startsBefore), .{ .start = n.y, .end = n.y + n.l });
                                 chart.has_ln = true;
                             }
                         }
@@ -281,11 +301,12 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
                         try bg.append(a, .{ .time_us = tl.micro, .wav = id, .wav_start_us = start_time, .wav_dur_us = dur });
                     } else {
                         try occupied.put(a, occKey(lane, n.y), {});
+                        try take.f(a, &taken[lane], n.y);
                         try placed.append(a, .{ .y = n.y, .lane = lane, .note = .{ .time_us = tl.micro, .y = 0, .wav = id, .lane = lane, .kind = .normal, .wav_start_us = start_time, .wav_dur_us = dur } });
                     }
                 }
             }
-            start_time += dur;
+            start_time +|= dur;
         }
         id += 1;
     }
@@ -303,12 +324,8 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
             const key = laneOf(n.x, assign, keys);
             if (key < 0) continue;
             const lane: u8 = @intCast(key);
-            var inside = false;
-            for (spans[lane].items) |sp| if (sp.start < n.y and n.y <= sp.end) {
-                inside = true;
-            };
             const tl = try tls.get(n.y);
-            if (!inside and !occupied.contains(occKey(lane, n.y))) {
+            if (!Lnr.holds(spans[lane].items, n.y) and !occupied.contains(occKey(lane, n.y))) {
                 try occupied.put(a, occKey(lane, n.y), {});
                 try placed.append(a, .{ .y = n.y, .lane = lane, .note = .{ .time_us = tl.micro, .y = 0, .wav = id, .lane = lane, .kind = .mine, .damage = @floatCast(n.damage) } });
                 chart.has_mine = true;
@@ -379,11 +396,11 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
                     open[p.lane] = -1;
                 }
                 if (p.note.ln_type != .ln) total += 1;
-                for (ups.items) |u| if (u.lane == p.lane and u.y == p.y) {
+                if (ups.get(occKey(p.lane, p.y))) |u| {
                     notes[i].wav = u.wav;
                     notes[i].wav_start_us = u.start;
                     notes[i].wav_dur_us = u.dur;
-                };
+                }
             },
             .normal => total += 1,
             .mine => {},
@@ -439,6 +456,14 @@ test "numbers past what timing can hold are refused or skipped" {
     defer c.deinit();
     try std.testing.expectEqual(@as(u32, 1), c.total_notes);
     try std.testing.expectEqual(@as(f64, 120), c.max_bpm);
+}
+
+test "keysound offsets past i64 saturate instead of overflowing" {
+    var c = try parse(std.testing.allocator,
+        \\{"info":{"init_bpm":0.001,"resolution":240},"sound_channels":[{"name":"a","notes":[{"x":0,"y":0},{"x":0,"y":0,"c":true},{"x":0,"y":32000000000,"c":true}]}]}
+    );
+    defer c.deinit();
+    try std.testing.expectEqual(@as(usize, 3), c.bg.len);
 }
 
 test "bmson basic" {

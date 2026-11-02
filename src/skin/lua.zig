@@ -14,6 +14,8 @@ pub var ctx: ?*const m.Ctx = null;
 
 /// How many values one returned table may expand to: `t = {t, t}` doubles at every level.
 const max_json_nodes = 1 << 20;
+/// Copied strings spend the node budget too, so `{s, s, ...}` of one big string stops at 64 MiB.
+const json_bytes_per_node = 64;
 
 fn toJson(l: *c.lua_State, a: std.mem.Allocator, idx: c_int, depth: u32, nodes: *u32) anyerror!J {
     if (depth > 64) return .null;
@@ -28,6 +30,8 @@ fn toJson(l: *c.lua_State, a: std.mem.Allocator, idx: c_int, depth: u32, nodes: 
         c.LUA_TSTRING => {
             var n: usize = 0;
             const p = c.lua_tolstring(l, abs, &n);
+            nodes.* += @intCast(n / json_bytes_per_node); // fits: Lua memory is capped at 256 MiB
+            if (nodes.* > max_json_nodes) return error.BadSkin;
             return .{ .string = try a.dupe(u8, p[0..n]) };
         },
         c.LUA_TBOOLEAN => return .{ .bool = c.lua_toboolean(l, abs) != 0 },
@@ -244,6 +248,21 @@ const prelude =
     \\local skin_dir = string.gsub((...), "\\", "/")
     \\-- Locals, since a skin can replace anything in `string`.
     \\local sub, find, gsub, tostring, type, rawget = string.sub, string.find, string.gsub, tostring, type, rawget
+    \\-- The count hook does not fire inside C, so a backtracking pattern on a long string would hang the game.
+    \\-- Refused past a bound on its work: subject length to the power of quantifiers + 1, times pattern length.
+    \\-- shortcut: the bound is the worst case and can refuse a fast match, count steps in lstrlib if a skin needs one.
+    \\local function bounded(f, plain_at)
+    \\  return function(s, p, ...)
+    \\    if type(s) == "string" and type(p) == "string" and not (plain_at and select(plain_at, ...)) then
+    \\      local q = select(2, gsub(p, "[*+?%-]", ""))
+    \\      if (#s + 1) ^ (q + 1) * #p > 1e9 then error("pattern too slow for a string this long", 2) end
+    \\    end
+    \\    return f(s, p, ...)
+    \\  end
+    \\end
+    \\-- Strings index `string`, so this covers s:find too.
+    \\string.find, string.match = bounded(find, 2), bounded(string.match)
+    \\string.gmatch, string.gsub = bounded(string.gmatch), bounded(gsub)
     \\local module_path, raw_searchpath = package.path, package.searchpath
     \\package.searchpath = nil
     \\-- skin_config.get_path hands out paths under skin_dir; anything else is relative to it.
@@ -624,6 +643,30 @@ test "deep and self-repeating tables convert without a crash" {
     try std.testing.expectEqual(c.LUA_OK, c.luaL_loadstring(l, "local t = { 1 } for i = 1, 60 do t = { t, t } end return t"));
     try std.testing.expectEqual(c.LUA_OK, c.lua_pcallk(l, 0, 1, 0, 0, null));
     try std.testing.expectError(error.BadSkin, toJson(l, a, -1, 0, &nodes));
+    c.lua_settop(l, 0);
+
+    nodes = 0;
+    try std.testing.expectEqual(c.LUA_OK, c.luaL_loadstring(l, "local s = string.rep('x', 1 << 22) local t = {} for i = 1, 100 do t[i] = s end return t"));
+    try std.testing.expectEqual(c.LUA_OK, c.lua_pcallk(l, 0, 1, 0, 0, null));
+    try std.testing.expectError(error.BadSkin, toJson(l, a, -1, 0, &nodes));
+}
+
+test "a backtracking pattern on a long string is refused, not run" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const l = try newState(arena.allocator(), ".");
+    defer c.lua_close(l);
+    try expectRuns(l,
+        \\local long, slow = string.rep("a", 1e5), string.rep("a-", 12) .. "b"
+        \\assert(not pcall(string.find, long, slow))
+        \\assert(not pcall(function() return long:find(slow) end))
+        \\assert(not pcall(string.gsub, long, slow, ""))
+        \\assert(not pcall(string.match, long, slow))
+        \\assert(not pcall(string.gmatch, long, slow))
+        \\assert(long:find("b", 1, true) == nil)
+        \\assert(("bg_01.png"):match("^(.-)%.(%a+)$") == "bg_01")
+        \\assert(select(2, ("a,b,c"):gsub(",", ";")) == 2)
+    );
 }
 
 test "numbers from Lua do not trap" {

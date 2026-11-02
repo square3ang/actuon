@@ -129,7 +129,8 @@ fn run(j: *Job) !void {
     const downloads = try std.fs.path.join(a, &.{ j.root, "downloads" });
     try fs.mkdirs(downloads);
     const dest = try std.fs.path.join(a, &.{ downloads, j.id });
-    const archive = try std.fmt.allocPrint(a, "{s}.part", .{dest});
+    // Per job: an abandoned job's thread can wake later and remove its file while a retry downloads.
+    const archive = try std.fmt.allocPrint(a, "{s}.{x}.part", .{ dest, @intFromPtr(j) });
     defer fs.remove(archive);
     try http.download(j.gpa, j.url, archive, &j.progress);
     // Lookup services answer with JSON naming the archive. Anything too big to read here is the archive.
@@ -167,7 +168,10 @@ pub fn start(gpa: std.mem.Allocator, url: []const u8, root: []const u8, id: []co
     if (id.len == 0) return null;
     const j = gpa.create(Job) catch return null;
     j.* = .{ .gpa = gpa, .url = gpa.dupe(u8, url) catch return null, .root = gpa.dupe(u8, root) catch return null, .id = gpa.dupe(u8, id) catch return null };
-    j.thread = c.SDL_CreateThread(thread, "download", j);
+    j.thread = c.SDL_CreateThread(thread, "download", j) orelse {
+        j.destroy();
+        return null;
+    };
     return j;
 }
 

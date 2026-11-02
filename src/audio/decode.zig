@@ -10,6 +10,9 @@ pub const Sample = struct {
     }
 };
 
+/// Longer than any song a chart plays.
+const max_seconds = 30 * 60;
+
 const Raw = struct { samples: []f32, channels: u32, rate: u32, owner: enum { dr, gpa } };
 
 fn lower(path: []const u8, buf: []u8) []const u8 {
@@ -50,7 +53,8 @@ fn decodeRaw(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8) !Raw {
             var r: c_int = 0;
             var output: [*c]c_short = null;
             const n = c.stb_vorbis_decode_memory(bytes.ptr, @intCast(bytes.len), &ch, &r, &output);
-            if (n > 0 and ch > 0) {
+            // stb_vorbis hands an unsigned header rate back as an int, so a huge one reads negative.
+            if (n > 0 and ch > 0 and r > 0) {
                 defer c.free(output);
                 const total: usize = @intCast(@as(i64, n) * ch);
                 const out = try gpa.alloc(f32, total);
@@ -79,8 +83,12 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8, out_r
     };
     const ch = raw.channels;
     const in_frames = raw.samples.len / ch;
+    if (raw.rate == 0) return error.UndecodableAudio;
     const ratio = @as(f64, @floatFromInt(raw.rate)) / @as(f64, @floatFromInt(out_rate));
-    const out_frames: usize = @intFromFloat(@ceil(@as(f64, @floatFromInt(in_frames)) / ratio));
+    const out_len = @ceil(@as(f64, @floatFromInt(in_frames)) / ratio);
+    // A tiny header rate would make a small file resample into gigabytes.
+    if (out_len > @as(f64, @floatFromInt(max_seconds * out_rate))) return error.UndecodableAudio;
+    const out_frames: usize = @intFromFloat(out_len);
     const out = try gpa.alloc(f32, out_frames * 2);
     const at = struct {
         fn f(s: []const f32, chn: u32, i: i64, side: u32, n: usize) f32 {
@@ -109,10 +117,10 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8, out_r
 }
 
 test "wav decode through resampler keeps duration" {
-    // 100 frames, 8 kHz, mono, 16-bit PCM
-    var buf: [44 + 200]u8 = @splat(0);
+    // 2000 frames, 8 kHz, mono, 16-bit PCM
+    var buf: [44 + 4000]u8 = @splat(0);
     @memcpy(buf[0..4], "RIFF");
-    std.mem.writeInt(u32, buf[4..8], 36 + 200, .little);
+    std.mem.writeInt(u32, buf[4..8], 36 + 4000, .little);
     @memcpy(buf[8..16], "WAVEfmt ");
     std.mem.writeInt(u32, buf[16..20], 16, .little);
     std.mem.writeInt(u16, buf[20..22], 1, .little);
@@ -122,8 +130,12 @@ test "wav decode through resampler keeps duration" {
     std.mem.writeInt(u16, buf[32..34], 2, .little);
     std.mem.writeInt(u16, buf[34..36], 16, .little);
     @memcpy(buf[36..40], "data");
-    std.mem.writeInt(u32, buf[40..44], 200, .little);
+    std.mem.writeInt(u32, buf[40..44], 4000, .little);
     const s = try decode(std.testing.allocator, &buf, "x.wav", 48000);
     defer std.testing.allocator.free(s.data);
-    try std.testing.expectEqual(@as(usize, 600), s.frames());
+    try std.testing.expectEqual(@as(usize, 12000), s.frames());
+    // At 1 Hz the same 4 KB would last 33 minutes and resample into 96 million frames.
+    std.mem.writeInt(u32, buf[24..28], 1, .little);
+    std.mem.writeInt(u32, buf[28..32], 2, .little);
+    try std.testing.expectError(error.UndecodableAudio, decode(std.testing.allocator, &buf, "x.wav", 48000));
 }

@@ -169,7 +169,8 @@ pub fn store(gpa: std.mem.Allocator, d: Db, url: []const u8, head_bytes: []const
         ins.bindText(5, str(o.get("sha256")));
         ins.bindText(6, str(o.get("title")));
         ins.bindText(7, str(o.get("artist")));
-        ins.bindText(8, str(o.get("url")));
+        const zip = str(o.get("url"));
+        ins.bindText(8, if (refAllowed(url, zip)) zip else "");
         ins.bindText(9, str(o.get("url_diff")));
         _ = try ins.step();
         ins.reset();
@@ -317,16 +318,18 @@ test "meta tag and level order" {
         \\{"name":"T","symbol":"t","data_url":"d.json","course":[[{"name":"C1","md5":["a","b"],"constraint":["grade","no_good"]}]]}
     ;
     const data =
-        \\[{"md5":"m2","level":"10","title":"x"},{"md5":"m1","level":2,"title":"y"},{"md5":"m3","level":"?","title":"z"}]
+        \\[{"md5":"m2","level":"10","title":"x","url":"https://example.org/x.zip"},{"md5":"m1","level":2,"title":"y","url":"http://192.168.0.1/y.zip"},{"md5":"m3","level":"?","title":"z"}]
     ;
-    const r = try store(gpa, d, "u", head, data);
+    const r = try store(gpa, d, "https://example.com/t.html", head, data);
     try std.testing.expectEqual(@as(u32, 3), r.songs);
     try std.testing.expectEqual(@as(u32, 1), r.courses);
-    const st = try d.prepare("SELECT md5 FROM table_song ORDER BY ord");
+    const st = try d.prepare("SELECT md5, zip_url FROM table_song ORDER BY ord");
     defer st.deinit();
-    for ([_][]const u8{ "m1", "m2", "m3" }) |want| {
+    // A download link into the player's own network is dropped.
+    for ([_][2][]const u8{ .{ "m1", "" }, .{ "m2", "https://example.org/x.zip" }, .{ "m3", "" } }) |want| {
         try std.testing.expect(try st.step());
-        try std.testing.expectEqualStrings(want, st.text(0));
+        try std.testing.expectEqualStrings(want[0], st.text(0));
+        try std.testing.expectEqualStrings(want[1], st.text(1));
     }
     const lim = parseConstraints("grade,no_good,");
     try std.testing.expectEqual(@as(u8, 0), lim.random);

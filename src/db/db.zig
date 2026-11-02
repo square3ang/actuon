@@ -320,9 +320,13 @@ pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: 
     var batch: std.ArrayList(ScanJob) = .empty;
     var stack: std.ArrayList([]const u8) = .empty;
     var unread: std.ArrayList([]const u8) = .empty;
+    // Real paths of listed folders: links like `a -> .` would otherwise branch until ELOOP.
+    var visited: std.StringHashMapUnmanaged(void) = .empty;
     const outer = try outerRoots(arena.allocator(), roots);
     for (outer) |r| try stack.append(arena.allocator(), try arena.allocator().dupe(u8, r));
     while (stack.pop()) |dir| {
+        const real = fs.realPath(arena.allocator(), dir) catch dir;
+        if ((try visited.getOrPut(arena.allocator(), real)).found_existing) continue;
         var it = std.heap.ArenaAllocator.init(gpa);
         defer it.deinit();
         const a = it.allocator();
@@ -593,19 +597,21 @@ pub fn importBeatoraja(gpa: std.mem.Allocator, d: Db, path: []const u8) !ImportS
     var stats: ImportStats = .{};
     try d.exec("BEGIN");
     errdefer d.exec("ROLLBACK") catch {};
+    // The file is untrusted: clamp every count instead of trapping on -1 or overflow.
+    const lossy = std.math.lossyCast;
     while (try st.step()) {
-        const pg = st.int(2) + st.int(3);
-        const gr = st.int(4) + st.int(5);
+        const pg = st.int(2) +| st.int(3);
+        const gr = st.int(4) +| st.int(5);
         try recordScore(d, .{
             .sha256 = st.text(0),
             .mode = @intCast(st.int(19)),
             .clear = @intCast(std.math.clamp(st.int(1), 0, 10)),
-            .ex = @intCast(pg * 2 + gr),
-            .counts = .{ @intCast(pg), @intCast(gr), @intCast(st.int(6) + st.int(7)), @intCast(st.int(8) + st.int(9)), @intCast(st.int(10) + st.int(11)), @intCast(st.int(12) + st.int(13)) },
-            .max_combo = @intCast(st.int(14)),
-            .miss = @intCast(@max(st.int(15), 0)),
-            .played = @intCast(st.int(16)),
-            .cleared = @intCast(st.int(17)),
+            .ex = lossy(u32, @max(pg, 0) *| 2 +| @max(gr, 0)),
+            .counts = .{ lossy(u32, pg), lossy(u32, gr), lossy(u32, st.int(6) +| st.int(7)), lossy(u32, st.int(8) +| st.int(9)), lossy(u32, st.int(10) +| st.int(11)), lossy(u32, st.int(12) +| st.int(13)) },
+            .max_combo = lossy(u32, st.int(14)),
+            .miss = lossy(u32, st.int(15)),
+            .played = lossy(u32, st.int(16)),
+            .cleared = lossy(u32, st.int(17)),
             .date = st.int(18),
             .source = "beatoraja",
         });
@@ -651,17 +657,18 @@ pub fn importLr2(gpa: std.mem.Allocator, d: Db, path: []const u8) !ImportStats {
             continue;
         }
         const clear_i: usize = @intCast(std.math.clamp(col.f(st, "clear"), 0, clears.len - 1));
-        const pg = col.f(st, "perfect");
-        const gr = col.f(st, "great");
+        const pg = @max(col.f(st, "perfect"), 0);
+        const gr = @max(col.f(st, "great"), 0);
+        const lossy = std.math.lossyCast;
         try recordScore(d, .{
             .sha256 = look.text(0),
             .clear = clears[clear_i],
-            .ex = @intCast(pg * 2 + gr),
-            .counts = .{ @intCast(pg), @intCast(gr), @intCast(col.f(st, "good")), @intCast(col.f(st, "bad")), @intCast(col.f(st, "poor")), 0 },
-            .max_combo = @intCast(@max(col.f(st, "maxcombo"), 0)),
-            .miss = @intCast(@max(col.f(st, "minbp"), 0)),
-            .played = @intCast(col.f(st, "playcount")),
-            .cleared = @intCast(col.f(st, "clearcount")),
+            .ex = lossy(u32, pg *| 2 +| gr),
+            .counts = .{ lossy(u32, pg), lossy(u32, gr), lossy(u32, col.f(st, "good")), lossy(u32, col.f(st, "bad")), lossy(u32, col.f(st, "poor")), 0 },
+            .max_combo = lossy(u32, col.f(st, "maxcombo")),
+            .miss = lossy(u32, col.f(st, "minbp")),
+            .played = lossy(u32, col.f(st, "playcount")),
+            .cleared = lossy(u32, col.f(st, "clearcount")),
             .date = 0,
             .source = "LR2",
         });
@@ -757,6 +764,63 @@ test "a scan drops gone charts only in folders it could read" {
     defer st.deinit();
     try std.testing.expect(try st.step());
     try std.testing.expectEqual(@as(i64, 2), st.int(0));
+}
+
+test "a scan through links back to the root ends and stores each chart once" {
+    const gpa = std.testing.allocator;
+    fs.io = std.testing.io;
+    const root = "actuon_test_loop";
+    fs.removeTree(root);
+    defer fs.removeTree(root);
+    try fs.mkdirs(root);
+    const chart = try fs.readAlloc(gpa, "tests/charts/five_key.bms", 1 << 20);
+    defer gpa.free(chart);
+    try fs.write(root ++ "/song.bms", chart);
+    try std.Io.Dir.cwd().symLink(std.testing.io, ".", root ++ "/a", .{ .is_directory = true });
+    try std.Io.Dir.cwd().symLink(std.testing.io, ".", root ++ "/b", .{ .is_directory = true });
+    const d = try Db.open(":memory:", gpa, false);
+    defer d.close();
+    try initSchema(d);
+    try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, d, &.{root}, null)).parsed);
+    const st = try d.prepare("SELECT COUNT(*) FROM song");
+    defer st.deinit();
+    try std.testing.expect(try st.step());
+    try std.testing.expectEqual(@as(i64, 1), st.int(0));
+}
+
+test "imports clamp negative and huge counts instead of trapping" {
+    const gpa = std.testing.allocator;
+    fs.io = std.testing.io;
+    const d = try Db.open(":memory:", gpa, false);
+    defer d.close();
+    try d.exec(schema);
+    try d.exec("INSERT INTO song(path,folder,sha256,md5) VALUES('p','f','shaL','md5L')");
+    const files = [_][]const u8{ "actuon_test_clamp_bo.db", "actuon_test_clamp_lr2.db" };
+    const tables = [_][:0]const u8{
+        "CREATE TABLE score(sha256 TEXT,clear INT,epg INT,lpg INT,egr INT,lgr INT,egd INT,lgd INT,ebd INT,lbd INT,epr INT,lpr INT,ems INT,lms INT,combo INT,minbp INT,playcount INT,clearcount INT,date INT,mode INT);" ++
+            "INSERT INTO score VALUES('shaB',5,9223372036854775807,1,-5,0,0,0,0,0,0,0,0,0,-1,-1,-1,-1,0,0)",
+        "CREATE TABLE score(hash TEXT,clear INT,perfect INT,great INT,good INT,bad INT,poor INT,minbp INT,playcount INT,clearcount INT);" ++
+            "INSERT INTO score VALUES('md5L',4,-1,9999999999,0,0,0,-1,-1,-1)",
+    };
+    for (files, tables) |f, t| {
+        fs.remove(f);
+        const src = try Db.open(f, gpa, false);
+        try src.exec(t);
+        src.close();
+    }
+    defer for (files) |f| fs.remove(f);
+    _ = try importBeatoraja(gpa, d, files[0]);
+    _ = try importLr2(gpa, d, files[1]);
+    const max: i64 = std.math.maxInt(u32);
+    const want = [_]struct { []const u8, [4]i64 }{ .{ "shaB", .{ max, 0, max, 0 } }, .{ "shaL", .{ 0, max, max, 0 } } };
+    const q = try d.prepare("SELECT pg,gr,ex,playcount FROM score WHERE sha256=?1");
+    defer q.deinit();
+    for (want) |w| {
+        q.bindText(1, w[0]);
+        defer q.reset();
+        try std.testing.expect(try q.step());
+        for (w[1], 0..) |v, i| try std.testing.expectEqual(v, q.int(@intCast(i)));
+    }
 }
 
 test "importing the same scores twice does not double the play counts, local plays still add" {

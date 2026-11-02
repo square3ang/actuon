@@ -559,9 +559,6 @@ fn submit(req: &mut Request, db: &Connection, ctx: &Ctx, sha: &str) -> ApiResult
     if !v.ok {
         return Err(ApiError::new(422, "replay could not be verified"));
     }
-    if let Some(code) = query_of(req.url()).get("room") {
-        lock_rooms(ctx).record_final(code, user, sha, v.seed, v.ex_score as u32);
-    }
     let (prev_rank, _, _) = standing(db, sha, Some(user))?;
     db.execute(
         "INSERT INTO score(user,sha256,clear,ex,max_combo,miss,notes,gauge_type,date) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
@@ -570,6 +567,10 @@ fn submit(req: &mut Request, db: &Connection, ctx: &Ctx, sha: &str) -> ApiResult
            date=CASE WHEN excluded.ex>score.ex THEN excluded.date ELSE score.date END",
         params![user, sha, v.clear, v.ex_score, v.max_combo, v.miss, v.total_notes, v.gauge_type, now()],
     )?;
+    // After the save: the room must not show a final score the database does not hold.
+    if let Some(code) = query_of(req.url()).get("room") {
+        lock_rooms(ctx).record_final(code, user, sha, v.seed, v.ex_score as u32);
+    }
     Ok(
         json!({"clear": v.clear, "ex": v.ex_score, "max_combo": v.max_combo, "miss": v.miss, "notes": v.total_notes, "prev_rank": prev_rank}),
     )

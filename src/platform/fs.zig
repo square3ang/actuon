@@ -78,6 +78,11 @@ pub fn stat(path: []const u8) ?Stat {
     };
 }
 
+/// The path with every symlink resolved, so two names for one directory compare equal.
+pub fn realPath(a: std.mem.Allocator, path: []const u8) ![]u8 {
+    return Dir.cwd().realPathFileAlloc(io, path, a);
+}
+
 pub const Entry = struct { name: []const u8, is_dir: bool };
 
 /// Lists one directory; names live in `a`. Missing or unreadable directories list as empty.
