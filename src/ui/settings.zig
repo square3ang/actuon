@@ -47,6 +47,7 @@ const Section = enum {
 const Item = enum {
     add_root,
     clear_roots,
+    open_data,
     add_table,
     update_tables,
     table_list,
@@ -65,6 +66,7 @@ const Item = enum {
     bga_upscale,
     skin,
     skin_slots,
+    open_skins,
     language,
     green,
     lift,
@@ -94,10 +96,10 @@ const Item = enum {
 
     fn section(it: Item) Section {
         return switch (it) {
-            .add_root, .clear_roots => .library,
+            .add_root, .clear_roots, .open_data => .library,
             .add_table, .update_tables, .table_list => .tables,
             .volume, .bgm_volume, .bgm_set, .sfx_volume, .sound_set, .audio_rate, .audio_frames, .audio_device => .audio,
-            .resolution, .fullscreen, .vsync, .reflex, .bga_upscale, .skin, .skin_slots, .language => .display,
+            .resolution, .fullscreen, .vsync, .reflex, .bga_upscale, .skin, .skin_slots, .open_skins, .language => .display,
             .green, .lift, .hidden, .judge_offset, .visual_offset => .timing,
             .import_beatoraja, .import_lr2 => .scores,
             .ir_url, .ir_signup, .ir_signin, .ir_rename, .ir_upload, .ir_download, .download_url, .update => .online,
@@ -127,6 +129,8 @@ const Item = enum {
             .bga_upscale => tr("BGA movie upscaling (FSRCNNX)"),
             .skin => tr("Skin"),
             .skin_slots => tr("Skins per screen"),
+            .open_skins => tr("Open skin folder"),
+            .open_data => tr("Open data folder"),
             .language => tr("Language"),
             .green => tr("Green number"),
             .lift => tr("Lift"),
@@ -176,6 +180,8 @@ const Item = enum {
             .vsync => tr("Applies at once. Off lowers input latency and may tear."),
             .bga_upscale => tr("Cleaner, sharper movies when they are enlarged, for a little CPU and GPU time per movie frame. Applies to the next chart for deblocking."),
             .reflex => tr("NVIDIA GPUs only. Boost holds GPU clocks high and uses more power."),
+            .open_skins => tr("Put each skin in its own folder here, then pick it under Skin."),
+            .open_data => tr("Settings, scores, replays and skins live here."),
             .skin_slots => tr("Enter picks a skin and its settings for each screen and key mode. The rest use the skin above."),
             .language => tr("The game's language. Applies at once."),
             .skin => tr("Enter or click lists the skins folder, or picks a skin elsewhere. Left/Right steps through them."),
@@ -1329,6 +1335,12 @@ fn activate(a: *App, it: Item) void {
         .ir_download => startSync(a, false),
         .update => activateUpdate(a),
         .skin_slots => skinslots.open(a),
+        .open_skins, .open_data => {
+            var tmp = std.heap.ArenaAllocator.init(a.gpa);
+            defer tmp.deinit();
+            const dir = (if (it == .open_skins) skin_mod.skinsDir(tmp.allocator()) else fs.dataDir(tmp.allocator())) catch |e| return say(a, "Could not open the folder: {t}", .{e});
+            fs.openFolder(tmp.allocator(), dir) catch |e| say(a, "Could not open the folder: {t}", .{e});
+        },
         .bind_4k, .bind_5k, .bind_6k, .bind_7k, .bind_10k, .bind_14k, .bind_9k, .bind_start => {
             s.capture_group = it;
             s.capture_slot = 0;
@@ -1452,7 +1464,7 @@ test "up and down stay inside a tab" {
     defer testing.close(a);
     openItem(a, .add_root);
     key(a, c.SDL_SCANCODE_UP);
-    try std.testing.expectEqual(.clear_roots, items[a.set.cursor]);
+    try std.testing.expectEqual(.open_data, items[a.set.cursor]);
     key(a, c.SDL_SCANCODE_DOWN);
     try std.testing.expectEqual(.add_root, items[a.set.cursor]);
     key(a, c.SDL_SCANCODE_DOWN);

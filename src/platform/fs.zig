@@ -116,6 +116,37 @@ pub fn dataDir(gpa: std.mem.Allocator) ![]u8 {
     return gpa.dupe(u8, std.mem.span(p));
 }
 
+/// Shows a folder in the system file manager, making it first so a new player sees where things go.
+pub fn openFolder(gpa: std.mem.Allocator, path: []const u8) !void {
+    try mkdirs(path);
+    const url = try folderUrl(gpa, path, @import("builtin").os.tag == .windows);
+    defer gpa.free(url);
+    if (!c.SDL_OpenURL(url)) return error.OpenFailed;
+}
+
+/// Windows opens a plain path, which keeps non-ASCII user names intact. macOS needs a file URL,
+/// and the space in "Application Support" must be escaped there.
+fn folderUrl(gpa: std.mem.Allocator, path: []const u8, windows: bool) ![:0]u8 {
+    if (windows) return gpa.dupeSentinel(u8, path, 0);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try out.appendSlice(gpa, "file://");
+    for (path) |b| switch (b) {
+        'A'...'Z', 'a'...'z', '0'...'9', '-', '.', '_', '~', '/' => try out.append(gpa, b),
+        else => try out.print(gpa, "%{X:0>2}", .{b}),
+    };
+    return out.toOwnedSliceSentinel(gpa, 0);
+}
+
+test "a folder opens as an escaped file URL, and as a plain path on Windows" {
+    const url = try folderUrl(std.testing.allocator, "/Users/a b/Library/Application Support/\xec\x95\x84/", false);
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings("file:///Users/a%20b/Library/Application%20Support/%EC%95%84/", url);
+    const win = try folderUrl(std.testing.allocator, "C:\\Users\\\xec\x95\x84\\", true);
+    defer std.testing.allocator.free(win);
+    try std.testing.expectEqualStrings("C:\\Users\\\xec\x95\x84\\", win);
+}
+
 /// Finds a referenced asset beside the chart: exact, then case-insensitive, then other extensions
 /// (charts often say .wav where the package ships .ogg).
 pub fn resolveAsset(a: std.mem.Allocator, dir: []const u8, rel: []const u8, exts: []const []const u8) !?[]u8 {
