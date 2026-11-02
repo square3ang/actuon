@@ -789,7 +789,7 @@ pub const Gfx = struct {
     }
 
     /// Sends the frame's draws to the backbuffer.
-    fn record(g: *Gfx) void {
+    fn record(g: *Gfx, hold_present: bool) void {
         defer g.batch.reset();
         const ready = g.batch.cmds.items.len > 0;
         if (ready) {
@@ -834,6 +834,7 @@ pub const Gfx = struct {
                 c.sg_draw(@intCast(d.first), @intCast(d.count), 1);
             }
         }
+        if (hold_present) c.rb_hold_present();
         c.sg_end_pass();
         c.sg_commit();
     }
@@ -1121,7 +1122,7 @@ pub const Gfx = struct {
 
     pub fn present(g: *Gfx) void {
         defer g.reapTextures();
-        g.record();
+        g.record(false);
         c.rb_present();
     }
 
@@ -1129,10 +1130,10 @@ pub const Gfx = struct {
     // shortcut: BMP needs no new library, encode PNG in a thread if the files or the hitch bother players.
     pub fn saveShot(g: *Gfx, path: [*:0]const u8) bool {
         defer g.reapTextures();
-        g.record();
+        g.record(true);
         var w: c_int = 0;
         var h: c_int = 0;
-        _ = c.SDL_GetWindowSizeInPixels(g.win, &w, &h);
+        c.rb_frame_size(&w, &h);
         const px = g.gpa.alloc(u8, @intCast(@max(w, 1) * @max(h, 1) * 4)) catch {
             c.rb_present();
             return false;

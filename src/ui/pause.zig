@@ -39,13 +39,17 @@ fn startClosing(a: *App) void {
     a.pause.closing_at = c.SDL_GetTicks();
 }
 
-/// Items a course cannot do are left out: a retry would lose the stages before this one.
+/// A course's retry would lose the stages before this one, and a versus round's would be a second try.
+fn canRetry(a: *const App) bool {
+    return a.course == null and !a.versus.in_round;
+}
+
 fn itemCount(a: *const App) u8 {
-    return if (a.course != null) 2 else 3;
+    return if (canRetry(a)) 3 else 2;
 }
 
 fn actionOf(a: *const App, i: u8) Action {
-    return if (a.course != null and i == 1) .quit else @fromBackingInt(@intCast(i));
+    return if (!canRetry(a) and i == 1) .quit else @fromBackingInt(@intCast(i));
 }
 
 fn activate(a: *App, act: Action) void {
@@ -175,6 +179,9 @@ test "the menu wraps, and a course has no retry" {
     key(a, c.SDL_SCANCODE_DOWN);
     try std.testing.expectEqual(@as(u8, 0), a.pause.sel);
     try std.testing.expectEqual(Action.retry, actionOf(a, 1));
+    a.versus.in_round = true;
+    try std.testing.expectEqual(Action.quit, actionOf(a, 1));
+    a.versus.in_round = false;
     // An undefined payload, not an undefined optional: that one reads as null on arm64.
     a.course = @as(@typeInfo(@TypeOf(a.course)).optional.child, undefined);
     defer a.course = null;

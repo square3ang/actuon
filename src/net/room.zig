@@ -7,6 +7,7 @@ const http = @import("../platform/http.zig");
 pub const code_len = 6;
 pub const max_players = 8;
 const poll_ms = 250;
+const min_poll_ms = 50;
 /// While live scores arrive over UDP, HTTP only carries names, the chart and checked scores.
 const poll_with_live_ms = 1000;
 const live_ms = 100;
@@ -54,6 +55,8 @@ pub const View = struct {
     start_tick: u64 = 0,
     start_round: u32 = 0,
     host: bool = false,
+    /// The server did not take the host's last start or chart.
+    order_failed: bool = false,
     players: [max_players]Player = @splat(.{}),
     count: u8 = 0,
 
@@ -144,6 +147,10 @@ pub fn applyLive(v: *View, data: []const u8, last_seq: *u32, now: u64) bool {
     return true;
 }
 
+fn fromServer(from: *const std.Io.net.IpAddress, server: *const std.Io.net.IpAddress) bool {
+    return from.eql(server);
+}
+
 /// "host:port", the host possibly a bracketed IPv6 address.
 fn parseLiveAddress(text: []const u8) ?struct { host: []const u8, port: u16 } {
     const colon = std.mem.lastIndexOfScalar(u8, text, ':') orelse return null;
@@ -191,6 +198,8 @@ pub const Room = struct {
     want_sha: ?[64]u8 = null,
     want_title: []u8 = &.{},
     quit: std.atomic.Value(bool) = .init(false),
+    /// Stops the UDP thread. Separate from `quit`: only the game may let the room be freed.
+    live_stop: std.atomic.Value(bool) = .init(false),
     /// When UDP last answered, in SDL ticks.
     live_at: std.atomic.Value(u64) = .init(0),
     live_key: [16]u8 = @splat(0),
@@ -321,7 +330,7 @@ pub const Room = struct {
         var warned = false;
         var packet: [live_request_len]u8 = undefined;
         var reply: [live_header_len + max_players * live_entry_len + 1]u8 = undefined;
-        while (!r.quit.load(.acquire)) {
+        while (!r.live_stop.load(.acquire)) {
             const sent_at = c.SDL_GetTicks();
             seq += 1;
             _ = c.SDL_LockMutex(r.lock);
@@ -332,7 +341,9 @@ pub const Room = struct {
                 warned = true;
                 std.log.warn("versus live scores: {t}", .{e});
             };
-            if (socket.receiveTimeout(fs.io, &reply, .{ .duration = .{ .raw = .fromMilliseconds(live_ms), .clock = .awake } })) |msg| {
+            if (socket.receiveTimeout(fs.io, &reply, .{ .duration = .{ .raw = .fromMilliseconds(live_ms), .clock = .awake } })) |msg| recv: {
+                // A forged high sequence number would make every real answer look old.
+                if (!fromServer(&msg.from, &dest)) break :recv;
                 const now = c.SDL_GetTicks();
                 _ = c.SDL_LockMutex(r.lock);
                 const applied = applyLive(&r.view, msg.data, &last_seq, now);
@@ -352,6 +363,8 @@ pub const Room = struct {
 
     /// Cut short when UDP announces a round: its seed and chart come over HTTP.
     fn waitForNextPoll(r: *Room) void {
+        // A server that never catches up with its own announcement must not get a request per answer.
+        c.SDL_Delay(min_poll_ms);
         const until = c.SDL_GetTicks() + @as(u64, if (r.liveHealthy()) poll_with_live_ms else poll_ms);
         while (c.SDL_GetTicks() < until and !r.quit.load(.acquire)) {
             _ = c.SDL_LockMutex(r.lock);
@@ -369,9 +382,29 @@ pub const Room = struct {
         const sha = r.want_sha;
         r.want_sha = null;
         const title = a.dupe(u8, r.want_title) catch "";
+        if (start_it or sha != null) r.view.order_failed = false;
         _ = c.SDL_UnlockMutex(r.lock);
-        if (sha) |*s| _ = try http.send(client, a, .POST, try std.fmt.allocPrint(a, "{s}/rooms/{s}/chart", .{ r.base, &r.join_code }), try chartBody(a, s, title), hs);
-        if (start_it) _ = try http.send(client, a, .POST, try std.fmt.allocPrint(a, "{s}/rooms/{s}/start", .{ r.base, &r.join_code }), "", hs);
+        if (sha) |*s| {
+            const body = try chartBody(a, s, title);
+            r.sendOrder(a, client, hs, "chart", body);
+        }
+        if (start_it) r.sendOrder(a, client, hs, "start", "");
+    }
+
+    /// An order is not sent twice: by the next poll the host may want something else.
+    fn sendOrder(r: *Room, a: std.mem.Allocator, client: *std.http.Client, hs: []const std.http.Header, action: []const u8, body: []const u8) void {
+        const ok = blk: {
+            const url = std.fmt.allocPrint(a, "{s}/rooms/{s}/{s}", .{ r.base, &r.join_code, action }) catch break :blk false;
+            const ans = http.send(client, a, .POST, url, body, hs) catch |e| {
+                std.log.warn("versus {s}: {t}", .{ action, e });
+                break :blk false;
+            };
+            break :blk ans.status == 200;
+        };
+        if (ok) return;
+        _ = c.SDL_LockMutex(r.lock);
+        defer _ = c.SDL_UnlockMutex(r.lock);
+        r.view.order_failed = true;
     }
 
     fn poll(r: *Room, a: std.mem.Allocator, client: *std.http.Client, hs: []const std.http.Header, url: []const u8) !u16 {
@@ -417,7 +450,7 @@ pub const Room = struct {
         if (first != .joined) return r.setStatus(first);
         const live = if (r.live_address_len > 0) c.SDL_CreateThread(liveThread, "versus-live", r) else null;
         defer if (live) |t| {
-            r.quit.store(true, .release);
+            r.live_stop.store(true, .release);
             c.SDL_WaitThread(t, null);
         };
         const url = std.fmt.allocPrint(al, "{s}/rooms/{s}/report", .{ r.base, &r.join_code }) catch return r.setStatus(.failed);
@@ -477,6 +510,15 @@ test "a live request has the layout the server reads" {
     try std.testing.expectEqual(@as(u8, 7), out[26]);
     try std.testing.expectEqual(@as(u8, 2), out[30]);
     try std.testing.expectEqual(@as(u8, 3), out[46]);
+}
+
+test "a live answer from anyone but the server is refused" {
+    const server = try std.Io.net.IpAddress.parse("127.0.0.1", 8740);
+    try std.testing.expect(fromServer(&server, &server));
+    const port = try std.Io.net.IpAddress.parse("127.0.0.1", 8741);
+    const host = try std.Io.net.IpAddress.parse("127.0.0.2", 8740);
+    try std.testing.expect(!fromServer(&port, &server));
+    try std.testing.expect(!fromServer(&host, &server));
 }
 
 test "a live address is parsed or refused" {

@@ -101,7 +101,7 @@ Players on one server race the same chart with the same seed. Rooms live in memo
 | `POST /rooms` `{sha256,title}` | Creates a room, returns `code` |
 | `POST /rooms/CODE/join`, `/leave` | Enters or leaves. A player is in one room at a time |
 | `POST /rooms/CODE/chart` `{sha256,title}` | Host only: changes the chart |
-| `POST /rooms/CODE/start` | Host only: starts a round after 8 seconds |
+| `POST /rooms/CODE/start` | Host only: starts a round after 8 seconds. 409 while one is about to start, as for `/chart` |
 | `POST /rooms/CODE/report` `{round,has_chart,ex,judged,gauge,done}` | Sends this player's live numbers, returns the room |
 
 The responses to `POST /rooms` and `/join` also hold `key` and `udp`. With `IR_UDP_PUBLIC=host:port` set, the server listens
@@ -119,6 +119,8 @@ reply for 2 seconds, as on a network that blocks it, the client reports over HTT
 UDP cannot pass through Cloudflare's proxy, and the address in `IR_UDP_PUBLIC` is given to every player in a room. Pointing
 it at the origin reveals an address the proxy otherwise hides, so use a separate host or address if that matters. Open the
 port too: `firewall-cmd --permanent --add-port=8740/udp && firewall-cmd --reload`.
+
+A replay counts for a round only with that round's chart and seed, and only the first one does.
 
 Reported numbers are only shown while the round runs. A round is decided by `final_ex`, which is set when the
 player's replay passes the usual check: `POST /scores/SHA?format=N&room=CODE`.

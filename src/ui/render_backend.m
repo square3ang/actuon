@@ -59,32 +59,42 @@ void rb_wait_frame(void) {}
 
 void rb_present(void) { rb_drawable = nil; }
 
+void rb_frame_size(int *w, int *h) {
+    if (!rb_drawable) return;
+    *w = (int)rb_drawable.texture.width;
+    *h = (int)rb_drawable.texture.height;
+}
+
+// Sokol presents in sg_end_pass, and a presented drawable's pixels are no longer ours: the shot presents it itself.
+void rb_hold_present(void) { _sg.mtl.cur_drawable = nil; }
+
 // Presents as well, as on the other backends.
 bool rb_read_pixels(int w, int h, void *rgba) {
-    bool ok = false;
-    id<MTLTexture> tex = rb_drawable.texture;
-    id<MTLCommandQueue> queue = [rb_layer.device newCommandQueue];
-    NSUInteger pitch = (NSUInteger)w * 4;
-    id<MTLBuffer> buf = [rb_layer.device newBufferWithLength:pitch * h options:MTLResourceStorageModeShared];
-    if (tex && queue && buf && (int)tex.width == w && (int)tex.height == h) {
-        id<MTLCommandBuffer> cmd = [queue commandBuffer];
-        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
-        [blit copyFromTexture:tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:buf destinationOffset:0 destinationBytesPerRow:pitch destinationBytesPerImage:pitch * h];
-        [blit endEncoding];
+    @autoreleasepool {
+        id<MTLTexture> tex = rb_drawable.texture;
+        NSUInteger pitch = (NSUInteger)w * 4;
+        id<MTLBuffer> buf = [rb_layer.device newBufferWithLength:pitch * h options:MTLResourceStorageModeShared];
+        // Sokol's own queue, so this runs after the frame it reads.
+        id<MTLCommandBuffer> cmd = [_sg.mtl.cmd_queue commandBuffer];
+        bool fits = tex && buf && (int)tex.width == w && (int)tex.height == h;
+        if (fits) {
+            id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+            [blit copyFromTexture:tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:buf destinationOffset:0 destinationBytesPerRow:pitch destinationBytesPerImage:pitch * h];
+            [blit endEncoding];
+        }
+        if (rb_drawable) [cmd presentDrawable:rb_drawable];
         [cmd commit];
         [cmd waitUntilCompleted];
-        if (cmd.status == MTLCommandBufferStatusCompleted) {
-            const uint8_t *src = buf.contents;
-            uint8_t *out = rgba;
-            for (NSUInteger i = 0; i < pitch * h; i += 4) {
-                out[i] = src[i + 2];
-                out[i + 1] = src[i + 1];
-                out[i + 2] = src[i];
-                out[i + 3] = src[i + 3];
-            }
-            ok = true;
+        rb_present();
+        if (!fits || cmd.status != MTLCommandBufferStatusCompleted) return false;
+        const uint8_t *src = buf.contents;
+        uint8_t *out = rgba;
+        for (NSUInteger i = 0; i < pitch * h; i += 4) {
+            out[i] = src[i + 2];
+            out[i + 1] = src[i + 1];
+            out[i + 2] = src[i];
+            out[i + 3] = src[i + 3];
         }
+        return true;
     }
-    rb_present();
-    return ok;
 }

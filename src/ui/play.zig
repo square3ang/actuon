@@ -46,6 +46,11 @@ pub fn targetEx(target: u8, best_ex: u32, total_notes: u32) u32 {
     return (total_notes * 2 * ninths + 8) / 9;
 }
 
+/// A chart's best says nothing about a section of it, so practice paces against the MAX instead.
+pub fn paceTarget(target: u8, practice: bool) u8 {
+    return if (practice and pace_targets[@min(target, pace_targets.len - 1)].ninths == 0) 1 else target;
+}
+
 /// The run against where the target stands by now, not its end of song total.
 pub fn paceDiff(ex: u32, target_ex: u32, judged: u32, total_notes: u32) i64 {
     if (total_notes == 0) return ex;
@@ -674,6 +679,9 @@ test "a target's EX and the pace against it" {
     try std.testing.expectEqual(@as(u32, 1800), targetEx(1, 77, 900));
     try std.testing.expectEqual(@as(u32, 1600), targetEx(2, 77, 900));
     try std.testing.expectEqual(@as(u32, 2), targetEx(2, 0, 1));
+    try std.testing.expectEqual(@as(u8, 1), paceTarget(0, true));
+    try std.testing.expectEqual(@as(u8, 0), paceTarget(0, false));
+    try std.testing.expectEqual(@as(u8, 3), paceTarget(3, true));
     try std.testing.expectEqual(@as(i64, 10), paceDiff(100, 1800, 50, 1000));
     try std.testing.expectEqual(@as(i64, -10), paceDiff(80, 1800, 50, 1000));
     try std.testing.expectEqual(@as(i64, -1000), paceDiff(800, 1800, 2000, 1000));

@@ -174,6 +174,19 @@ void rb_present(void) {
     rb_frame_id++;
 }
 
+void rb_hold_present(void) {}
+
+void rb_frame_size(int *w, int *h) {
+    ID3D11Texture2D *back = NULL;
+    IDXGISwapChain_GetBuffer(rb_chain, 0, &IID_ID3D11Texture2D, (void **)&back);
+    if (!back) return;
+    D3D11_TEXTURE2D_DESC desc;
+    ID3D11Texture2D_GetDesc(back, &desc);
+    *w = (int)desc.Width;
+    *h = (int)desc.Height;
+    ID3D11Texture2D_Release(back);
+}
+
 // Presents as well, as on the other backends: a flip model back buffer is gone after that.
 bool rb_read_pixels(int w, int h, void *rgba) {
     bool ok = false;
@@ -559,6 +572,13 @@ static void rb_shot_barrier(VkCommandBuffer cmd, VkImageLayout from, VkImageLayo
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &b);
 }
 
+void rb_hold_present(void) {}
+
+void rb_frame_size(int *w, int *h) {
+    *w = (int)rb_extent.width;
+    *h = (int)rb_extent.height;
+}
+
 // Presents as well: the acquired image has to go back before the next frame takes one.
 bool rb_read_pixels(int w, int h, void *rgba) {
     bool ok = false;
@@ -596,10 +616,9 @@ bool rb_read_pixels(int w, int h, void *rgba) {
                 .signalSemaphoreCount = 1,
                 .pSignalSemaphores = &rb_rendered[rb_image],
             };
-            vkQueueSubmit(rb_queue, 1, &submit, VK_NULL_HANDLE);
-            vkQueueWaitIdle(rb_queue);
             Uint8 *mapped = NULL;
-            if (vkMapMemory(rb_dev, mem, 0, size, 0, (void **)&mapped) == VK_SUCCESS) {
+            if (vkQueueSubmit(rb_queue, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS && vkQueueWaitIdle(rb_queue) == VK_SUCCESS
+                && vkMapMemory(rb_dev, mem, 0, size, 0, (void **)&mapped) == VK_SUCCESS) {
                 Uint8 *out = rgba;
                 for (VkDeviceSize i = 0; i < size; i += 4) {
                     out[i] = mapped[i + 2];

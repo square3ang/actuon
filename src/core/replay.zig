@@ -123,6 +123,8 @@ pub const Result = extern struct {
     total_notes: u32 = 0,
     counts: [6]u32 = @splat(0),
     gauge_value: f32 = 0,
+    /// The replay's own, for a versus round to tell its play from an older one.
+    seed: u64 = 0,
 };
 
 /// Re-runs a play. `chart` must have been parsed with `r.bms_random`; it is modified by options.
@@ -133,7 +135,9 @@ pub fn resimulate(gpa: std.mem.Allocator, chart: *types.Chart, r: Replay) !Resul
     defer s.destroy();
     for (r.events) |e| s.input(e);
     s.advance(chart.last_time_us + 2_000_000);
-    return summarize(s, chart.total_notes);
+    var res = summarize(s, chart.total_notes);
+    res.seed = r.seed;
+    return res;
 }
 
 pub fn summarize(s: *const sim_mod.Sim, total: u32) Result {

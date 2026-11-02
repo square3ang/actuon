@@ -52,7 +52,8 @@ fn adjust(a: *App, dir: i32) void {
 }
 
 pub fn params(p: *const State) session_mod.Practice {
-    return .{ .start_us = p.start_ms * 1000, .end_us = p.end_ms * 1000, .freq = p.freq, .judgerank = p.judgerank };
+    // Through the end of that millisecond: the chart's length was cut down to it, and its last note may be just past.
+    return .{ .start_us = p.start_ms * 1000, .end_us = p.end_ms * 1000 + 999, .freq = p.freq, .judgerank = p.judgerank };
 }
 
 pub fn key(a: *App, sc: u32) void {
@@ -109,6 +110,11 @@ pub fn draw(a: *App) void {
         g.textRight(value, x + w - 24 * u, ry + 8 * u, g.scaled(16), gfx.white);
     }
     g.textCentered(tr("Left and right change a value. Enter starts."), x + w / 2, y + h - 30 * u, g.scaled(12), gfx.dim);
+}
+
+test "the default range keeps a last note past the whole millisecond" {
+    const p = params(&.{ .end_ms = 12_345 });
+    try std.testing.expect(p.end_us >= 12_345_678);
 }
 
 test "a section stays at least a second long and inside the chart" {

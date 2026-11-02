@@ -22,6 +22,7 @@ pub enum RoomError {
     Full,
     NotHost,
     TooMany,
+    Busy,
 }
 
 pub struct Player {
@@ -61,6 +62,8 @@ pub struct Room {
     pub sha256: String,
     pub title: String,
     pub round: u32,
+    /// What this round plays: the room's chart may have changed since.
+    pub round_sha256: String,
     pub seed: u64,
     pub starts_at: Option<Instant>,
     pub players: Vec<Player>,
@@ -176,8 +179,8 @@ impl Rooms {
             done: flags & 2 != 0,
         };
         p.apply(&report, current, now);
-        let starts_in = room.starts_at.map_or(NO_START, |at| {
-            at.saturating_duration_since(now).as_millis().min(NO_START as u128 - 1) as u32
+        let starts_in = room.starts_at.filter(|at| *at > now).map_or(NO_START, |at| {
+            at.duration_since(now).as_millis().min(NO_START as u128 - 1) as u32
         });
         let mut reply = Vec::with_capacity(17 + 17 * room.players.len());
         reply.extend_from_slice(LIVE_REPLY);
@@ -233,6 +236,7 @@ impl Rooms {
                 sha256: sha256.to_string(),
                 title: title.to_string(),
                 round: 0,
+                round_sha256: String::new(),
                 seed: 0,
                 starts_at: None,
                 players: vec![player(user, name, now)],
@@ -276,8 +280,11 @@ impl Rooms {
         });
     }
 
-    pub fn leave(&mut self, user: i64) {
-        self.remove_player(user);
+    /// Only from the named room: a late leave must not take a player out of the room they moved on to.
+    pub fn leave(&mut self, code: &str, user: i64) {
+        if self.rooms.get(code).is_some_and(|r| r.players.iter().any(|p| p.user == user)) {
+            self.remove_player(user);
+        }
     }
 
     fn room_of_host(&mut self, code: &str, user: i64) -> Result<&mut Room, RoomError> {
@@ -294,8 +301,13 @@ impl Rooms {
         user: i64,
         sha256: &str,
         title: &str,
+        now: Instant,
     ) -> Result<(), RoomError> {
         let room = self.room_of_host(code, user)?;
+        // Players are already loading the round's chart.
+        if room.starts_at.is_some_and(|at| at > now) {
+            return Err(RoomError::Busy);
+        }
         room.sha256 = sha256.to_string();
         room.title = title.to_string();
         room.starts_at = None;
@@ -313,7 +325,12 @@ impl Rooms {
         now: Instant,
     ) -> Result<(), RoomError> {
         let room = self.room_of_host(code, user)?;
+        // A start replaces the clock, so repeating it could keep players on the loading screen.
+        if room.starts_at.is_some_and(|at| at > now) {
+            return Err(RoomError::Busy);
+        }
         room.round += 1;
+        room.round_sha256 = room.sha256.clone();
         room.seed = seed;
         room.starts_at = Some(now + START_DELAY);
         for p in &mut room.players {
@@ -344,15 +361,16 @@ impl Rooms {
         Ok(view(room, user, now))
     }
 
-    /// Only the replay check calls this, with the score it computed.
-    pub fn record_final(&mut self, code: &str, user: i64, sha256: &str, ex: u32) {
+    /// Only the replay check calls this, with the score it computed. The seed ties a replay to this
+    /// round, and the first one counts, so neither an old best nor a second try can win.
+    pub fn record_final(&mut self, code: &str, user: i64, sha256: &str, seed: u64, ex: u32) {
         let Some(room) = self.rooms.get_mut(code) else {
             return;
         };
-        if room.sha256 != sha256 {
+        if room.round == 0 || room.round_sha256 != sha256 || room.seed != seed {
             return;
         }
-        if let Some(p) = room.players.iter_mut().find(|p| p.user == user) {
+        if let Some(p) = room.players.iter_mut().find(|p| p.user == user && p.final_ex.is_none()) {
             p.final_ex = Some(ex);
             p.ex = ex;
             p.done = true;
@@ -371,7 +389,8 @@ fn view(room: &Room, me: i64, now: Instant) -> Value {
     // A delay, not a time: the clients' clocks are not this server's.
     let starts_in = room
         .starts_at
-        .map(|at| at.saturating_duration_since(now).as_millis() as u64);
+        .filter(|at| *at > now)
+        .map(|at| at.duration_since(now).as_millis() as u64);
     json!({"sha256": room.sha256, "title": room.title, "round": room.round, "seed": room.seed.to_string(), "starts_in_ms": starts_in, "host": room.host == me, "players": players})
 }
 
@@ -458,9 +477,12 @@ mod tests {
         assert_eq!(v["seed"], "7");
         assert_eq!(v["starts_in_ms"], START_DELAY.as_millis() as u64);
         assert_eq!(v["players"][1]["ex"], 10);
-        rooms.start("AAAAAA", 1, 8, now).unwrap();
+        assert_eq!(rooms.start("AAAAAA", 1, 8, now), Err(RoomError::Busy), "players are still loading");
+        assert_eq!(rooms.set_chart("AAAAAA", 1, "b", "t", now), Err(RoomError::Busy));
+        let later = now + START_DELAY;
+        rooms.start("AAAAAA", 1, 8, later).unwrap();
         let v = rooms
-            .report("AAAAAA", 2, &report(10), now)
+            .report("AAAAAA", 2, &report(10), later)
             .ok()
             .unwrap();
         // Round 1's report no longer counts in round 2.
@@ -478,18 +500,23 @@ mod tests {
             .ok()
             .unwrap();
         assert!(v["players"][1]["final_ex"].is_null());
-        rooms.record_final("AAAAAA", 2, "other", 5);
+        rooms.record_final("AAAAAA", 2, "other", 1, 5);
+        rooms.record_final("AAAAAA", 2, SHA, 99, 5);
         let v = rooms
             .report("AAAAAA", 2, &report(9999), now)
             .ok()
             .unwrap();
         assert!(v["players"][1]["final_ex"].is_null());
-        rooms.record_final("AAAAAA", 2, SHA, 5);
+        let later = now + START_DELAY;
+        rooms.set_chart("AAAAAA", 1, "b", "t", later).unwrap();
+        rooms.record_final("AAAAAA", 2, SHA, 1, 5);
+        rooms.record_final("AAAAAA", 2, SHA, 1, 9);
         let v = rooms
-            .report("AAAAAA", 1, &report(1), now)
+            .report("AAAAAA", 1, &report(1), later)
             .ok()
             .unwrap();
-        assert_eq!(v["players"][1]["final_ex"], 5);
+        assert_eq!(v["players"][1]["final_ex"], 5, "the first check of the round counts, whatever the chart is now");
+        assert!(v["starts_in_ms"].is_null(), "a past start is not announced");
     }
 
     #[test]
@@ -528,5 +555,9 @@ mod tests {
             .create("BBBBBB".into(), 1, "one", SHA, "t", now)
             .unwrap();
         assert_eq!(rooms.join("AAAAAA", 2, "two", now), Err(RoomError::NotFound));
+        rooms.leave("AAAAAA", 1);
+        assert!(rooms.rooms.contains_key("BBBBBB"), "a late leave from the old room stays there");
+        rooms.leave("BBBBBB", 1);
+        assert!(!rooms.rooms.contains_key("BBBBBB"));
     }
 }

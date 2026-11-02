@@ -199,6 +199,8 @@ pub fn tickTables(a: *App) bool {
 /// Rebuilds the visible rows from the DB; keeps the cursor on the same index.
 pub fn reload(a: *App) void {
     const s = &a.sel;
+    // A rescan may have added or removed the room's chart.
+    a.versus.chart_checked = @splat(0);
     if (s.arena) |*ar| ar.deinit();
     s.arena = std.heap.ArenaAllocator.init(a.gpa);
     const al = s.arena.?.allocator();
@@ -274,6 +276,34 @@ fn likePattern(al: std.mem.Allocator, word: []const u8, anywhere: bool) ![]const
     }
     try pat.append(al, '%');
     return pat.items;
+}
+
+test "a click does not reach the list under an overlay" {
+    const t = @import("testing.zig");
+    const a = try t.open();
+    defer t.close(a);
+    a.g.clicked = true;
+    blockClickUnderOverlay(a);
+    try std.testing.expect(a.g.clicked);
+    a.versus.open = true;
+    blockClickUnderOverlay(a);
+    try std.testing.expect(!a.g.clicked);
+}
+
+test "a pad can leave the practice screen, and a section is refused on another chart" {
+    const t = @import("testing.zig");
+    const a = try t.open();
+    defer t.close(a);
+    a.sel.view = .folder;
+    a.sel.folder = "/a";
+    reload(a);
+    a.cfg.beatoraja_select = true;
+    a.practice.open = true;
+    a.practice.sha256 = @splat('x');
+    startPractice(a, .{ .start_us = 0, .end_us = 1 });
+    try std.testing.expect(a.scene == .select);
+    try std.testing.expect(pad(a, a.cfg.p1[1], true, false));
+    try std.testing.expect(!a.practice.open);
 }
 
 test "keys mark a favorite and the favorites folder lists it" {
@@ -1043,7 +1073,13 @@ fn tickBoard(a: *App, now_ms: u64) void {
     a.select_state.ir_board = s.board;
 }
 
+/// The list is drawn under these, and they take no clicks of their own.
+fn blockClickUnderOverlay(a: *App) void {
+    if (a.practice.open or a.versus.open) a.g.clicked = false;
+}
+
 pub fn draw(a: *App) void {
+    blockClickUnderOverlay(a);
     tickBoard(a, c.SDL_GetTicks());
     tickScan(a);
     updatePreview(a);
@@ -1510,6 +1546,8 @@ pub fn startVersus(a: *App, song: db_mod.Song, seed: u64) void {
 
 pub fn startPractice(a: *App, section: session_mod.Practice) void {
     const song = selectedSong(&a.sel) orelse return;
+    // A section's times only mean something on the chart they were set for.
+    if (!std.mem.eql(u8, song.sha256, &a.practice.sha256)) return;
     startSongWith(a, song, null, section);
 }
 
@@ -1822,11 +1860,30 @@ fn padPlay(a: *App, at: ?usize, down: bool, repeat: bool) void {
     }
 }
 
+/// Index in `p1`, on the practice and room screens, so that a pad alone can use and leave them.
+fn overlayKey(at: usize) ?u32 {
+    return switch (at) {
+        0, 6 => c.SDL_SCANCODE_RETURN,
+        1 => c.SDL_SCANCODE_ESCAPE,
+        2, 7 => c.SDL_SCANCODE_UP,
+        3, 8 => c.SDL_SCANCODE_DOWN,
+        4 => c.SDL_SCANCODE_LEFT,
+        5 => c.SDL_SCANCODE_RIGHT,
+        else => null,
+    };
+}
+
 /// beatoraja controls. True when the input was used, so it is not also a menu key.
 /// Start and Select are tracked on every screen: their release may come after a screen has gone.
 /// shortcut: reads only the 1P 7 key layout, add the others if a controller needs them here.
 pub fn pad(a: *App, code: u16, down: bool, repeat: bool) bool {
-    if (!a.cfg.beatoraja_select or a.practice.open or a.versus.open) return false;
+    if (!a.cfg.beatoraja_select) return false;
+    if (a.practice.open or a.versus.open) {
+        if (down) if (std.mem.indexOfScalar(u16, &a.cfg.p1, code)) |i| if (overlayKey(i)) |sc| {
+            if (a.practice.open) practice.key(a, sc) else versus.key(a, sc);
+        };
+        return true;
+    }
     const s = &a.sel;
     const was = panelOf(s);
     const is_start = code == a.cfg.start_select[0];
@@ -1968,6 +2025,7 @@ pub fn key(a: *App, sc: u32) void {
         c.SDL_SCANCODE_3 => {
             a.cfg.ln_mode = (@min(a.cfg.ln_mode, 2) + 1) % 3;
             db_mod.setLnMode(a.db, a.cfg.ln_mode) catch |e| std.log.err("LN mode not applied to scores: {t}", .{e});
+            s.replay_slot = 0;
             reload(a);
         },
         c.SDL_SCANCODE_4 => nextReplay(a),

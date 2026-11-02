@@ -27,7 +27,8 @@ pub fn main(init: std.process.Init) !void {
             return l.time_us < r.time_us;
         }
     }.f);
-    const out = try core.replay.encode(gpa, .{ .sha256 = chart.sha256, .bms_random = chart.random, .events = events.items });
+    const seed = if (args.len > 3) try std.fmt.parseInt(u64, args[3], 10) else 0;
+    const out = try core.replay.encode(gpa, .{ .sha256 = chart.sha256, .seed = seed, .bms_random = chart.random, .events = events.items });
     defer gpa.free(out);
     const f = try std.Io.Dir.cwd().createFile(io, args[2], .{});
     defer f.close(io);

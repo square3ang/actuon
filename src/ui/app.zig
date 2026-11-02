@@ -341,6 +341,8 @@ pub const App = struct {
         a.decide_at = 0;
         a.decide_fade_at = 0;
         a.decide_cancel = false;
+        // Held until now: the skin draws the chart's images through play and the result.
+        a.dropStagefile();
         a.skin_state = .{};
         a.scene = .loading;
         a.load_thread = c.SDL_CreateThread(loadThread, "loader", a);
@@ -463,6 +465,7 @@ pub const App = struct {
             if (img[0].len == 0) continue;
             const path = (fs.resolveAsset(al, dir, img[0], &.{ "png", "jpg", "jpeg", "bmp", "gif", "tga" }) catch null) orelse continue;
             const bytes = fs.readAlloc(al, path, 1 << 26) catch continue;
+            if (!chartImageFits(bytes)) continue;
             img[1].* = gfx.loadTexture(&a.g, path, bytes);
         }
     }
@@ -559,7 +562,7 @@ pub const App = struct {
             if (a.load_skin_at != 0 and a.load_params.start_us == 0 and elapsed < least) return;
         }
         // shortcut: a player who loads after the clock starts late and plays behind, send seek time if that is common.
-        if (a.versus.in_round and c.SDL_GetTicks() < a.versus.view.start_tick) return;
+        if (a.versus.in_round and c.SDL_GetTicks() < a.versus.start_tick) return;
         c.SDL_WaitThread(a.load_thread, null);
         a.load_thread = null;
         const s = a.load_result orelse {
@@ -586,15 +589,15 @@ pub const App = struct {
         } };
         a.view.bga = bga.Bga.create(a.gpa, &a.g, s);
         a.view.best_ex = a.bestEx(&s.chart.sha256, s.params.ln_mode);
-        a.view.target_ex = play.targetEx(a.cfg.pace_target, a.view.best_ex, s.chart.total_notes);
-        a.view.target_label = play.pace_targets[@min(a.cfg.pace_target, play.pace_targets.len - 1)].label;
+        const pace_target = play.paceTarget(a.cfg.pace_target, s.params.practice != null);
+        a.view.target_ex = play.targetEx(pace_target, a.view.best_ex, s.chart.total_notes);
+        a.view.target_label = play.pace_targets[@min(pace_target, play.pace_targets.len - 1)].label;
         a.skin_state.best_ex = a.view.best_ex;
         a.skin_state.target_ex = a.view.target_ex;
         a.skin_state.target_label = a.view.target_label;
         // The clock carries on from the loading screen, so what it opened is not replayed.
         if (a.load_skin_at != 0 and a.play_skin != null) a.skin_state.load_ms = elapsed;
         a.skin_state.fromSession(s, &a.cfg);
-        a.dropStagefile();
         if (a.load_skin_at == 0) a.reloadSkins(s.chart.mode);
         a.scene = .play;
         // As beatoraja, the load's end is heard; a preview jumping in partway stays quiet.
@@ -1248,4 +1251,29 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
     // Quit during decide or loading: nothing took what the loader made.
     if (app.load_result) |loaded| loaded.destroy();
     app.dropStagefile();
+}
+
+/// This decode runs on the main thread, and a small file can claim a huge image. Skins have no use for one.
+fn chartImageFits(bytes: []const u8) bool {
+    var w: c_int = 0;
+    var h: c_int = 0;
+    var n: c_int = 0;
+    if (c.stbi_info_from_memory(bytes.ptr, @intCast(bytes.len), &w, &h, &n) == 0) return false;
+    return @as(i64, w) * h <= 1 << 24;
+}
+
+test "a chart image claiming to be huge is refused before decoding" {
+    // A TGA header: 8 bit grey, width and height at bytes 12 to 15.
+    var tga: [18]u8 = @splat(0);
+    tga[2] = 3;
+    tga[16] = 8;
+    tga[12] = 0xff;
+    tga[13] = 0x3f;
+    tga[14] = 0xff;
+    tga[15] = 0x3f;
+    try std.testing.expect(!chartImageFits(&tga));
+    tga[13] = 0;
+    tga[15] = 0;
+    try std.testing.expect(chartImageFits(&tga));
+    try std.testing.expect(!chartImageFits("not an image"));
 }

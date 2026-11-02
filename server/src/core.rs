@@ -22,6 +22,7 @@ pub struct Verified {
     pub total_notes: u32,
     pub counts: [u32; 6],
     pub gauge_value: f32,
+    pub seed: u64,
 }
 
 extern "C" {

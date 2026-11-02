@@ -175,10 +175,14 @@ const evdev = if (builtin.os.tag == .linux) struct {
     const EVIOCGKEY: u32 = 0x80104518;
 
     const max_events = 64;
+    /// udev opens a new node to the player a moment after it appears.
+    const rescan_ms = 5000;
 
     var fds: [32]linux.pollfd = undefined;
     /// The /dev/input number behind each slot of fds.
     var event_nums: [fds.len]u8 = undefined;
+    /// Keys each slot has pushed as down, for when its device goes with them still held.
+    var held: [fds.len]std.StaticBitSet(set1_to_sdl.len) = @splat(.empty);
     /// The sampler reads this while the evdev thread adds devices.
     var n: std.atomic.Value(usize) = .init(0);
 
@@ -200,6 +204,21 @@ const evdev = if (builtin.os.tag == .linux) struct {
     fn freeSlot(used: []const linux.pollfd) ?usize {
         for (used, 0..) |f, i| if (f.fd < 0) return i;
         return if (used.len < fds.len) used.len else null;
+    }
+
+    fn releaseHeld(slot: usize, ns: u64) void {
+        var it = held[slot].iterator(.{});
+        while (it.next()) |code| {
+            push(.{ .mono_ns = ns, .code = set1_to_sdl[code], .down = false });
+            held[slot].unset(code);
+        }
+    }
+
+    /// When a node last came or went, or null if that cannot be read.
+    fn nodesChangedAt() ?i64 {
+        var st: linux.Statx = undefined;
+        if (linux.errno(linux.statx(linux.AT.FDCWD, "/dev/input", 0, .{ .MTIME = true }, &st)) != .SUCCESS) return null;
+        return st.mtime.sec;
     }
 
     /// Opens every keyboard not open yet, so one plugged in during play works at once.
@@ -238,21 +257,28 @@ const evdev = if (builtin.os.tag == .linux) struct {
     fn run(_: ?*anyopaque) callconv(.c) c_int {
         var evs: [64]InputEvent = undefined;
         var opened_at = c.SDL_GetTicks();
+        var nodes_at = nodesChangedAt();
+        var rescan_until: u64 = 0;
         while (true) {
             const count = n.load(.monotonic);
             _ = linux.poll(&fds, count, 1000);
             // Events carry kernel timestamps, so the time this takes cannot move a judgement.
             if (c.SDL_GetTicks() - opened_at >= 1000) {
                 opened_at = c.SDL_GetTicks();
-                openKeyboards();
+                // Opening a device can wake it, so idle mice and pads are left alone until a node changes.
+                const changed = nodesChangedAt();
+                if (changed == null or changed != nodes_at) rescan_until = opened_at + rescan_ms;
+                nodes_at = changed;
+                if (opened_at < rescan_until) openKeyboards();
             }
             // SDL's tick clock and CLOCK_MONOTONIC share a rate, so a fresh delta per wake is exact enough.
             const delta = @as(i128, c.SDL_GetTicksNS()) - monoNs();
-            for (fds[0..count]) |*f| {
+            for (fds[0..count], 0..) |*f, slot| {
                 // An unplugged device reports HUP forever: without dropping it this loop would spin.
                 if (f.revents & (linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL) != 0) {
                     _ = linux.close(f.fd);
                     f.fd = -1;
+                    releaseHeld(slot, @intCast(@max(@as(i128, monoNs()) + delta, 0)));
                     continue;
                 }
                 if (f.revents & linux.POLL.IN == 0) continue;
@@ -260,10 +286,12 @@ const evdev = if (builtin.os.tag == .linux) struct {
                 if (linux.errno(rc) != .SUCCESS) continue;
                 for (evs[0 .. rc / @sizeOf(InputEvent)]) |e| {
                     if (e.type != EV_KEY or e.value == 2 or e.code >= set1_to_sdl.len) continue;
+                    if (e.value == 0) held[slot].unset(e.code);
                     // Reading keeps the kernel queue empty; the sampler owns the keys while it runs.
                     if (!focused.load(.acquire) or poll_hz.load(.acquire) != 0) continue;
                     const sc = set1_to_sdl[e.code];
                     if (sc == 0) continue;
+                    if (e.value == 1) held[slot].set(e.code);
                     const ns = @as(i128, e.sec) * 1_000_000_000 + @as(i128, e.usec) * 1000 + delta;
                     push(.{ .mono_ns = @intCast(@max(ns, 0)), .code = sc, .down = e.value == 1 });
                 }
@@ -304,6 +332,20 @@ test "a keyboard plugged in later reuses an unplugged one's slot" {
     try std.testing.expectEqual(@as(?usize, 1), evdev.freeSlot(&.{ open, gone, open }));
     try std.testing.expectEqual(@as(?usize, 2), evdev.freeSlot(&.{ open, open }));
     try std.testing.expectEqual(@as(?usize, null), evdev.freeSlot(&(@as([evdev.fds.len]PollFd, @splat(open)))));
+}
+
+test "unplugging a device lets go of the keys it held" {
+    if (builtin.os.tag != .linux) return;
+    clear();
+    evdev.held[1].set(44);
+    evdev.releaseHeld(1, 9);
+    const up = pop().?;
+    try std.testing.expectEqual(@as(u16, 29), up.code);
+    try std.testing.expect(!up.down);
+    try std.testing.expectEqual(@as(u64, 9), up.mono_ns);
+    try std.testing.expect(pop() == null);
+    evdev.releaseHeld(1, 10);
+    try std.testing.expect(pop() == null);
 }
 
 test "scancode table" {

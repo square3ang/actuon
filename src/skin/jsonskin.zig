@@ -394,12 +394,13 @@ const Loader = struct {
             try l.paths.append(a, try l.assetPath(str(v.object.get("path"))));
             try l.sources.put(a, id, @intCast(l.paths.items.len - 1));
         }
+        var fonts_loaded: u32 = 0;
         for (arr(r.get("font"))) |v| {
             if (v != .object) continue;
             const file = try l.assetPath(str(v.object.get("path"))) orelse continue;
             const font_id = try idOf(a, v.object.get("id"));
             if (std.ascii.endsWithIgnoreCase(file, ".fnt")) {
-                const font = bitfont.load(a, file) orelse continue;
+                const font = bitfont.loadCapped(a, file, &fonts_loaded) orelse continue;
                 font.first_tex = @intCast(l.paths.items.len);
                 try l.paths.appendSlice(a, font.pages);
                 try l.bitmaps.put(a, font_id, font);

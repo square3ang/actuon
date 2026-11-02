@@ -178,6 +178,7 @@ try:
     assert joined[0] == 200 and joined[1]["udp"] == "127.0.0.1:18732"
     assert call("POST", f"/rooms/{room}/start", None, guest)[0] == 403, "only the host starts"
     assert call("POST", f"/rooms/{room}/start", None, host)[0] == 200
+    assert call("POST", f"/rooms/{room}/start", None, host)[0] == 409, "players are still loading"
     claim = {"round": 1, "has_chart": True, "ex": 999999, "judged": 1, "gauge": 100, "done": True}
     seen = call("POST", f"/rooms/{room}/report", claim, guest)[1]
     assert 0 < seen["starts_in_ms"] and seen["seed"] == call("POST", f"/rooms/{room}/report", claim, host)[1]["seed"]
@@ -199,6 +200,11 @@ try:
     seen = call("POST", f"/rooms/{room}/report", claim, host)[1]
     assert [p["ex"] for p in seen["players"] if p["name"] == "roomguest"] == [1234], "a live score reaches the room"
     assert call("POST", f"/scores/{sha}?format=1&room={room}", replay, guest)[0] == 200
+    seen = call("POST", f"/rooms/{room}/report", claim, host)[1]
+    assert all(p["final_ex"] is None for p in seen["players"]), "a replay from another round decides nothing"
+    subprocess.run([mkreplay, chart, replay_path + ".round", seen["seed"]], capture_output=True, check=True)
+    round_replay = open(replay_path + ".round", "rb").read()
+    assert call("POST", f"/scores/{sha}?format=1&room={room}", round_replay, guest)[0] == 200
     seen = call("POST", f"/rooms/{room}/report", claim, host)[1]
     assert [p["final_ex"] for p in seen["players"] if p["name"] == "roomguest"] == [notes * 2], "the checked replay decides"
 

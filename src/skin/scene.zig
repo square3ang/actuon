@@ -336,6 +336,10 @@ pub const State = struct {
             81 => st.loaded,
             190 => st.stagefile == null,
             191 => st.stagefile != null,
+            192 => st.banner == null,
+            193 => st.banner != null,
+            194 => st.backbmp == null,
+            195 => st.backbmp != null,
             82 => !st.replay,
             84 => st.replay,
             150...155 => st.difficulty == id - 150,
@@ -468,7 +472,7 @@ pub const State = struct {
             350...353 => st.note_counts[@intCast(id - 350)],
             12 => st.judge_offset_ms,
             121, 151 => st.target_ex,
-            153 => if (st.target_live) @as(i64, sc.exScore()) - st.target_ex else play.paceDiff(sc.exScore(), st.target_ex, st.judgedNotes(), st.total_notes),
+            153 => if (st.target_live) @as(i64, sc.exScore()) - st.target_ex else play.paceDiff(sc.exScore(), st.target_ex, sc.passed, st.total_notes),
             423 => blk: {
                 var t: i64 = 0;
                 for (sc.counts[0..5]) |v| t += v[0];
@@ -1004,4 +1008,12 @@ test "rank index follows ninths" {
     try std.testing.expectEqual(@as(i32, 0), State.rankIndex(0.9));
     try std.testing.expectEqual(@as(i32, 1), State.rankIndex(0.8));
     try std.testing.expectEqual(@as(i32, 7), State.rankIndex(0.0));
+}
+
+test "the skin's pace counts notes passed, not empty presses" {
+    var st: State = .{ .total_notes = 100, .target_ex = 200 };
+    st.snap.score.passed = 10;
+    st.snap.score.counts[5] = .{ 50, 0 };
+    const ctx = st.loadCtx();
+    try std.testing.expectEqual(@as(?i64, -20), ctx.num(ctx.ud, 153));
 }

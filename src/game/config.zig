@@ -45,7 +45,7 @@ pub const Config = struct {
     bga_upscale: bool = true,
     audio_rate: u32 = 48000,
     audio_frames: u32 = 128,
-    /// PortAudio name of an ALSA output. Empty picks the output automatically.
+    /// PortAudio name of an output. Empty picks the output automatically.
     audio_device: []const u8 = "",
     /// Key sampling rate during play in Hz. 0 uses OS key events instead.
     input_poll_hz: u32 = 1000,
@@ -215,6 +215,8 @@ pub fn load(a: std.mem.Allocator) Config {
         return .{};
     };
     cfg.clampCovers();
+    // A hand-edited value would show one mode, play another and read scores under a third.
+    cfg.ln_mode = @min(cfg.ln_mode, 2);
     cfg.download_url = migrateDownloadUrl(cfg.download_url);
     return cfg;
 }

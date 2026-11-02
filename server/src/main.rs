@@ -555,7 +555,7 @@ fn submit(req: &mut Request, db: &Connection, ctx: &Ctx, sha: &str) -> ApiResult
         return Err(ApiError::new(422, "replay could not be verified"));
     }
     if let Some(code) = query_of(req.url()).get("room") {
-        lock_rooms(ctx).record_final(code, user, sha, v.ex_score as u32);
+        lock_rooms(ctx).record_final(code, user, sha, v.seed, v.ex_score as u32);
     }
     let (prev_rank, _, _) = standing(db, sha, Some(user))?;
     db.execute(
@@ -580,6 +580,7 @@ fn room_error(e: rooms::RoomError) -> ApiError {
         rooms::RoomError::Full => ApiError::new(409, "room is full"),
         rooms::RoomError::NotHost => ApiError::new(403, "only the host can do that"),
         rooms::RoomError::TooMany => ApiError::new(503, "too many rooms"),
+        rooms::RoomError::Busy => ApiError::new(409, "a round is about to start"),
     }
 }
 
@@ -644,11 +645,11 @@ fn route_room(req: &mut Request, db: &Connection, ctx: &Ctx, code: &str, action:
             lock_rooms(ctx).join(code, user, &name, now).map_err(room_error)?;
             return Ok(live_fields(ctx, code, user));
         }
-        "leave" => lock_rooms(ctx).leave(user),
+        "leave" => lock_rooms(ctx).leave(code, user),
         "chart" => {
             let chart = read_room_chart(req)?;
             lock_rooms(ctx)
-                .set_chart(code, user, &chart.sha256, &chart.title)
+                .set_chart(code, user, &chart.sha256, &chart.title, now)
                 .map_err(room_error)?;
         }
         "start" => {

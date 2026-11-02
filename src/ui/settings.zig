@@ -168,7 +168,7 @@ const Item = enum {
             .sfx_volume => tr("Cursor, confirm and result sounds."),
             .audio_rate => tr("Takes effect after a restart."),
             .audio_frames => tr("Smaller is lower latency, too small crackles. Takes effect after a restart."),
-            .audio_device => tr("ALSA output, for Linux. Falls back to Default if it will not open. Applies when you leave settings."),
+            .audio_device => tr("Falls back to Default if it will not open. Applies when you leave settings."),
             .fullscreen => tr("Applies at once."),
             .vsync => tr("Applies at once. Off lowers input latency and may tear."),
             .bga_upscale => tr("Cleaner, sharper movies when they are enlarged, for a little CPU and GPU time per movie frame. Applies to the next chart for deblocking."),
@@ -543,7 +543,7 @@ fn openDrop(a: *App, it: Item) void {
             now = a.cfg.audio_device;
             labels.append(al, tr("Default")) catch return;
             values.append(al, "") catch return;
-            for (a.engine.alsaDevices(al)) |n| {
+            for (a.engine.outputDevices(al)) |n| {
                 labels.append(al, n) catch return;
                 values.append(al, n) catch return;
             }
@@ -937,7 +937,7 @@ fn setLanguage(a: *App, lang: i18n.Lang) void {
     select.reload(a);
 }
 
-/// ALSA names run long; the end, with its hw:N,N, is what tells them apart.
+/// Device names run long; the end, with its hw:N,N, is what tells them apart.
 fn deviceLabel(name: []const u8) []const u8 {
     if (name.len == 0) return tr("Default");
     return name[name.len - @min(name.len, 48) ..];
@@ -946,8 +946,8 @@ fn deviceLabel(name: []const u8) []const u8 {
 fn cycleDevice(a: *App, dir: i32) void {
     var tmp = std.heap.ArenaAllocator.init(a.gpa);
     defer tmp.deinit();
-    const names = a.engine.alsaDevices(tmp.allocator());
-    if (names.len == 0) return say(a, "No ALSA outputs found", .{});
+    const names = a.engine.outputDevices(tmp.allocator());
+    if (names.len == 0) return say(a, "No audio outputs found", .{});
     a.cfg.audio_device = a.arena.allocator().dupe(u8, skin_sound.nextSet(a.cfg.audio_device, names, dir)) catch return;
     a.saveConfig();
     say(a, "{s}", .{if (a.cfg.audio_device.len > 0) a.cfg.audio_device else tr("Default")});

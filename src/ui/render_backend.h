@@ -16,4 +16,8 @@ void rb_wait_frame(void);
 sg_swapchain rb_swapchain(int w, int h);
 void rb_present(void);
 // Copies the drawn frame out, top row first, RGBA. False where the backend has no way to.
+// The size of the frame rb_read_pixels reads, which a surface can keep from matching the window's.
+void rb_frame_size(int *w, int *h);
+// For a frame rb_read_pixels will read, called before its pass ends. Does nothing where presenting comes later anyway.
+void rb_hold_present(void);
 bool rb_read_pixels(int w, int h, void *rgba);

@@ -9,6 +9,7 @@ const decode = @import("decode.zig");
 pub const max_voices = 256;
 /// Largest buffer the settings allow.
 const feed_max = 4096;
+const device_key_max = 512;
 /// Song frames one output buffer can consume: `feed_max` plus the largest slew.
 const song_max = feed_max + feed_max / 256 + 1;
 /// Slew at most one frame per this many: 0.4%, about 7 cents.
@@ -117,7 +118,7 @@ pub const Engine = struct {
 
     /// Opens the lowest-latency path available. Windows order is ASIO, WASAPI exclusive, then WASAPI
     /// shared as the mandatory fallback; Linux prefers JACK (including PipeWire's) then ALSA.
-    /// A named ALSA `device` comes first; if it is gone or refuses, the usual order still gives sound.
+    /// A named `device` comes first; if it is gone or refuses, the usual order still gives sound.
     pub fn open(e: *Engine, want_rate: u32, frames: u32, prefer_null: bool, device: []const u8) !void {
         e.rate = want_rate;
         e.device = device;
@@ -127,8 +128,8 @@ pub const Engine = struct {
             e.pa_ready = true;
         }
         if (device.len > 0) {
-            if (alsaDevice(device)) |dev| {
-                if (e.tryOpen(c.paALSA, dev, want_rate, frames, false)) return;
+            if (namedDevice(device)) |dev| {
+                if (e.openOn(c.Pa_GetHostApiInfo(c.Pa_GetDeviceInfo(dev).*.hostApi).*.type, dev, want_rate, frames)) return;
             }
             std.log.warn("audio device \"{s}\" did not open, using the default", .{device});
         }
@@ -144,9 +145,7 @@ pub const Engine = struct {
             if (index < 0) continue;
             const info = c.Pa_GetHostApiInfo(index);
             if (info == null or info.*.defaultOutputDevice < 0) continue;
-            if (e.tryOpen(ty, info.*.defaultOutputDevice, want_rate, frames, true)) return;
-            if (ty == c.paWASAPI and e.tryOpen(ty, info.*.defaultOutputDevice, want_rate, frames, false)) return;
-            if (ty != c.paWASAPI and e.tryOpen(ty, info.*.defaultOutputDevice, want_rate, frames, false)) return;
+            if (e.openOn(ty, info.*.defaultOutputDevice, want_rate, frames)) return;
         }
         const dev = c.Pa_GetDefaultOutputDevice();
         if (dev >= 0 and e.tryOpen(c.paInDevelopment, dev, want_rate, frames, false)) return;
@@ -161,28 +160,49 @@ pub const Engine = struct {
         e.open(e.rate, frames, false, device) catch |err| std.log.err("audio reopen failed: {t}", .{err});
     }
 
-    fn alsaOutput(dev: c.PaDeviceIndex) ?[]const u8 {
-        const info = c.Pa_GetDeviceInfo(dev);
-        if (info == null or info.*.maxOutputChannels < 2) return null;
-        if (info.*.hostApi != c.Pa_HostApiTypeIdToHostApiIndex(c.paALSA)) return null;
-        return std.mem.span(info.*.name);
+    /// Exclusive first where the platform has it, then shared.
+    fn openOn(e: *Engine, ty: c.PaHostApiTypeId, dev: c.PaDeviceIndex, rate: u32, frames: u32) bool {
+        return e.tryOpen(ty, dev, rate, frames, true) or e.tryOpen(ty, dev, rate, frames, false);
     }
 
-    fn alsaDevice(name: []const u8) ?c.PaDeviceIndex {
+    /// The name a config stores. Windows lists one card under each API, so there the API is part of it.
+    fn deviceKey(buf: []u8, os: std.Target.Os.Tag, ty: c.PaHostApiTypeId, name: []const u8) ?[]const u8 {
+        if (os == .windows) return std.fmt.bufPrint(buf, "{s}: {s}", .{ nameOf(ty), name }) catch null;
+        return if (name.len <= buf.len) name else null;
+    }
+
+    fn outputKey(buf: []u8, dev: c.PaDeviceIndex) ?[]const u8 {
+        const info = c.Pa_GetDeviceInfo(dev);
+        if (info == null or info.*.maxOutputChannels < 2) return null;
+        const api = c.Pa_GetHostApiInfo(info.*.hostApi);
+        if (api == null) return null;
+        const offered: []const c.PaHostApiTypeId = switch (builtin.os.tag) {
+            .windows => &.{ c.paASIO, c.paWASAPI },
+            .macos => &.{c.paCoreAudio},
+            else => &.{c.paALSA},
+        };
+        if (std.mem.indexOfScalar(c.PaHostApiTypeId, offered, api.*.type) == null) return null;
+        return deviceKey(buf, builtin.os.tag, api.*.type, std.mem.span(info.*.name));
+    }
+
+    fn namedDevice(name: []const u8) ?c.PaDeviceIndex {
+        var buf: [device_key_max]u8 = undefined;
         var dev: c.PaDeviceIndex = 0;
         while (dev < c.Pa_GetDeviceCount()) : (dev += 1) {
-            if (std.mem.eql(u8, alsaOutput(dev) orelse continue, name)) return dev;
+            if (std.mem.eql(u8, outputKey(&buf, dev) orelse continue, name)) return dev;
         }
         return null;
     }
 
-    /// Names of the stereo ALSA outputs, owned by PortAudio. Empty when it never started.
-    pub fn alsaDevices(e: *const Engine, a: std.mem.Allocator) []const []const u8 {
+    /// Names of the stereo outputs. Empty when PortAudio never started.
+    pub fn outputDevices(e: *const Engine, a: std.mem.Allocator) []const []const u8 {
         if (!e.pa_ready) return &.{};
         var names: std.ArrayList([]const u8) = .empty;
+        var buf: [device_key_max]u8 = undefined;
         var dev: c.PaDeviceIndex = 0;
         while (dev < c.Pa_GetDeviceCount()) : (dev += 1) {
-            names.append(a, alsaOutput(dev) orelse continue) catch return &.{};
+            const key = a.dupe(u8, outputKey(&buf, dev) orelse continue) catch return &.{};
+            names.append(a, key) catch return &.{};
         }
         return names.items;
     }
@@ -552,6 +572,14 @@ pub const Engine = struct {
         return @divFloor(us * e.rate, 1_000_000);
     }
 };
+
+test "a device's name tells one API from another only on Windows" {
+    var buf: [device_key_max]u8 = undefined;
+    try std.testing.expectEqualStrings("WASAPI: Speakers", Engine.deviceKey(&buf, .windows, c.paWASAPI, "Speakers").?);
+    try std.testing.expectEqualStrings("hw:0,0", Engine.deviceKey(&buf, .linux, c.paALSA, "hw:0,0").?);
+    try std.testing.expectEqualStrings("Speakers", Engine.deviceKey(&buf, .macos, c.paCoreAudio, "Speakers").?);
+    try std.testing.expect(Engine.deviceKey(buf[0..3], .windows, c.paASIO, "long name") == null);
+}
 
 test "mixer schedules sample accurately" {
     const gpa = std.testing.allocator;

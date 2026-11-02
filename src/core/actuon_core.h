@@ -22,6 +22,7 @@ typedef struct {
     uint32_t total_notes;
     uint32_t counts[6];
     float gauge_value;
+    uint64_t seed;
 } ActuonResult;
 
 /* 0 on success; -1 malformed replay, -2 malformed chart or one PMS parsing cuts notes from, -3 chart hash differs from the replay's. */

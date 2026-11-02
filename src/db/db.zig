@@ -153,13 +153,30 @@ fn migrateLnModes(d: Db) !void {
         \\DROP TABLE score_v0;
     );
     if (!try hasColumn(d, "replay", "ln_mode")) try d.exec("ALTER TABLE replay ADD COLUMN ln_mode INTEGER NOT NULL DEFAULT 0");
-    if (!try hasColumn(d, "song", "has_open_ln")) try d.exec("ALTER TABLE song ADD COLUMN has_open_ln INTEGER DEFAULT 0; UPDATE song SET mtime=0 WHERE has_ln=1");
+    if (!try hasColumn(d, "song", "has_open_ln")) {
+        try d.exec("ALTER TABLE song ADD COLUMN has_open_ln INTEGER DEFAULT 0; UPDATE song SET mtime=0 WHERE has_ln=1");
+    }
     try d.exec("COMMIT");
 }
 
 pub fn initSchema(d: Db) !void {
     try d.exec(schema);
     try migrateLnModes(d);
+    try labelReplayModes(d);
+}
+
+/// Once per database. Old builds kept replays of every LN mode, and a beta filed them all as LN, so each
+/// is labelled from the byte after its gauge: see core.replay.encode.
+fn labelReplayModes(d: Db) !void {
+    const version = try d.prepare("PRAGMA user_version");
+    const done = (try version.step()) and version.int(0) >= 1;
+    version.deinit();
+    if (done) return;
+    try d.exec("BEGIN IMMEDIATE");
+    errdefer d.exec("ROLLBACK") catch {};
+    try d.exec("UPDATE replay SET ln_mode=CASE WHEN hex(substr(data,71,1))>='80' THEN 2 WHEN hex(substr(data,71,1))>='40' THEN 1 ELSE 0 END WHERE data IS NOT NULL");
+    try d.exec("PRAGMA user_version=1");
+    try d.exec("COMMIT");
 }
 
 /// The LN mode song select's scores and replays are for, on charts that leave it open. Only this connection sees it.
@@ -224,6 +241,7 @@ fn scanWorker(ud: ?*anyopaque) callconv(.c) c_int {
     }
 }
 
+// shortcut: a #RANDOM chart is judged on the scan's branch and filed by the played one, as in endlessdream, so a CN or HCN play on another branch may not show in the list; file by chart if players report it.
 fn hasOpenLn(chart: *const core.types.Chart) bool {
     for (chart.notes) |n| if (n.ln_open) return true;
     return false;
@@ -731,6 +749,51 @@ test "importing the same scores twice does not double the play counts, local pla
     try std.testing.expectEqual(@as(i64, 6), st.int(0));
     try std.testing.expectEqual(@as(i64, 3), st.int(1));
     try std.testing.expectEqualStrings("LR2", st.text(2));
+}
+
+test "an old database's replays keep the LN mode written inside them" {
+    const d = try Db.open(":memory:", std.testing.allocator, false);
+    defer d.close();
+    try d.exec("CREATE TABLE score(sha256 TEXT PRIMARY KEY, clear INTEGER DEFAULT 0, ex INTEGER DEFAULT 0, pg INTEGER DEFAULT 0, gr INTEGER DEFAULT 0, gd INTEGER DEFAULT 0, bd INTEGER DEFAULT 0, pr INTEGER DEFAULT 0, ms INTEGER DEFAULT 0, max_combo INTEGER DEFAULT 0, min_bp INTEGER DEFAULT 2147483647, playcount INTEGER DEFAULT 0, clearcount INTEGER DEFAULT 0, date INTEGER DEFAULT 0, source TEXT DEFAULT ''); CREATE TABLE replay(id INTEGER PRIMARY KEY, sha256 TEXT, date INTEGER, ex INTEGER, clear INTEGER, data BLOB)");
+    for ([_]core.options.LnMode{ .ln, .cn, .hcn }, 1..) |mode, id| {
+        const bytes = try core.replay.encode(std.testing.allocator, .{ .ln_mode = mode, .random = @fromBackingInt(@intCast(1)) });
+        defer std.testing.allocator.free(bytes);
+        const ins = try d.prepare("INSERT INTO replay(id,data) VALUES(?1,?2)");
+        defer ins.deinit();
+        ins.bindInt(1, @intCast(id));
+        ins.bindBlob(2, bytes);
+        _ = try ins.step();
+    }
+    try d.exec("INSERT INTO replay(id) VALUES(4)");
+    try initSchema(d);
+    const st = try d.prepare("SELECT ln_mode FROM replay ORDER BY id");
+    defer st.deinit();
+    for ([_]i64{ 0, 1, 2, 0 }) |want| {
+        try std.testing.expect(try st.step());
+        try std.testing.expectEqual(want, st.int(0));
+    }
+}
+
+test "a database a beta already migrated gets its replays relabelled, once" {
+    const d = try Db.open(":memory:", std.testing.allocator, false);
+    defer d.close();
+    try d.exec(schema);
+    const bytes = try core.replay.encode(std.testing.allocator, .{ .sha256 = @splat('a'), .ln_mode = .hcn, .events = &.{} });
+    defer std.testing.allocator.free(bytes);
+    const ins = try d.prepare("INSERT INTO replay(id,data,ln_mode) VALUES(1,?1,0)");
+    defer ins.deinit();
+    ins.bindBlob(1, bytes);
+    _ = try ins.step();
+    try initSchema(d);
+    const read = try d.prepare("SELECT ln_mode FROM replay");
+    defer read.deinit();
+    try std.testing.expect(try read.step());
+    try std.testing.expectEqual(@as(i64, 2), read.int(0));
+    read.reset();
+    try d.exec("UPDATE replay SET ln_mode=1");
+    try initSchema(d);
+    try std.testing.expect(try read.step());
+    try std.testing.expectEqual(@as(i64, 1), read.int(0));
 }
 
 test "an old database keeps its scores as LN plays, and each LN mode has its own best" {

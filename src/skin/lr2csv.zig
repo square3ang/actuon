@@ -15,6 +15,7 @@ const Parser = struct {
     images: std.ArrayList(?[]const u8) = .empty,
     /// #LR2FONT in file order, null where one would not load: SRC_TEXT counts them.
     fonts: std.ArrayList(?*bitfont.BitmapFont) = .empty,
+    fonts_loaded: u32 = 0,
     objects: std.ArrayList(m.Object) = .empty,
     keys: std.ArrayList(std.ArrayList(m.Key)) = .empty,
     current: ?usize = null,
@@ -269,7 +270,7 @@ fn line(p: *Parser, raw: []const u8) anyerror!void {
         try p.images.append(p.a, if (str.len > 1) resolve(p, str[1]) else null);
     } else if (eq(cmd, "LR2FONT")) {
         // shortcut: only unpacked .lr2font files, as in beatoraja; a skin's encrypted .dxa archives get the built-in font.
-        try p.fonts.append(p.a, if (str.len > 1) if (resolve(p, str[1])) |path| bitfont.load(p.a, path) else null else null);
+        try p.fonts.append(p.a, if (str.len > 1) if (resolve(p, str[1])) |path| bitfont.loadCapped(p.a, path, &p.fonts_loaded) else null else null);
     } else if (eq(cmd, "SRC_IMAGE")) {
         p.current = null;
         try begin(p, runtimeImage(v[2]) orelse .{ .kind = .image, .src = srcOf(v) });

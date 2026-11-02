@@ -15,6 +15,8 @@ const App = @import("app.zig").App;
 
 /// A room's thread can outlive the game's allocator, when the game quits with a request still hanging.
 const room_gpa = std.heap.smp_allocator;
+/// How long the result waits for scores that may never come, from a player who quit or was refused.
+const winner_wait_ms = 30_000;
 
 pub const State = struct {
     room: ?*room_mod.Room = null,
@@ -29,6 +31,10 @@ pub const State = struct {
     chart_checked: [64]u8 = @splat(0),
     /// In a round started here, from loading to the result screen.
     in_round: bool = false,
+    /// When this round's song starts. The view's clock moves as soon as the host starts another.
+    start_tick: u64 = 0,
+    /// When this round's result screen opened, 0 before it.
+    result_at: u64 = 0,
     message: []const u8 = "",
     report: room_mod.Report = .{},
 };
@@ -141,15 +147,17 @@ pub fn tick(a: *App) void {
     const r = v.room orelse return;
     v.view = r.snapshot();
     checkChart(a);
-    v.report.round = v.view.round;
+    // Not the room's round: one skipped here must not take the last round's score, or a song played alone.
+    v.report.round = v.played_round;
     v.report.has_chart = v.has_chart;
-    if (a.scene == .play) if (a.session) |s| {
+    if (v.in_round and a.scene == .play) if (a.session) |s| {
         const snap = s.snapshot();
         v.report.ex = snap.score.exScore();
         v.report.judged = snap.score.passed;
         v.report.gauge = snap.gauge;
     };
     if (v.in_round) v.report.done = a.scene == .result;
+    if (v.in_round and a.scene == .result and v.result_at == 0) v.result_at = c.SDL_GetTicks();
     r.setReport(v.report);
     if (a.scene == .select) {
         if (v.in_round) {
@@ -161,9 +169,18 @@ pub fn tick(a: *App) void {
     }
 }
 
+/// The song takes the keyboard from whatever was open over song select.
+fn closeOverSelect(a: *App) void {
+    a.practice.open = false;
+    a.sel.searching = false;
+    a.stopText();
+}
+
 fn startRound(a: *App) void {
     const v = &a.versus;
     v.played_round = v.view.start_round;
+    v.report = .{};
+    v.message = "";
     if (c.SDL_GetTicks() >= v.view.start_tick) {
         v.message = tr("That round has already started");
         return;
@@ -181,7 +198,9 @@ fn startRound(a: *App) void {
     const song = db_mod.readSong(tmp.allocator(), st) catch return;
     v.open = false;
     v.in_round = true;
-    v.report = .{};
+    v.start_tick = v.view.start_tick;
+    v.result_at = 0;
+    closeOverSelect(a);
     select.startVersus(a, song, v.view.seed);
     a.skin_state.versus = &v.view;
 }
@@ -271,7 +290,7 @@ pub fn drawResult(a: *App) void {
     var order: [room_mod.max_players]*const room_mod.Player = undefined;
     const list = sorted(&v.view, &order);
     g.panel(x, y, 330 * u, 34 * u + row_h * @as(f32, @floatFromInt(list.len)), "VERSUS");
-    const top = winner(list);
+    const top = winner(list, v.result_at != 0 and c.SDL_GetTicks() - v.result_at >= winner_wait_ms);
     for (list, 0..) |p, i| {
         const ry = y + 26 * u + row_h * @as(f32, @floatFromInt(i));
         const col = if (top == p) gfx.amber else if (p.you) gfx.cyan else gfx.white;
@@ -282,9 +301,12 @@ pub fn drawResult(a: *App) void {
     }
 }
 
-/// Only a checked score counts, and nobody has won until everyone's is in or gone.
-fn winner(list: []const *const room_mod.Player) ?*const room_mod.Player {
+/// Only a checked score counts, and nobody has won until everyone's is in or `waited_out`.
+fn winner(list: []const *const room_mod.Player, waited_out: bool) ?*const room_mod.Player {
     var best: ?*const room_mod.Player = null;
+    if (!waited_out) for (list) |p| {
+        if (p.has_chart and p.final_ex == null) return null;
+    };
     for (list) |p| {
         const ex = p.final_ex orelse continue;
         if (best == null or ex > best.?.final_ex.?) best = p;
@@ -319,7 +341,7 @@ pub fn draw(a: *App) void {
         .lost => _ = g.text(tr("Connection to the room was lost"), x + 24 * u, body, g.scaled(16), gfx.amber),
         .joined => drawRoom(a, x, body, w),
     }
-    g.textCentered(v.message, x + w / 2, y + h - 52 * u, g.scaled(14), gfx.amber);
+    g.textCentered(if (v.view.order_failed) tr("The room did not take that") else v.message, x + w / 2, y + h - 52 * u, g.scaled(14), gfx.amber);
     g.textCentered(tr("ESC: leave"), x + w / 2, y + h - 28 * u, g.scaled(12), gfx.dim);
 }
 
@@ -348,9 +370,9 @@ pub fn drawCountdown(a: *App) void {
     const v = &a.versus;
     if (!v.in_round) return;
     const now = c.SDL_GetTicks();
-    if (now >= v.view.start_tick) return;
+    if (now >= v.start_tick) return;
     var buf: [16]u8 = undefined;
-    a.g.textCentered(std.fmt.bufPrint(&buf, "{d}", .{(v.view.start_tick - now) / 1000 + 1}) catch "", a.g.w / 2, a.g.h * 0.2, a.g.scaled(72), gfx.white);
+    a.g.textCentered(std.fmt.bufPrint(&buf, "{d}", .{(v.start_tick - now) / 1000 + 1}) catch "", a.g.w / 2, a.g.h * 0.2, a.g.scaled(72), gfx.white);
 }
 
 test "the opponent is the best other player, and only a checked score wins" {
@@ -362,10 +384,12 @@ test "the opponent is the best other player, and only a checked score wins" {
     var order: [room_mod.max_players]*const room_mod.Player = undefined;
     const list = sorted(&v, &order);
     try std.testing.expectEqual(&v.players[1], list[0]);
-    v.players[0].final_ex = null;
-    try std.testing.expectEqual(&v.players[1], winner(list).?);
+    try std.testing.expectEqual(&v.players[1], winner(list, false).?);
+    v.players[2].has_chart = true;
+    try std.testing.expect(winner(list, false) == null);
+    try std.testing.expectEqual(&v.players[1], winner(list, true).?);
     v.players[1].final_ex = null;
-    try std.testing.expect(winner(list) == null);
+    try std.testing.expect(winner(list, true) == null);
     v.count = 1;
     try std.testing.expect(opponent(&v) == null);
 }
@@ -386,6 +410,16 @@ test "a skin reading the versus numbers replaces the board, and they read the ro
     try std.testing.expectEqual(@as(?i64, 3), ctx.num(ctx.ud, skin_model.versus_judged));
     try std.testing.expect(ctx.opt(ctx.ud, skin_model.versus_present));
     try std.testing.expect(!ctx.opt(ctx.ud, skin_model.versus_present + 1));
+}
+
+test "a round closes what was open over song select" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.practice.open = true;
+    a.sel.searching = true;
+    a.startText("x");
+    closeOverSelect(a);
+    try std.testing.expect(!a.practice.open and !a.sel.searching and !a.text_active);
 }
 
 test "the room screen needs a sign-in, and closes without a room" {

@@ -71,7 +71,8 @@ pub const Practice = struct {
 };
 
 fn scaled(t: i64, freq: u32) i64 {
-    return @divTrunc(t * 100, @as(i64, freq));
+    // Saturating: a chart's times are untrusted, and a parser allows far more than a song lasts.
+    return @divTrunc(t *| 100, @as(i64, freq));
 }
 
 /// Leaves only the section's notes to judge, their sounds still playing, and moves every time to the new speed.
@@ -285,8 +286,7 @@ pub const Session = struct {
         _ = loadWorker(&job);
         for (threads) |t| if (t != null) c.SDL_WaitThread(t, null);
 
-        // A chart can stop placing notes long before its music does: play on until the sound ends.
-        chart.last_time_us = @max(chart.last_time_us, chartAudioEnd(&chart, samples, engine.rate));
+        chart.last_time_us = playEnd(&chart, samples, engine.rate, params.practice != null);
         const sched = try buildSchedule(gpa, &chart, engine);
         errdefer gpa.free(sched);
         const sim = try Sim.create(gpa, &chart, .{ .gauge = params.gauge, .autoplay = params.autoplay, .gas = params.gas });
@@ -330,7 +330,7 @@ pub const Session = struct {
 
     pub fn start(s: *Session) void {
         input.clear();
-        const first = s.params.start_us - (if (s.params.start_us > 0) @as(i64, 0) else preroll_us);
+        const first = firstUs(s.params.start_us);
         // Starting mid-chart is a preview: the sim catches up silently, the same way a seek does.
         if (s.params.start_us > 0) {
             s.sim.advance(s.params.start_us);
@@ -424,7 +424,7 @@ pub const Session = struct {
                 .judge => {
                     snap.hits[snap.hit_seq % hit_ring] = .{ .at_us = now, .fast_us = o.fast_us, .note = o.note, .judge = o.judge };
                     snap.hit_seq +%= 1;
-                    if (s.timed_hits.items.len < s.timed_hits.capacity) s.timed_hits.appendAssumeCapacity(.{ .fast_us = o.fast_us, .judge = o.judge });
+                    if (isTimedHit(o.judge) and s.timed_hits.items.len < s.timed_hits.capacity) s.timed_hits.appendAssumeCapacity(.{ .fast_us = o.fast_us, .judge = o.judge });
                     snap.last_judge = o.judge;
                     snap.last_fast_us = o.fast_us;
                     snap.judge_at_us = now;
@@ -475,13 +475,16 @@ pub const Session = struct {
         s.sim.destroy();
         s.sim = fresh;
         s.sim.notes = s.chart.notes;
-        s.sim.advance(s.params.start_us);
+        if (s.params.start_us > 0) s.sim.advance(s.params.start_us);
         var sink: [256]core.sim.Out = undefined;
         while (s.sim.drain(&sink) > 0) {}
         s.events.clearRetainingCapacity();
         s.timed_hits.clearRetainingCapacity();
         s.last_event_t = std.math.minInt(i64);
-        s.engine.seek(s.engine.usToFrame(s.params.start_us));
+        const first = firstUs(s.params.start_us);
+        s.engine.seek(s.engine.usToFrame(first));
+        // Paused, the clock stays here: at the old time the new sim would miss every note up to it.
+        s.pause_t.store(first, .release);
         snap.* = .{};
     }
 
@@ -556,6 +559,23 @@ pub const Session = struct {
     }
 };
 
+/// A POOR has no timing, and pressing at nothing could otherwise use up the room kept for real hits.
+fn isTimedHit(judge: u8) bool {
+    return judge < 4;
+}
+
+/// Where the audio clock begins: a play from the top gets a lead-in, one from mid-chart has its own.
+fn firstUs(start_us: i64) i64 {
+    return start_us - (if (start_us > 0) @as(i64, 0) else preroll_us);
+}
+
+/// A chart can stop placing notes long before its music does: play on until the sound ends.
+/// A practice section ends where it was set, whatever the sound does.
+fn playEnd(chart: *const Chart, samples: []const decode.Sample, rate: u32, practice: bool) i64 {
+    if (practice) return chart.last_time_us;
+    return @max(chart.last_time_us, chartAudioEnd(chart, samples, rate));
+}
+
 /// Song time at which a sound started at `time_us` stops playing.
 fn soundEnd(time_us: i64, wav: i32, start_us: i64, dur_us: i64, samples: []const decode.Sample, rate: u32) i64 {
     if (wav < 0 or wav >= samples.len) return time_us;
@@ -614,6 +634,30 @@ test "a practice section keeps its notes, hands the rest to the music and moves 
     try std.testing.expectEqual(@as(f64, 240), chart.bpm);
     try std.testing.expectEqual(@as(i32, 50), chart.judgerank);
     for (chart.bg[1..], chart.bg[0 .. chart.bg.len - 1]) |b, prev| try std.testing.expect(b.time_us >= prev.time_us);
+}
+
+test "a practice section ends where it was set, and every loop has a lead-in from the top" {
+    var data: [8000]f32 = @splat(0);
+    const samples = [_]decode.Sample{.{ .data = &data }};
+    var chart: Chart = undefined;
+    chart.last_time_us = 1000;
+    var bg = [_]core.types.BgSound{.{ .time_us = 0, .wav = 0, .wav_start_us = 0, .wav_dur_us = 0 }};
+    chart.bg = &bg;
+    chart.notes = &.{};
+    try std.testing.expectEqual(@as(i64, 1000), playEnd(&chart, &samples, 4000, true));
+    try std.testing.expectEqual(@as(i64, 1_000_000), playEnd(&chart, &samples, 4000, false));
+    try std.testing.expectEqual(-preroll_us, firstUs(0));
+    try std.testing.expectEqual(@as(i64, 5), firstUs(5));
+}
+
+test "only a hit with a timing is kept for the graph" {
+    try std.testing.expect(isTimedHit(3));
+    try std.testing.expect(!isTimedHit(4));
+    try std.testing.expect(!isTimedHit(5));
+}
+
+test "a hostile chart's time does not overflow practice scaling" {
+    try std.testing.expectEqual(@divTrunc(std.math.maxInt(i64), @as(i64, 50)), scaled(std.math.maxInt(i64) / 2, 50));
 }
 
 test "sound end honours slices and missing samples" {

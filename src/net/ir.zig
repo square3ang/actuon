@@ -179,6 +179,20 @@ fn bearer(a: std.mem.Allocator, token: []const u8) ![]const std.http.Header {
     return hs;
 }
 
+/// A whole room finishes at once and the server checks few replays at a time, and a round has no later sync.
+fn sendScore(client: *std.http.Client, a: std.mem.Allocator, url: []const u8, replay: []const u8, hs: []const std.http.Header, room: []const u8) !http.Response {
+    var tries: u32 = 0;
+    while (true) : (tries += 1) {
+        const r = try http.send(client, a, .POST, url, replay, hs);
+        if (!shouldRetryScore(r.status, room, tries)) return r;
+        c.SDL_Delay(score_retry_ms);
+    }
+}
+
+fn shouldRetryScore(status: u16, room: []const u8, tries: u32) bool {
+    return status == 503 and room.len > 0 and tries < score_retries;
+}
+
 /// Submit, and when the server has never seen this chart (428) upload it and submit again.
 /// `prev_rank` gets the player's place from before this score, when the caller wants it.
 pub fn submit(gpa: std.mem.Allocator, client: *std.http.Client, base: []const u8, token: []const u8, sha: []const u8, chart_path: []const u8, replay: []const u8, room: []const u8, prev_rank: ?*i64) !u16 {
@@ -190,13 +204,13 @@ pub fn submit(gpa: std.mem.Allocator, client: *std.http.Client, base: []const u8
     const hs = try bearer(a, token);
     const format = chartFormat(chart_path);
     const url = try std.fmt.allocPrint(a, "{s}/scores/{s}?format={d}{s}{s}", .{ base, sha, format, if (room.len > 0) "&room=" else "", room });
-    var r = try http.send(client, a, .POST, url, replay, hs);
+    var r = try sendScore(client, a, url, replay, hs, room);
     if (r.status == 428) {
         const chart = try fs.readAlloc(a, chart_path, 16 << 20);
         const put = try std.fmt.allocPrint(a, "{s}/charts/{s}?format={d}", .{ base, sha, format });
         const up = try http.send(client, a, .PUT, put, chart, hs);
         if (up.status != 200) return up.status;
-        r = try http.send(client, a, .POST, url, replay, hs);
+        r = try sendScore(client, a, url, replay, hs, room);
     }
     if (prev_rank) |out| if (r.status == 200) {
         const v = std.json.parseFromSliceLeaky(struct { prev_rank: i64 = 0 }, a, r.body, .{ .ignore_unknown_fields = true }) catch return r.status;
@@ -491,6 +505,8 @@ fn pendingClaims(a: std.mem.Allocator, d: db_mod.Db, mine: []const MyScore) ![]M
 
 /// Fits the server's 1 MiB JSON limit, at about 150 bytes a score.
 const claim_batch = 4096;
+const score_retries = 30;
+const score_retry_ms = 1000;
 
 fn sendClaims(s: *Sync, a: std.mem.Allocator, claims: []const MyScore) !void {
     const url = try std.fmt.allocPrint(a, "{s}/me/claims", .{s.base});
@@ -984,4 +1000,11 @@ test "rows" {
     const t = try formatRow(a, w.value, 1);
     defer a.free(t);
     try std.testing.expectEqualStrings("1. x   EX 5   BP 1   (unverified)", t);
+}
+
+test "a score in a room waits out a busy server, for a while" {
+    try std.testing.expect(shouldRetryScore(503, "ABC234", 0));
+    try std.testing.expect(!shouldRetryScore(503, "", 0));
+    try std.testing.expect(!shouldRetryScore(200, "ABC234", 0));
+    try std.testing.expect(!shouldRetryScore(503, "ABC234", score_retries));
 }
