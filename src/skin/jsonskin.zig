@@ -315,6 +315,10 @@ const Loader = struct {
         out.blend = @intCast(std.math.clamp(int(d.get("blend"), 1), 0, 255));
         out.center = @intCast(std.math.clamp(int(d.get("center"), 0), 0, 9));
         out.stretch = int(d.get("stretch"), -1);
+        if (d.get("mouseRect")) |mr| if (mr == .object) {
+            const o = mr.object;
+            out.mouse_rect = .{ @floatFromInt(int(o.get("x"), 0)), @floatFromInt(int(o.get("y"), 0)), @floatFromInt(int(o.get("w"), 0)), @floatFromInt(int(o.get("h"), 0)) };
+        };
         var ops: std.ArrayList(i32) = .empty;
         for (arr(d.get("op"))) |x| try ops.append(l.a, int(x, 0));
         out.ops = ops.items;

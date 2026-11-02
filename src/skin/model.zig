@@ -117,6 +117,8 @@ pub const Object = struct {
     lua_draw: i32 = 0,
     lua_value: i32 = 0,
     lua_timer: i32 = 0,
+    /// Drawn only while the mouse is in this rectangle: x, y, w, h from the object's bottom-left, bottom-up.
+    mouse_rect: ?[4]f32 = null,
 };
 
 pub const NoteSet = struct {
@@ -224,6 +226,21 @@ test "slider tracks run from the resting place" {
     try std.testing.expectEqual(@as(?f32, 0.5), sliderValue(0, 100, k, 110, 150));
     try std.testing.expectEqual(@as(?f32, 0.25), sliderValue(1, 100, k, 125, 210));
     try std.testing.expectEqual(@as(?f32, 0.5), sliderValue(3, 100, k, 50, 210));
+}
+
+/// Whether a point in skin pixels is in a mouseRect, given bottom-up from the drawn object's bottom-left.
+fn mouseIn(mr: [4]f32, k: Key, x: f32, y: f32) bool {
+    const left = k.x + mr[0];
+    const top = k.y + k.h - mr[1] - mr[3];
+    return x >= left and x < left + mr[2] and y >= top and y < top + mr[3];
+}
+
+test "a mouseRect counts up from the object's bottom-left" {
+    const k: Key = .{ .x = 100, .y = 200, .w = 50, .h = 40 };
+    try std.testing.expect(mouseIn(.{ 0, 0, 50, 40 }, k, 120, 220));
+    try std.testing.expect(!mouseIn(.{ 0, 0, 50, 40 }, k, 160, 220));
+    try std.testing.expect(mouseIn(.{ 0, 0, 50, 10 }, k, 120, 235));
+    try std.testing.expect(!mouseIn(.{ 0, 0, 50, 10 }, k, 120, 205));
 }
 
 fn timerStart(ctx: *const Ctx, id: i32) i64 {
@@ -579,6 +596,7 @@ pub const Renderer = struct {
         if (st < 0) return null;
         var k = sample(o.keys, r.ctx.now_ms - st, o.loop) orelse return null;
         if (o.lifted) k.y -= r.ctx.lift_px;
+        if (o.mouse_rect) |mr| if (!mouseIn(mr, k, r.g.mx / r.sx, r.g.my / r.sy)) return null;
         return k;
     }
 
