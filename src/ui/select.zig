@@ -833,7 +833,8 @@ fn updatePreview(a: *App) void {
         s.preview_since = now;
         s.preview_checked = false;
     }
-    if (!s.preview_checked and now - s.preview_since >= 300) {
+    // Longer than a held key's repeat, so scrolling still never touches the disk.
+    if (!s.preview_checked and now - s.preview_since >= 150) {
         s.preview_checked = true;
         s.preview_len = 0;
         var tmp = std.heap.ArenaAllocator.init(a.gpa);

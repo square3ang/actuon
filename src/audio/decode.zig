@@ -67,6 +67,33 @@ fn decodeRaw(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8) !Raw {
     return error.UndecodableAudio;
 }
 
+/// How long a sound lasts, from its header alone. Null when only decoding can tell, as for mp3 and flac.
+pub fn lengthUs(bytes: []const u8) ?i64 {
+    var w: c.drwav = undefined;
+    if (c.drwav_init_memory(&w, bytes.ptr, bytes.len, null) != 0) {
+        defer _ = c.drwav_uninit(&w);
+        return usOf(w.totalPCMFrameCount, w.sampleRate);
+    }
+    return oggLengthUs(bytes);
+}
+
+/// The last page's granule position over the rate in the first packet. Opening the stream with
+/// stb_vorbis would also build its codebooks, which costs more than a short sound's decode.
+fn oggLengthUs(bytes: []const u8) ?i64 {
+    if (bytes.len < 28 or !std.mem.eql(u8, bytes[0..4], "OggS")) return null;
+    const id = 27 + @as(usize, bytes[26]);
+    if (bytes.len < id + 16 or !std.mem.eql(u8, bytes[id .. id + 7], "\x01vorbis")) return null;
+    const rate = std.mem.readInt(u32, bytes[id + 12 ..][0..4], .little);
+    const last = std.mem.lastIndexOf(u8, bytes, "OggS") orelse return null;
+    if (bytes.len < last + 14) return null;
+    return usOf(std.mem.readInt(u64, bytes[last + 6 ..][0..8], .little), rate);
+}
+
+fn usOf(frames: u64, rate: u32) ?i64 {
+    if (frames == 0 or rate == 0) return null;
+    return @intCast(@min(@as(u128, frames) * 1_000_000 / rate, std.math.maxInt(i64)));
+}
+
 /// Cubic Hermite interpolation: much cheaper than a windowed sinc at load, and keysounds are short.
 fn hermite(x0: f32, x1: f32, x2: f32, x3: f32, t: f32) f32 {
     const a = -0.5 * x0 + 1.5 * x1 - 1.5 * x2 + 0.5 * x3;
@@ -75,16 +102,63 @@ fn hermite(x0: f32, x1: f32, x2: f32, x3: f32, t: f32) f32 {
     return ((a * t + b) * t + cc) * t + x1;
 }
 
-pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8, out_rate: u32) !Sample {
-    const raw = try decodeRaw(gpa, bytes, name);
-    defer switch (raw.owner) {
+fn freeRaw(gpa: std.mem.Allocator, raw: Raw) void {
+    switch (raw.owner) {
         .dr => c.drwav_free(raw.samples.ptr, null),
         .gpa => gpa.free(raw.samples),
-    };
+    }
+}
+
+pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8, out_rate: u32) !Sample {
+    const raw = try decodeRaw(gpa, bytes, name);
+    defer freeRaw(gpa, raw);
+    return resample(gpa, raw.samples, raw.channels, raw.rate, out_rate);
+}
+
+/// `len_us` of the sound from `from_us`, so the unheard rest of a long track is never resampled,
+/// nor for Ogg decoded. Empty when the span lies past the end.
+pub fn decodeSpan(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8, out_rate: u32, from_us: i64, len_us: i64) !Sample {
+    if (oggSpan(gpa, bytes, from_us, len_us)) |span| {
+        defer freeRaw(gpa, span);
+        return resample(gpa, span.samples, span.channels, span.rate, out_rate);
+    } else |e| if (e != error.NotOgg) return e;
+    const raw = try decodeRaw(gpa, bytes, name);
+    defer freeRaw(gpa, raw);
     const ch = raw.channels;
-    const in_frames = raw.samples.len / ch;
-    if (raw.rate == 0) return error.UndecodableAudio;
-    const ratio = @as(f64, @floatFromInt(raw.rate)) / @as(f64, @floatFromInt(out_rate));
+    const frames = raw.samples.len / ch;
+    const a = @min(framesAt(from_us, raw.rate), frames);
+    const b = @min(a + framesAt(len_us, raw.rate), frames);
+    return resample(gpa, raw.samples[a * ch .. b * ch], ch, raw.rate, out_rate);
+}
+
+fn framesAt(us: i64, rate: u32) usize {
+    return @intCast(@min(@as(u128, @intCast(@max(us, 0))) * rate / 1_000_000, max_seconds * @as(u128, rate)));
+}
+
+/// Seeks instead of decoding the start. NotOgg sends any other file to the full decoders.
+fn oggSpan(gpa: std.mem.Allocator, bytes: []const u8, from_us: i64, len_us: i64) !Raw {
+    if (!std.mem.startsWith(u8, bytes, "OggS") or bytes.len > std.math.maxInt(c_int)) return error.NotOgg;
+    var err: c_int = 0;
+    const v = c.stb_vorbis_open_memory(bytes.ptr, @intCast(bytes.len), &err, null) orelse return error.UndecodableAudio;
+    defer c.stb_vorbis_close(v);
+    const info = c.stb_vorbis_get_info(v);
+    if (info.channels <= 0 or info.sample_rate == 0) return error.UndecodableAudio;
+    const ch: usize = @intCast(info.channels);
+    const total: usize = c.stb_vorbis_stream_length_in_samples(v);
+    const from = @min(framesAt(from_us, info.sample_rate), total);
+    const n = @min(framesAt(len_us, info.sample_rate), total - from);
+    if (n == 0) return .{ .samples = &.{}, .channels = @intCast(ch), .rate = info.sample_rate, .owner = .gpa };
+    if (from > 0 and c.stb_vorbis_seek(v, @intCast(from)) == 0) return error.UndecodableAudio;
+    const out = try gpa.alloc(f32, n * ch);
+    errdefer gpa.free(out);
+    const got: usize = @intCast(@max(c.stb_vorbis_get_samples_float_interleaved(v, info.channels, out.ptr, @intCast(out.len)), 0));
+    return .{ .samples = try gpa.realloc(out, got * ch), .channels = @intCast(ch), .rate = info.sample_rate, .owner = .gpa };
+}
+
+fn resample(gpa: std.mem.Allocator, samples: []const f32, ch: u32, rate: u32, out_rate: u32) !Sample {
+    const in_frames = samples.len / ch;
+    if (rate == 0) return error.UndecodableAudio;
+    const ratio = @as(f64, @floatFromInt(rate)) / @as(f64, @floatFromInt(out_rate));
     const out_len = @ceil(@as(f64, @floatFromInt(in_frames)) / ratio);
     // A tiny header rate would make a small file resample into gigabytes.
     if (out_len > @as(f64, @floatFromInt(max_seconds * out_rate))) return error.UndecodableAudio;
@@ -96,10 +170,10 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8, out_r
             return s[idx * chn + @min(side, chn - 1)];
         }
     }.f;
-    if (raw.rate == out_rate) {
+    if (rate == out_rate) {
         for (0..out_frames) |i| {
-            out[i * 2] = at(raw.samples, ch, @intCast(i), 0, in_frames);
-            out[i * 2 + 1] = at(raw.samples, ch, @intCast(i), 1, in_frames);
+            out[i * 2] = at(samples, ch, @intCast(i), 0, in_frames);
+            out[i * 2 + 1] = at(samples, ch, @intCast(i), 1, in_frames);
         }
     } else {
         for (0..out_frames) |i| {
@@ -109,7 +183,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8, out_r
             const t: f32 = @floatCast(pos - fl);
             for (0..2) |side| {
                 const s: u32 = @intCast(side);
-                out[i * 2 + side] = hermite(at(raw.samples, ch, p - 1, s, in_frames), at(raw.samples, ch, p, s, in_frames), at(raw.samples, ch, p + 1, s, in_frames), at(raw.samples, ch, p + 2, s, in_frames), t);
+                out[i * 2 + side] = hermite(at(samples, ch, p - 1, s, in_frames), at(samples, ch, p, s, in_frames), at(samples, ch, p + 1, s, in_frames), at(samples, ch, p + 2, s, in_frames), t);
             }
         }
     }
@@ -134,6 +208,18 @@ test "wav decode through resampler keeps duration" {
     const s = try decode(std.testing.allocator, &buf, "x.wav", 48000);
     defer std.testing.allocator.free(s.data);
     try std.testing.expectEqual(@as(usize, 12000), s.frames());
+    try std.testing.expectEqual(@as(?i64, 250_000), lengthUs(&buf));
+    try std.testing.expectEqual(@as(?i64, null), lengthUs("not audio"));
+    // An Ogg stream's length is its last page's granule over the rate, read without decoding.
+    var ogg: [28 + 16 + 14]u8 = @splat(0);
+    @memcpy(ogg[0..4], "OggS");
+    ogg[26] = 1;
+    @memcpy(ogg[28..35], "\x01vorbis");
+    std.mem.writeInt(u32, ogg[40..44], 44100, .little);
+    @memcpy(ogg[44..48], "OggS");
+    std.mem.writeInt(u64, ogg[50..58], 88200, .little);
+    try std.testing.expectEqual(@as(?i64, 2_000_000), lengthUs(&ogg));
+    try std.testing.expectEqual(@as(?i64, null), lengthUs(ogg[0..40]));
     // At 1 Hz the same 4 KB would last 33 minutes and resample into 96 million frames.
     std.mem.writeInt(u32, buf[24..28], 1, .little);
     std.mem.writeInt(u32, buf[28..32], 2, .little);
