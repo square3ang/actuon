@@ -57,20 +57,48 @@ pub const SelectInfo = struct {
     search: []const u8 = "",
     /// Which option panel is open: 0 none, 1 play, 2 assist, 3 detail.
     panel: u8 = 0,
-    /// In beatoraja's image order, for the skin's option buttons.
-    gauge_index: i64 = 0,
-    random_index: i64 = 0,
-    hsfix_index: i64 = 0,
-    autoshift_index: i64 = 0,
-    /// beatoraja's BGA button: 0 on, 2 off (1, AUTO, is not offered).
-    bga_index: i64 = 0,
+    /// The play options the skin's option buttons show.
+    cfg: config.Config = .{},
     mode_index: i64 = 0,
     sort_index: i64 = 0,
-    ln_index: i64 = 0,
     /// Saved replays of the selected chart, and the slot picked among them.
     replays: u8 = 0,
     replay_slot: u8 = 0,
 };
+
+/// The image a beatoraja option button shows, in beatoraja's order for each.
+fn optionButton(cfg: *const config.Config, button: i64) ?i64 {
+    const on = struct {
+        fn f(b: bool) i64 {
+            return @intFromBool(b);
+        }
+    }.f;
+    return switch (button) {
+        40 => cfg.gauge_type,
+        42 => cfg.random,
+        43 => cfg.random2,
+        54 => cfg.double_option,
+        // beatoraja lists off first and adds min BPM last.
+        55 => switch (cfg.hs_fix) {
+            3 => 0,
+            4 => 4,
+            else => cfg.hs_fix + 1,
+        },
+        72 => if (!cfg.bga) 2 else if (cfg.bga_auto) 1 else 0,
+        75 => on(cfg.judge_auto_adjust),
+        78 => cfg.gauge_auto_shift,
+        301...307 => on(config.Assists.flag(&cfg.assist, @intCast(button - 301)).*),
+        308 => cfg.ln_mode,
+        330 => on(cfg.lane_cover_on),
+        331 => on(cfg.lift_on),
+        332 => on(cfg.hidden_on),
+        340 => cfg.judge_algorithm,
+        341 => cfg.gas_floor,
+        342 => on(cfg.hs_auto_adjust),
+        400 => on(cfg.constant),
+        else => null,
+    };
+}
 
 pub const State = struct {
     select: ?SelectInfo = null,
@@ -179,9 +207,9 @@ pub const State = struct {
         st.autoplay = params.autoplay;
         st.replay = params.replay != null;
         st.green_ms = cfg.green_ms;
-        st.cover = cfg.lane_cover;
-        st.lift = cfg.lift;
-        st.hidden = cfg.hidden;
+        st.cover = cfg.coverShown();
+        st.lift = cfg.liftShown();
+        st.hidden = cfg.hiddenShown();
         st.notes = ch.notes;
         st.timelines = ch.timelines;
         st.graph_end_us = if (ch.last_note_us > 0) ch.last_note_us else ch.last_time_us;
@@ -431,15 +459,10 @@ pub const State = struct {
         }.f;
         if (st.select) |se| {
             const secs = @divTrunc(st.length_us, 1_000_000);
+            if (id >= m.button_index) if (optionButton(&se.cfg, id - m.button_index)) |v| return v;
             switch (id) {
                 m.button_index + 11 => return se.mode_index,
-                m.button_index + 308 => return se.ln_index,
                 m.button_index + 12 => return se.sort_index,
-                m.button_index + 40 => return se.gauge_index,
-                m.button_index + 42 => return se.random_index,
-                m.button_index + 55 => return se.hsfix_index,
-                m.button_index + 78 => return se.autoshift_index,
-                m.button_index + 72 => return se.bga_index,
                 71 => return se.ex,
                 76 => return if (se.miss >= 0) se.miss else null,
                 77 => return se.played,
@@ -611,8 +634,9 @@ fn drawNotes(r: *const m.Renderer, s: *Session, view: *play.View, snap: *const S
     const t = snap.time_us - @as(i64, cfg.visual_offset_ms) * 1000;
     if (t < view.last_t) view.first_note = 0; // seeked backwards
     view.last_t = t;
-    const vis_y = play.visibleY(cfg.green_ms, view.refBpm(chart, cfg.hs_fix)) / chart.speedAt(t);
-    const now_y = chart.yAt(t);
+    const aids = s.params.assist.picked;
+    const sc = play.scrollAt(view, chart, cfg, aids, t);
+    drawAssistLines(r, chart, sc, cfg, aids);
     view.first_note = play.skipPastNotes(chart, view.first_note, t);
     const base: m.Key = .{};
     for (chart.notes[view.first_note..], view.first_note..) |note, i| {
@@ -621,22 +645,26 @@ fn drawNotes(r: *const m.Renderer, s: *Session, view: *play.View, snap: *const S
         const lane_h = lane_rect[1] * cfg.openLane();
         // A skin without a hidden cover still hides.
         const hidden_y = if (r.ctx.hidden_px > 0) judge_y - r.ctx.hidden_px else std.math.inf(f32);
-        const px_per_y = lane_h / @as(f32, @floatCast(vis_y));
-        const dy: f32 = @floatCast(note.y - now_y);
         // As beatoraja, nothing falls past the judge line; an LN's head waits on it until the end passes.
         if (note.time_us < t and note.kind != .ln_start) continue;
-        const yy = @min(judge_y - dy * px_per_y, judge_y);
+        const yy = @min(judge_y - sc.share(note.time_us, note.y) * lane_h, judge_y);
         if (yy < -lane_rect[3] and note.kind != .ln_start) {
             if (note.time_us > t + 60_000_000) break;
             continue;
         }
+        if (sc.hidden(note.time_us)) continue;
         var k = base;
         k.x = lane_rect[0];
         k.w = lane_rect[2];
         k.h = lane_rect[3];
         k.y = yy - k.h;
         switch (note.kind) {
-            .normal => if (view.render_state[i] == 0 and yy <= hidden_y) r.blit(&notes.note[note.lane], r.frameOf(&notes.note[note.lane]), k, 1, 0, null),
+            .normal => if (yy <= hidden_y) {
+                // MARK NOTE leaves a hit note's ghost until it reaches the line.
+                if (view.render_state[i] == 0) {
+                    r.blit(&notes.note[note.lane], r.frameOf(&notes.note[note.lane]), k, 1, 0, null);
+                } else if (aids.mark_note) r.g.rect(k.x * r.sx, k.y * r.sy, k.w * r.sx, k.h * r.sy, gfx.white.alpha(70));
+            },
             .mine => if (view.render_state[i] == 0 and yy <= hidden_y) r.blit(&notes.mine[note.lane], r.frameOf(&notes.mine[note.lane]), k, 1, 0, null),
             .ln_start => {
                 if (note.pair < 0) continue;
@@ -645,8 +673,8 @@ fn drawNotes(r: *const m.Renderer, s: *Session, view: *play.View, snap: *const S
                 // line under the body, held or not.
                 if (chart.notes[pair].time_us < t) continue;
                 const active = snap.holding[note.lane] == note.pair;
-                const end_dy: f32 = @floatCast(chart.notes[pair].y - now_y);
-                const end_y = judge_y - end_dy * px_per_y;
+                const end = chart.notes[pair];
+                const end_y = judge_y - sc.share(end.time_us, end.y) * lane_h;
                 const body_bot = @min(if (notes.ln_osu) yy - k.h / 2 else yy - k.h, hidden_y);
                 var b = k;
                 b.y = if (notes.ln_osu) end_y - k.h / 2 else end_y;
@@ -670,6 +698,36 @@ fn drawNotes(r: *const m.Renderer, s: *Session, view: *play.View, snap: *const S
             },
             .ln_end => {},
         }
+    }
+}
+
+/// The JUDGE AREA and BPM GUIDE assists, across every lane the skin places.
+fn drawAssistLines(r: *const m.Renderer, chart: *const core.types.Chart, sc: play.Scroll, cfg: *const config.Config, aids: config.Assists) void {
+    if (!aids.judge_area and !aids.bpm_guide) return;
+    var left = std.math.inf(f32);
+    var right = -std.math.inf(f32);
+    var base: f32 = 0;
+    for (r.s.notes.lane) |lane| if (lane) |rect| {
+        left = @min(left, rect[0]);
+        right = @max(right, rect[0] + rect[2]);
+        base = rect[1];
+    };
+    if (left >= right) return;
+    const judge_y = base - r.ctx.lift_px;
+    const lane_h = base * cfg.openLane();
+    const g = r.g;
+    if (aids.judge_area) {
+        const area = play.judgeAreaShare(chart, sc);
+        const y0 = judge_y - area[1] * lane_h;
+        g.rect(left * r.sx, y0 * r.sy, (right - left) * r.sx, (judge_y - area[0] * lane_h - y0) * r.sy, gfx.cyan.alpha(40));
+    }
+    if (!aids.bpm_guide) return;
+    for (chart.timelines, 0..) |tl, i| {
+        if (!play.bpmChanges(chart, i) or tl.time_us < sc.t or sc.hidden(tl.time_us)) continue;
+        const yy = judge_y - sc.share(tl.time_us, tl.y) * lane_h;
+        if (yy < 0) break;
+        g.rect(left * r.sx, yy * r.sy, (right - left) * r.sx, 2, gfx.amber);
+        g.fmt(left * r.sx + 4, yy * r.sy - g.scaled(12) - 4, g.scaled(12), gfx.amber, "{d:.0}", .{tl.bpm});
     }
 }
 
@@ -811,7 +869,9 @@ pub fn drawPlay(g: *gfx.Gfx, skin: *m.Skin, st: *State, s: *Session, view: *play
     const snap = s.snapshotInto(view.render_state);
     st.bpm = s.chart.bpmAt(snap.time_us);
     st.green_ms = cfg.green_ms;
-    st.cover = cfg.lane_cover;
+    st.cover = cfg.coverShown();
+    st.lift = cfg.liftShown();
+    st.hidden = cfg.hiddenShown();
     st.update(snap);
     const ctx = st.ctx(skin, st.sceneMs(snap.time_us));
     skin_mod.setLuaCtx(&ctx);
@@ -990,7 +1050,7 @@ test "song select tells the skin about the IR" {
 }
 
 test "song select tells the skin its panel and options" {
-    var st: State = .{ .select = .{ .panel = 2, .random_index = 3, .autoshift_index = 4, .bga_index = 2 } };
+    var st: State = .{ .select = .{ .panel = 2, .cfg = .{ .random = 3, .gauge_auto_shift = 4, .bga = false, .hs_fix = 3, .assist = .{ .no_mine = true }, .gas_floor = 2 } } };
     try std.testing.expect(State.opt(&st, 22));
     st.select.?.replays = 2;
     st.select.?.replay_slot = 1;
@@ -1002,6 +1062,9 @@ test "song select tells the skin its panel and options" {
     try std.testing.expectEqual(@as(?i64, 3), State.num(&st, m.button_index + 42));
     try std.testing.expectEqual(@as(?i64, 4), State.num(&st, m.button_index + 78));
     try std.testing.expectEqual(@as(?i64, 2), State.num(&st, m.button_index + 72));
+    try std.testing.expectEqual(@as(?i64, 0), State.num(&st, m.button_index + 55));
+    try std.testing.expectEqual(@as(?i64, 1), State.num(&st, m.button_index + 307));
+    try std.testing.expectEqual(@as(?i64, 2), State.num(&st, m.button_index + 341));
     st.select.?.sort_index = 5;
     st.select.?.mode_index = 2;
     try std.testing.expectEqual(@as(?i64, 5), State.num(&st, m.button_index + 12));

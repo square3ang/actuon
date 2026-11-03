@@ -80,6 +80,7 @@ pub const State = struct {
     leave_at: u64 = 0,
     ir_used: bool = false,
     paused: bool = false,
+    assisted: bool = false,
     board: ?*ir.Board = null,
 };
 
@@ -92,7 +93,7 @@ pub fn dropBoard(a: *App) void {
 /// A score and its replay land together, or the IR would be asked to verify a score with nothing behind it.
 fn saveLocal(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, bytes: []const u8) !void {
     const r = &a.res;
-    const ln_mode = @backingInt(s.params.ln_mode);
+    const ln_mode = @backingInt(s.params.rec.ln_mode);
     try a.db.exec("BEGIN IMMEDIATE");
     {
         const look = try a.db.prepare("SELECT ex, clear FROM score WHERE sha256=?1 AND mode=?2");
@@ -147,6 +148,14 @@ pub fn capture(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, nat
     r.timing_shown = false;
     const finished = natural and !snap.failed;
     r.clear = s.sim.clear(finished);
+    r.assisted = s.params.assist.any();
+    // beatoraja's lamps for a cleared assisted play.
+    if (r.assisted and @backingInt(r.clear) >= @backingInt(core.types.Clear.light_assist_easy)) {
+        r.clear = if (s.params.assist.judging()) .assist_easy else .light_assist_easy;
+    }
+    if (a.cfg.judge_auto_adjust and natural and !s.params.autoplay and s.params.replay == null and s.params.practice == null) {
+        if (r.timing.suggestedOffsetMs(a.cfg.judge_offset_ms)) |ms| a.cfg.judge_offset_ms = ms;
+    }
     r.recorded = false;
     r.save_failed = false;
     r.prev_ex = 0;
@@ -160,7 +169,8 @@ pub fn capture(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, nat
     r.skin_fresh = false;
     r.music_slot = a.sfx_slot;
     a.sfx(if (r.clear == .failed) .fail else .clear);
-    if (!a.record or s.was_paused) return;
+    // shortcut: an assisted play keeps no lamp or replay, as a replay cannot carry assists; record them if players want assist lamps.
+    if (!a.record or s.was_paused or r.assisted) return;
 
     const bytes = s.replayBytes() catch |e| {
         std.log.err("replay encoding failed: {t}", .{e});
@@ -176,7 +186,7 @@ pub fn capture(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, nat
         return;
     };
     // A play left early would rank on the server as if it had reached the end. The server ranks LN plays only.
-    if (natural and s.params.ln_mode == .ln and a.cfg.ir_url.len > 0 and a.cfg.ir_token.len > 0 and
+    if (natural and s.params.rec.ln_mode == .ln and a.cfg.ir_url.len > 0 and a.cfg.ir_token.len > 0 and
         irSends(a.cfg.ir_send_failed, r.clear, a.versus.in_round)) r.board = ir.startUpload(a.gpa, a.cfg.ir_url, a.cfg.ir_token, &s.chart.sha256, s.params.path, bytes, if (a.versus.in_round) &a.versus.view.code else "");
     r.ir_used = r.board != null;
 }
@@ -288,6 +298,8 @@ fn drawExPanel(a: *App, ease: f32, ex: u32) void {
         g.fmt(44 * u, 574 * u, g.scaled(14), if (delta >= 0) gfx.cyan else gfx.dim, "BEST {d}  {s}{d}", .{ r.prev_ex, if (delta >= 0) "+" else "-", mag });
     } else if (r.paused) {
         _ = g.text(tr("NOT RECORDED: PAUSED"), 44 * u, 574 * u, g.scaled(14), gfx.amber);
+    } else if (r.assisted) {
+        _ = g.text(tr("NOT RECORDED: ASSIST"), 44 * u, 574 * u, g.scaled(14), gfx.amber);
     } else if (r.save_failed) {
         _ = g.text(tr("NOT RECORDED: SAVE FAILED"), 44 * u, 574 * u, g.scaled(14), gfx.amber);
     } else _ = g.text(tr("NOT RECORDED"), 44 * u, 574 * u, g.scaled(14), gfx.dim);
@@ -433,6 +445,29 @@ test "a failed play stays off the IR when asked, except in versus" {
     try std.testing.expect(!irSends(false, .failed, false));
     try std.testing.expect(irSends(false, .easy, false));
     try std.testing.expect(irSends(false, .failed, true));
+}
+
+test "an assisted clear gets an assist lamp and saves nothing" {
+    const a = try testing.open();
+    defer testing.close(a);
+    const gpa = std.testing.allocator;
+    // Only what capture reads.
+    var s: session_mod.Session = undefined;
+    s.gpa = gpa;
+    s.params = .{ .path = "", .assist = .{ .picked = .{ .no_mine = true } } };
+    s.was_paused = false;
+    s.timed_hits = .empty;
+    s.chart = try core.bms.parse(gpa, "#BPM 120\n#WAV01 a.wav\n#00111:01\n", .{});
+    defer s.chart.deinit();
+    s.sim = try core.sim.Sim.create(gpa, &s.chart, .{ .autoplay = true });
+    defer s.sim.destroy();
+    s.sim.advance(s.chart.last_note_us + 1_000_000);
+    capture(a, &s, .{}, true);
+    try std.testing.expectEqual(core.types.Clear.assist_easy, a.res.clear);
+    const rows = try a.db.prepare("SELECT (SELECT COUNT(*) FROM score) + (SELECT COUNT(*) FROM replay)");
+    defer rows.deinit();
+    try std.testing.expect(try rows.step());
+    try std.testing.expectEqual(@as(i64, 0), rows.int(0));
 }
 
 test "leaving waits for a skin's fade and a built-in screen goes at once" {

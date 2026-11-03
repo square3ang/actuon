@@ -6,6 +6,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const windows = @import("windows.zig");
 const gauge_mod = @import("gauge.zig");
+const options = @import("options.zig");
 const Note = types.Note;
 
 pub const Event = struct {
@@ -70,9 +71,22 @@ const ring_size = 1024;
 pub const Config = struct {
     gauge: gauge_mod.Type = .normal,
     autoplay: bool = false,
-    /// Gauge auto shift: `gauge` is the top gauge, and play shows the best one still clearing.
-    gas: bool = false,
+    /// Gauge auto shift. Under select to under, `gauge` is the top gauge.
+    gas: options.Gas = .none,
+    /// The lowest gauge a shift may fall to.
+    gas_floor: gauge_mod.Type = .assist_easy,
+    algorithm: options.Algorithm = .combo,
+    /// beatoraja's EXPAND JUDGE assist: GREAT reaches as far as GOOD did, PGREAT as far as GREAT.
+    expand_judge: bool = false,
+    /// Scratch lanes play themselves, for BATTLE AS.
+    auto_scratch: bool = false,
 };
+
+/// Best clear looks from EX HARD down, or from HAZARD when that was picked.
+fn gasTop(cfg: Config) gauge_mod.Type {
+    if (cfg.gas != .best_clear) return cfg.gauge;
+    return @fromBackingInt(@max(@backingInt(cfg.gauge), @backingInt(gauge_mod.Type.exhard)));
+}
 
 pub const Sim = struct {
     notes: []const Note,
@@ -91,9 +105,13 @@ pub const Sim = struct {
     grid_t: i64 = 0,
     gauges: [gauge_mod.count]gauge_mod.Gauge,
     gauge_type: gauge_mod.Type,
-    gas_top: ?gauge_mod.Type,
+    gas: options.Gas,
+    gas_top: gauge_mod.Type,
+    gas_floor: gauge_mod.Type,
+    algorithm: options.Algorithm,
     score: Score = .{},
     autoplay: bool,
+    auto_scratch: bool,
     failed: bool = false,
     total_notes: u32,
     ring: [ring_size]Out = undefined,
@@ -118,12 +136,20 @@ pub const Sim = struct {
             .judge_start = 0,
             .judge_end = 0,
             .gauges = undefined,
-            .gauge_type = cfg.gauge,
-            .gas_top = if (cfg.gas) cfg.gauge else null,
+            .gauge_type = if (cfg.gas == .best_clear) gasTop(cfg) else cfg.gauge,
+            .gas = cfg.gas,
+            .gas_top = gasTop(cfg),
+            .gas_floor = cfg.gas_floor,
+            .algorithm = cfg.algorithm,
             .autoplay = cfg.autoplay,
+            .auto_scratch = cfg.auto_scratch,
             .total_notes = chart.total_notes,
             .gpa = gpa,
         };
+        if (cfg.expand_judge) {
+            s.judge_w[0] = s.judge_w[1];
+            s.judge_w[1] = s.judge_w[2];
+        }
         for (s.judge_w) |w| {
             s.judge_start = @min(s.judge_start, w[0]);
             s.judge_end = @max(s.judge_end, w[1]);
@@ -180,11 +206,12 @@ pub const Sim = struct {
         return ls.down[0] or ls.down[1];
     }
 
-    /// The best gauge at or below the top that would clear now, else the best one still alive.
-    fn shiftGauge(s: *Sim, top: gauge_mod.Type) void {
+    /// The best gauge from the top down to the floor that would clear now, else the best one still alive.
+    fn shiftGauge(s: *Sim) void {
         var alive: ?usize = null;
-        var i: usize = @backingInt(top) + 1;
-        while (i > 0) {
+        var i: usize = @backingInt(s.gas_top) + 1;
+        const floor: usize = @min(@backingInt(s.gas_floor), @backingInt(s.gas_top));
+        while (i > floor) {
             i -= 1;
             if (s.gauges[i].qualified()) {
                 s.gauge_type = @fromBackingInt(@intCast(i));
@@ -196,8 +223,16 @@ pub const Sim = struct {
     }
 
     fn checkFailed(s: *Sim) void {
-        if (s.gas_top) |top| s.shiftGauge(top);
-        if (s.gauge().value == 0) s.failed = true;
+        switch (s.gas) {
+            .none, .continue_play => {},
+            .select_to_under, .best_clear => s.shiftGauge(),
+            // A survival gauge that empties hands over to the groove gauge, which has run alongside it.
+            .survival_to_groove => if (s.gauge().value == 0 and @backingInt(s.gauge_type) >= @backingInt(gauge_mod.Type.hard)) {
+                s.gauge_type = .normal;
+            },
+        }
+        // Under continue the chart plays on; the empty gauge still fails the clear.
+        if (s.gauge().value == 0 and s.gas != .continue_play) s.failed = true;
     }
 
     /// Advances to `t`. Everything between now and `t` happens on the absolute 1 ms grid.
@@ -215,7 +250,7 @@ pub const Sim = struct {
         if (s.failed or ev.lane >= s.lane_count) return;
         const key: u1 = @intCast(ev.key & 1);
         const ls = &s.lanes[ev.lane];
-        if (ls.down[key] == ev.down) return;
+        if (ls.down[key] == ev.down or (s.auto_scratch and ls.scratch >= 0)) return;
         ls.down[key] = ev.down;
         // The lead-in is beatoraja's READY, which judges nothing: a key there only lights its lane.
         if (ev.time_us < 0) {
@@ -258,9 +293,13 @@ pub const Sim = struct {
                 },
                 .normal => {},
             }
-            if (s.autoplay) s.autoNote(lane, idx);
+            if (s.autoLane(ls)) s.autoNote(lane, idx);
         }
-        ls.increase = ls.passing >= 0 and (down or s.autoplay or endHeld(s, ls));
+        ls.increase = ls.passing >= 0 and (down or s.autoLane(ls) or endHeld(s, ls));
+    }
+
+    fn autoLane(s: *const Sim, ls: *const LaneState) bool {
+        return s.autoplay or (s.auto_scratch and ls.scratch >= 0);
     }
 
     fn endHeld(s: *const Sim, ls: *const LaneState) bool {
@@ -368,9 +407,11 @@ pub const Sim = struct {
                 bad_times[bad_len] = dm;
                 bad_len += 1;
             }
-            const better = tnote < 0 or s.state[@intCast(tnote)] != 0 or
-                // JudgeAlgorithm.Combo
-                (st == 0 and s.notes[@intCast(tnote)].time_us < pt + w[2][0] and n.time_us <= pt + w[2][1]);
+            const better = tnote < 0 or s.state[@intCast(tnote)] != 0 or (st == 0 and switch (s.algorithm) {
+                .combo => s.notes[@intCast(tnote)].time_us < pt + w[2][0] and n.time_us <= pt + w[2][1],
+                .duration => @abs(s.notes[@intCast(tnote)].time_us - pt) > @abs(n.time_us - pt),
+                .lowest => false,
+            });
             if (!better) continue;
             if (st != 0) {
                 judge = if (dm >= w[4][0] and dm <= w[4][1]) 5 else 6;
@@ -634,7 +675,7 @@ fn chartFrom(src: []const u8) !types.Chart {
 test "gauge auto shift falls through dead gauges and picks the best clearing one" {
     var chart = try chartFrom("#BPM 120\n#TOTAL 300\n#WAV01 a.wav\n#00111:01\n");
     defer chart.deinit();
-    const s = try Sim.create(testing.allocator, &chart, .{ .gauge = .exhard, .gas = true });
+    const s = try Sim.create(testing.allocator, &chart, .{ .gauge = .exhard, .gas = .select_to_under });
     defer s.destroy();
     s.checkFailed();
     try testing.expectEqual(gauge_mod.Type.exhard, s.gauge_type);
@@ -651,6 +692,68 @@ test "gauge auto shift falls through dead gauges and picks the best clearing one
     s.checkFailed();
     try testing.expectEqual(gauge_mod.Type.normal, s.gauge_type); // recovers upward
     try testing.expect(!s.failed);
+}
+
+test "the GAS floor, survival to groove and continue" {
+    var chart = try chartFrom("#BPM 120\n#TOTAL 300\n#WAV01 a.wav\n#00111:01\n");
+    defer chart.deinit();
+    const floored = try Sim.create(testing.allocator, &chart, .{ .gauge = .hard, .gas = .select_to_under, .gas_floor = .normal });
+    defer floored.destroy();
+    floored.gauges[@backingInt(gauge_mod.Type.hard)].value = 0;
+    floored.gauges[@backingInt(gauge_mod.Type.assist_easy)].value = 70;
+    floored.checkFailed();
+    try testing.expectEqual(gauge_mod.Type.normal, floored.gauge_type);
+
+    const groove = try Sim.create(testing.allocator, &chart, .{ .gauge = .exhard, .gas = .survival_to_groove });
+    defer groove.destroy();
+    groove.checkFailed();
+    try testing.expectEqual(gauge_mod.Type.exhard, groove.gauge_type);
+    groove.gauges[@backingInt(gauge_mod.Type.exhard)].value = 0;
+    groove.checkFailed();
+    try testing.expectEqual(gauge_mod.Type.normal, groove.gauge_type);
+    try testing.expect(!groove.failed);
+
+    const on = try Sim.create(testing.allocator, &chart, .{ .gauge = .hard, .gas = .continue_play });
+    defer on.destroy();
+    on.gauges[@backingInt(gauge_mod.Type.hard)].value = 0;
+    on.checkFailed();
+    try testing.expect(!on.failed);
+    try testing.expectEqual(types.Clear.failed, on.clear(true));
+}
+
+test "the judge algorithm picks which of two close notes a press takes" {
+    // Two notes on one lane 100 ms apart, pressed 70 ms after the first: 30 ms before the second.
+    var c = try chartFrom("#BPM 150\n#WAV01 a.wav\n#00111:01010000000000000000000000000000\n");
+    defer c.deinit();
+    const second = c.notes[1].time_us;
+    try testing.expectEqual(@as(i64, 100_000), second - c.notes[0].time_us);
+    const press = c.notes[0].time_us + 70_000;
+    for ([_]struct { options.Algorithm, u32 }{ .{ .duration, 1 }, .{ .lowest, 0 } }) |case| {
+        const s = try Sim.create(testing.allocator, &c, .{ .algorithm = case[0] });
+        defer s.destroy();
+        s.input(.{ .time_us = press, .lane = 0, .down = true });
+        try testing.expect(s.state[case[1]] != 0);
+    }
+}
+
+test "expand judge widens PGREAT to the GREAT window" {
+    var c = try chartFrom("#BPM 120\n#RANK 3\n#WAV01 a.wav\n#00111:01\n");
+    defer c.deinit();
+    const s = try Sim.create(testing.allocator, &c, .{ .expand_judge = true });
+    defer s.destroy();
+    s.input(.{ .time_us = c.notes[0].time_us + 50_000, .lane = 0, .down = true });
+    try testing.expectEqual(@as(u32, 1), s.score.count(.pg));
+}
+
+test "auto scratch plays the scratch and ignores its keys" {
+    var c = try chartFrom("#BPM 120\n#WAV01 a.wav\n#00116:01\n");
+    defer c.deinit();
+    const s = try Sim.create(testing.allocator, &c, .{ .auto_scratch = true });
+    defer s.destroy();
+    s.input(.{ .time_us = 100_000, .lane = 7, .down = true });
+    s.advance(c.last_note_us + 1_000_000);
+    try testing.expectEqual(@as(u32, 1), s.score.count(.pg));
+    try testing.expectEqual(@as(u32, 0), s.score.count(.ms));
 }
 
 // Timing parity vectors: each row is {offset from note in ms (positive = late), expected judge}

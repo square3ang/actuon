@@ -146,14 +146,13 @@ pub const Params = struct {
     /// Loop this section instead of playing the chart. Never recorded.
     practice: ?Practice = null,
     path: []const u8,
-    gauge: core.gauge.Type = .normal,
-    gas: bool = false,
+    /// The options a replay records. Its chart and events are filled in when the replay is made.
+    rec: core.replay.Replay = .{},
+    /// What a replay cannot record: a play with any of it is not saved.
+    assist: config.Assist = .{},
     /// Difficulty table level to show instead of the chart's own, when it has one.
     table_level: []const u8 = "",
     table_name: []const u8 = "",
-    random: core.options.Random = .off,
-    ln_mode: core.options.LnMode = .ln,
-    seed: u64 = 0,
     autoplay: bool = false,
     /// Replay to play back instead of live input.
     replay: ?core.replay.Replay = null,
@@ -164,6 +163,14 @@ pub const Params = struct {
     /// Course play carries the gauge over from the previous stage.
     initial_gauge: ?f32 = null,
 };
+
+fn simConfig(p: Params, autoplay: bool) core.sim.Config {
+    var cfg = core.replay.simConfig(p.rec);
+    cfg.autoplay = autoplay;
+    cfg.expand_judge = p.assist.picked.expand_judge;
+    cfg.auto_scratch = p.assist.auto_scratch;
+    return cfg;
+}
 
 const preroll_us: i64 = 2_000_000;
 const post_us: i64 = 3_000_000;
@@ -258,11 +265,18 @@ pub const Session = struct {
 
     /// Blocking: runs on a loader thread. `progress` counts decoded sounds.
     pub fn create(gpa: std.mem.Allocator, engine: *engine_mod.Engine, cfg: *const config.Config, params: Params, progress: *std.atomic.Value(usize), total: *std.atomic.Value(usize), parsed: *Parsed) !*Session {
-        var chart = try parseFile(gpa, params.path, params.selected_random orelse if (params.replay) |r| r.bms_random else null, params.seed);
+        var chart = try parseFile(gpa, params.path, params.selected_random orelse if (params.replay) |r| r.bms_random else null, params.rec.seed);
         errdefer chart.deinit();
         var played = params;
-        if (!core.options.applyLnMode(&chart, params.ln_mode)) played.ln_mode = .ln;
-        core.options.apply(&chart, params.random, params.seed);
+        if (!core.options.applyLnMode(&chart, params.rec.ln_mode)) played.rec.ln_mode = .ln;
+        // As in beatoraja, these assist only a chart they change.
+        if (params.assist.picked.no_mine and chart.has_mine) core.options.dropMines(&chart) else played.assist.picked.no_mine = false;
+        if (params.assist.picked.legacy and chart.has_ln) core.options.legacyNotes(&chart) else played.assist.picked.legacy = false;
+        if (params.assist.battle and !try core.options.battle(&chart)) {
+            played.assist.battle = false;
+            played.assist.auto_scratch = false;
+        }
+        core.replay.applyLanes(&chart, params.rec);
         if (params.practice) |p| {
             try applyPractice(&chart, p);
             played.start_us = @max(scaled(p.start_us, p.freq) - preroll_us, 0);
@@ -289,9 +303,9 @@ pub const Session = struct {
         chart.last_time_us = playEnd(&chart, samples, engine.rate, params.practice != null);
         const sched = try buildSchedule(gpa, &chart, engine);
         errdefer gpa.free(sched);
-        const sim = try Sim.create(gpa, &chart, .{ .gauge = params.gauge, .autoplay = params.autoplay, .gas = params.gas });
+        const sim = try Sim.create(gpa, &chart, simConfig(played, params.autoplay));
         errdefer sim.destroy();
-        if (params.initial_gauge) |v| sim.gauges[@backingInt(params.gauge)].set(v);
+        if (params.initial_gauge) |v| sim.gauges[@backingInt(params.rec.gauge)].set(v);
         const vis = try gpa.alloc(u8, sim.state.len);
         errdefer gpa.free(vis);
         @memset(vis, 0);
@@ -469,8 +483,7 @@ pub const Session = struct {
 
     /// Back to the top of the practice section, with a clean score.
     fn restartSection(s: *Session, snap: *Snapshot) void {
-        const cfg: core.sim.Config = .{ .gauge = s.params.gauge, .gas = s.params.gas };
-        const fresh = Sim.create(s.gpa, &s.chart, cfg) catch return;
+        const fresh = Sim.create(s.gpa, &s.chart, simConfig(s.params, false)) catch return;
         s.engine.stopAll();
         s.sim.destroy();
         s.sim = fresh;
@@ -491,8 +504,7 @@ pub const Session = struct {
     fn doSeek(s: *Session, target: i64, snap: *Snapshot) void {
         s.engine.seek(s.engine.usToFrame(target));
         @memset(s.sim.state, 0);
-        const cfg: core.sim.Config = .{ .gauge = s.params.gauge, .autoplay = true, .gas = s.params.gas };
-        const fresh = Sim.create(s.gpa, &s.chart, cfg) catch return;
+        const fresh = Sim.create(s.gpa, &s.chart, simConfig(s.params, true)) catch return;
         s.sim.destroy();
         s.sim = fresh;
         s.sim.advance(target);
@@ -529,16 +541,11 @@ pub const Session = struct {
     }
 
     pub fn replayBytes(s: *Session) ![]u8 {
-        return core.replay.encode(s.gpa, .{
-            .sha256 = s.chart.sha256,
-            .gauge = s.params.gauge,
-            .gas = s.params.gas,
-            .random = s.params.random,
-            .ln_mode = s.params.ln_mode,
-            .seed = s.params.seed,
-            .bms_random = s.chart.random,
-            .events = s.events.items,
-        });
+        var r = s.params.rec;
+        r.sha256 = s.chart.sha256;
+        r.bms_random = s.chart.random;
+        r.events = s.events.items;
+        return core.replay.encode(s.gpa, r);
     }
 
     pub fn destroy(s: *Session) void {

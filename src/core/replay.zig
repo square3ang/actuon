@@ -7,19 +7,27 @@ const gauge = @import("gauge.zig");
 const options = @import("options.zig");
 
 pub const magic = "ACTR";
-pub const version: u8 = 1;
+/// 2 adds a byte each for the gauge shift, the 2P random and DP flip, and the judge algorithm.
+pub const version: u8 = 2;
 pub const max_events = 4_000_000;
-/// Set on the gauge byte: old replays stay valid, and a verifier without GAS rejects the file.
+/// Version 1 set this on the gauge byte for select-to-under GAS.
 const gas_bit: u8 = 0x80;
 /// The LN mode sits above the random option: old replays read as plain LN.
 const ln_mode_shift = 6;
+const floor_shift = 4;
+const flip_bit: u8 = 0x80;
 
+/// Only options a verifier can rank: assists and battle are never recorded.
 pub const Replay = struct {
     sha256: [64]u8 = @splat('0'),
     gauge: gauge.Type = .normal,
-    gas: bool = false,
+    gas: options.Gas = .none,
+    gas_floor: gauge.Type = .assist_easy,
     random: options.Random = .off,
+    random2: options.Random = .off,
+    flip: bool = false,
     ln_mode: options.LnMode = .ln,
+    algorithm: options.Algorithm = .combo,
     seed: u64 = 0,
     /// Resolved #RANDOM/#SWITCH values the chart was played with.
     bms_random: []const i32 = &.{},
@@ -38,8 +46,11 @@ pub fn encode(gpa: std.mem.Allocator, r: Replay) ![]u8 {
     try w.appendSlice(gpa, magic);
     try w.append(gpa, version);
     try w.appendSlice(gpa, &r.sha256);
-    try w.append(gpa, @backingInt(r.gauge) | gas_bit * @as(u8, @intFromBool(r.gas)));
+    try w.append(gpa, @backingInt(r.gauge));
     try w.append(gpa, @backingInt(r.random) | @backingInt(r.ln_mode) << ln_mode_shift);
+    try w.append(gpa, @backingInt(r.gas) | @backingInt(r.gas_floor) << floor_shift);
+    try w.append(gpa, @backingInt(r.random2) | flip_bit * @as(u8, @intFromBool(r.flip)));
+    try w.append(gpa, @backingInt(r.algorithm));
     try putVar(&w, gpa, r.seed);
     try putVar(&w, gpa, r.bms_random.len);
     for (r.bms_random) |v| try putVar(&w, gpa, @as(u32, @bitCast(v)));
@@ -79,16 +90,28 @@ pub fn decode(a: std.mem.Allocator, bytes: []const u8) !Replay {
     var r: Reader = .{ .b = bytes };
     if (bytes.len < 4 + 1 + 64 + 2 or !std.mem.eql(u8, bytes[0..4], magic)) return error.BadMagic;
     r.i = 4;
-    if (try r.byte() != version) return error.BadVersion;
+    const ver = try r.byte();
+    if (ver != 1 and ver != version) return error.BadVersion;
     var out: Replay = .{};
     @memcpy(&out.sha256, bytes[5..69]);
     r.i = 69;
     const gauge_byte = try r.byte();
-    out.gas = gauge_byte & gas_bit != 0;
-    out.gauge = std.enums.fromInt(gauge.Type, gauge_byte & ~gas_bit) orelse return error.BadField;
+    if (ver == 1 and gauge_byte & gas_bit != 0) out.gas = .select_to_under;
+    out.gauge = std.enums.fromInt(gauge.Type, if (ver == 1) gauge_byte & ~gas_bit else gauge_byte) orelse return error.BadField;
     const random_byte = try r.byte();
     out.random = std.enums.fromInt(options.Random, random_byte & (1 << ln_mode_shift) - 1) orelse return error.BadField;
     out.ln_mode = std.enums.fromInt(options.LnMode, random_byte >> ln_mode_shift) orelse return error.BadField;
+    if (ver == version) {
+        const gas_byte = try r.byte();
+        out.gas = std.enums.fromInt(options.Gas, gas_byte & (1 << floor_shift) - 1) orelse return error.BadField;
+        out.gas_floor = std.enums.fromInt(gauge.Type, gas_byte >> floor_shift) orelse return error.BadField;
+        // beatoraja offers A-EASY, EASY and NORMAL.
+        if (@backingInt(out.gas_floor) > @backingInt(gauge.Type.normal)) return error.BadField;
+        const side_byte = try r.byte();
+        out.random2 = std.enums.fromInt(options.Random, side_byte & ~flip_bit) orelse return error.BadField;
+        out.flip = side_byte & flip_bit != 0;
+        out.algorithm = std.enums.fromInt(options.Algorithm, try r.byte()) orelse return error.BadField;
+    }
     out.seed = try r.vari();
     const nr = try r.vari();
     if (nr > 4096) return error.BadField;
@@ -130,14 +153,24 @@ pub const Result = extern struct {
 /// Re-runs a play. `chart` must have been parsed with `r.bms_random`; it is modified by options.
 pub fn resimulate(gpa: std.mem.Allocator, chart: *types.Chart, r: Replay) !Result {
     _ = options.applyLnMode(chart, r.ln_mode);
-    options.apply(chart, r.random, r.seed);
-    const s = try sim_mod.Sim.create(gpa, chart, .{ .gauge = r.gauge, .gas = r.gas });
+    applyLanes(chart, r);
+    const s = try sim_mod.Sim.create(gpa, chart, simConfig(r));
     defer s.destroy();
     for (r.events) |e| s.input(e);
     s.advance(chart.last_time_us + 2_000_000);
     var res = summarize(s, chart.total_notes);
     res.seed = r.seed;
     return res;
+}
+
+/// The random options, then DP flip: the order the client plays them in.
+pub fn applyLanes(chart: *types.Chart, r: Replay) void {
+    options.apply(chart, .{ r.random, r.random2 }, r.seed);
+    if (r.flip) options.flip(chart);
+}
+
+pub fn simConfig(r: Replay) sim_mod.Config {
+    return .{ .gauge = r.gauge, .gas = r.gas, .gas_floor = r.gas_floor, .algorithm = r.algorithm };
 }
 
 pub fn summarize(s: *const sim_mod.Sim, total: u32) Result {
@@ -179,12 +212,28 @@ test "round trip and resimulate" {
     defer arena.deinit();
     const r = try decode(arena.allocator(), bytes);
     try std.testing.expectEqual(evs.items.len, r.events.len);
-    try std.testing.expect(!r.gas);
-    const gas_bytes = try encode(gpa, .{ .sha256 = c.sha256, .gauge = .exhard, .gas = true });
+    try std.testing.expectEqual(options.Gas.none, r.gas);
+    const gas_bytes = try encode(gpa, .{ .sha256 = c.sha256, .gauge = .exhard, .gas = .best_clear, .gas_floor = .normal, .random2 = .spiral, .flip = true, .algorithm = .lowest });
     defer gpa.free(gas_bytes);
     const g = try decode(arena.allocator(), gas_bytes);
-    try std.testing.expect(g.gas);
+    try std.testing.expectEqual(options.Gas.best_clear, g.gas);
+    try std.testing.expectEqual(gauge.Type.normal, g.gas_floor);
+    try std.testing.expectEqual(options.Random.spiral, g.random2);
+    try std.testing.expect(g.flip);
+    try std.testing.expectEqual(options.Algorithm.lowest, g.algorithm);
     try std.testing.expectEqual(gauge.Type.exhard, g.gauge);
+    // A version 1 file keeps its GAS bit and its layout.
+    var old = try arena.allocator().dupe(u8, gas_bytes);
+    old[4] = 1;
+    old[69] = @backingInt(gauge.Type.exhard) | gas_bit;
+    const v1 = try std.mem.concat(arena.allocator(), u8, &.{ old[0..71], old[74..] });
+    const back = try decode(arena.allocator(), v1);
+    try std.testing.expectEqual(options.Gas.select_to_under, back.gas);
+    try std.testing.expectEqual(options.Random.off, back.random2);
+    // A floor above NORMAL is not one beatoraja offers.
+    old[4] = version;
+    old[71] = @backingInt(options.Gas.best_clear) | @as(u8, @backingInt(gauge.Type.hard)) << floor_shift;
+    try std.testing.expectError(error.BadField, decode(arena.allocator(), old));
     const res = try resimulate(gpa, &c, r);
     try std.testing.expect(res.ok);
     try std.testing.expectEqual(@as(u32, 3 * 2 + 1), res.ex_score); // 0,7,14 ms PG; 21 ms at NORMAL=GR
@@ -211,8 +260,8 @@ test "the size limits reject a replay" {
     const a = arena.allocator();
     const good = try encode(a, .{});
     _ = try decode(a, good);
-    // magic, version, hash, gauge, random, then a one-byte seed
-    const counts = 4 + 1 + 64 + 2 + 1;
+    // magic, version, hash, gauge, random, gauge shift, 2P random, algorithm, then a one-byte seed
+    const counts = 4 + 1 + 64 + 5 + 1;
     const with = struct {
         fn make(al: std.mem.Allocator, head: []const u8, tail: []const u8) ![]u8 {
             return std.mem.concat(al, u8, &.{ head[0..counts], tail });

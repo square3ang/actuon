@@ -63,8 +63,56 @@ pub fn referenceBpm(chart: *const core.types.Chart, hs_fix: u8) f64 {
         0 => chart.bpm,
         1 => chart.max_bpm,
         2 => mainBpm(chart),
+        4 => chart.min_bpm,
         else => 150,
     };
+}
+
+/// Where the chart is drawn this frame.
+pub const Scroll = struct {
+    t: i64,
+    now_y: f64,
+    /// Lane shares per y unit.
+    per_y: f64,
+    /// Under the CONSTANT assist, lane shares per microsecond instead: time alone moves the notes.
+    per_us: ?f64,
+    /// beatoraja's CONSTANT option: nothing shows earlier than this before its time.
+    appear_us: ?i64,
+
+    /// How far above the judge line a point of the chart is, as a share of the open lane.
+    pub fn share(sc: Scroll, at_us: i64, at_y: f64) f32 {
+        if (sc.per_us) |k| return @floatCast(@as(f64, @floatFromInt(at_us - sc.t)) * k);
+        return @floatCast((at_y - sc.now_y) * sc.per_y);
+    }
+
+    pub fn hidden(sc: Scroll, at_us: i64) bool {
+        return if (sc.appear_us) |ahead| at_us - sc.t > ahead else false;
+    }
+};
+
+/// `aids` are the play's own: a versus round or a course plays without them whatever the settings say.
+pub fn scrollAt(v: *View, chart: *const core.types.Chart, cfg: *const config.Config, aids: config.Assists, t: i64) Scroll {
+    const green_us: f64 = @as(f64, @floatFromInt(cfg.green_ms)) * 1000;
+    return .{
+        .t = t,
+        .now_y = chart.yAt(t),
+        .per_y = chart.speedAt(t) / visibleY(cfg.green_ms, v.refBpm(chart, cfg.hs_fix)),
+        .per_us = if (aids.constant) 1 / green_us else null,
+        .appear_us = if (cfg.constant) @as(i64, cfg.green_ms) * 1000 else null,
+    };
+}
+
+/// beatoraja's JUDGE AREA assist: how far either side of the line a press still scores GOOD, as a share of the open lane.
+pub fn judgeAreaShare(chart: *const core.types.Chart, sc: Scroll) [2]f32 {
+    const w = core.windows.create(5, core.windows.note_base, chart.judgerank)[2];
+    const lo = sc.t + w[0];
+    const hi = sc.t + w[1];
+    return .{ sc.share(lo, chart.yAt(lo)), sc.share(hi, chart.yAt(hi)) };
+}
+
+/// Where a BPM guide line goes: the timelines the tempo changes at.
+pub fn bpmChanges(chart: *const core.types.Chart, i: usize) bool {
+    return i > 0 and chart.timelines[i].bpm != chart.timelines[i - 1].bpm;
 }
 
 /// The BPM the chart spends the most time at.
@@ -167,11 +215,15 @@ pub const View = struct {
 
         const l = layoutLanes(g, mode, cfg, v.scratch_right);
         drawGear(g, &l, s, &snap);
-        const vis_y = visibleY(cfg.green_ms, v.refBpm(chart, cfg.hs_fix));
-        const px_per_y = l.lane_h / @as(f32, @floatCast(vis_y)) * @as(f32, @floatCast(chart.speedAt(t)));
-        const now_y = chart.yAt(t);
-        drawBarLines(g, &l, chart, now_y, px_per_y);
-        drawNotes(g, v, &l, chart, &snap, t, now_y, px_per_y);
+        const aids = s.params.assist.picked;
+        const sc = scrollAt(v, chart, cfg, aids, t);
+        if (aids.judge_area) {
+            const area = judgeAreaShare(chart, sc);
+            const y0 = l.judge_y - area[1] * l.lane_h;
+            g.rect(l.left, y0, l.w, l.judge_y - area[0] * l.lane_h - y0, gfx.cyan.alpha(40));
+        }
+        drawBarLines(g, &l, chart, sc, aids.bpm_guide);
+        drawNotes(g, v, &l, chart, &snap, sc, aids.mark_note);
         drawCovers(g, &l, cfg);
         drawJudgeLine(g, &l);
         drawController(g, &l, &snap, t);
@@ -223,7 +275,7 @@ fn layoutLanes(g: *gfx.Gfx, mode: core.types.Mode, cfg: *const config.Config, sc
     const key_w = keyWidth(mode) * u;
     const sc_w: f32 = 72 * u;
     const base_y = g.h * 0.765;
-    const lift_px = base_y * cfg.lift;
+    const lift_px = base_y * cfg.liftShown();
     var l: Lanes = .{
         .mode = mode,
         .n = 0,
@@ -234,7 +286,7 @@ fn layoutLanes(g: *gfx.Gfx, mode: core.types.Mode, cfg: *const config.Config, sc
         .base_y = base_y,
         .lift_px = lift_px,
         .judge_y = base_y - lift_px,
-        .cover_px = (base_y - top_y) * cfg.lane_cover,
+        .cover_px = (base_y - top_y) * cfg.coverShown(),
         .lane_h = (base_y - top_y) * cfg.openLane(),
         .pad_y = base_y + 4 * u,
         .pad_h = 92 * u,
@@ -275,33 +327,42 @@ fn drawGear(g: *gfx.Gfx, l: *const Lanes, s: *Session, snap: *const session_mod.
     g.additive(false);
 }
 
-fn drawBarLines(g: *gfx.Gfx, l: *const Lanes, chart: *const core.types.Chart, now_y: f64, px_per_y: f32) void {
-    for (chart.timelines) |tl| {
-        if (!tl.bar) continue;
-        const dy: f32 = @floatCast(tl.y - now_y);
-        if (dy < 0) continue;
-        const yy = l.judge_y - dy * px_per_y;
+/// Bar lines, and under the BPM GUIDE assist a line and the new tempo where it changes.
+fn drawBarLines(g: *gfx.Gfx, l: *const Lanes, chart: *const core.types.Chart, sc: Scroll, bpm_guide: bool) void {
+    const u = g.h / 720;
+    for (chart.timelines, 0..) |tl, i| {
+        const guide = bpm_guide and bpmChanges(chart, i);
+        if (!tl.bar and !guide) continue;
+        if (tl.time_us < sc.t or sc.hidden(tl.time_us)) continue;
+        const yy = l.judge_y - sc.share(tl.time_us, tl.y) * l.lane_h;
         if (yy < top_y) break;
-        g.rect(l.left, yy, l.w, 2, gfx.white.alpha(70));
+        if (guide) {
+            g.rect(l.left, yy, l.w, 2, gfx.amber);
+            g.fmt(l.left + 4 * u, yy - 16 * u, g.scaled(12), gfx.amber, "{d:.0}", .{tl.bpm});
+        } else g.rect(l.left, yy, l.w, 2, gfx.white.alpha(70));
     }
 }
 
-fn drawNotes(g: *gfx.Gfx, v: *View, l: *const Lanes, chart: *const core.types.Chart, snap: *const session_mod.Snapshot, t: i64, now_y: f64, px_per_y: f32) void {
+fn drawNotes(g: *gfx.Gfx, v: *View, l: *const Lanes, chart: *const core.types.Chart, snap: *const session_mod.Snapshot, sc: Scroll, mark: bool) void {
     const u = g.h / 720;
+    const t = sc.t;
     v.first_note = skipPastNotes(chart, v.first_note, t);
     const nh: f32 = 11 * u;
     for (chart.notes[v.first_note..], v.first_note..) |note, i| {
-        const dy: f32 = @floatCast(note.y - now_y);
-        const yy = l.judge_y - dy * px_per_y;
+        const yy = l.judge_y - sc.share(note.time_us, note.y) * l.lane_h;
         if (yy < top_y - nh and note.kind != .ln_start) {
             // Notes are time ordered and y grows with time except under negative #SCROLL.
             if (note.time_us > t + 60_000_000) break;
             continue;
         }
+        if (sc.hidden(note.time_us)) continue;
         const lane = note.lane;
         const col = noteColor(l.mode, lane);
         switch (note.kind) {
-            .normal => if (v.render_state[i] == 0) drawNote(g, l.xs[lane], yy - nh, l.ws[lane], nh, col),
+            // MARK NOTE leaves a hit note's ghost until it reaches the line.
+            .normal => if (v.render_state[i] == 0) {
+                drawNote(g, l.xs[lane], yy - nh, l.ws[lane], nh, col);
+            } else if (mark and yy < l.judge_y) g.rect(l.xs[lane] + 1, yy - nh, l.ws[lane] - 1, nh, col.alpha(70)),
             .mine => if (v.render_state[i] == 0) {
                 g.rect(l.xs[lane] + 1, yy - nh * 0.7, l.ws[lane] - 1, nh * 0.5, gfx.danger);
             },
@@ -312,8 +373,8 @@ fn drawNotes(g: *gfx.Gfx, v: *View, l: *const Lanes, chart: *const core.types.Ch
                 const started = v.render_state[i] != 0;
                 const held = snap.holding[lane] == note.pair;
                 if (started and !held and note.ln_type == .ln) continue;
-                const end_dy: f32 = @floatCast(chart.notes[pair].y - now_y);
-                const end_y = l.judge_y - end_dy * px_per_y;
+                const end = chart.notes[pair];
+                const end_y = l.judge_y - sc.share(end.time_us, end.y) * l.lane_h;
                 const y0 = if (held) l.judge_y else yy;
                 if (end_y < g.h and y0 > top_y) {
                     const glow: u8 = if (held) 150 + @as(u8, @intFromFloat(@abs(@sin(@as(f32, @floatFromInt(t)) / 60_000)) * 90)) else 110;
@@ -330,7 +391,7 @@ fn drawNotes(g: *gfx.Gfx, v: *View, l: *const Lanes, chart: *const core.types.Ch
 
 fn drawCovers(g: *gfx.Gfx, l: *const Lanes, cfg: *const config.Config) void {
     const u = g.h / 720;
-    const hidden_px = l.base_y * cfg.hidden;
+    const hidden_px = l.base_y * cfg.hiddenShown();
     if (hidden_px > 0) g.rect(l.left, @max(l.judge_y - hidden_px, l.cover_px), l.w, @min(hidden_px, l.judge_y - l.cover_px), gfx.plate);
     if (l.lift_px > 0) g.rect(l.left, l.judge_y, l.w, l.lift_px, gfx.plate);
     if (l.cover_px > 0) {
@@ -710,6 +771,15 @@ test "scratch on the right moves to the end in single play only" {
 test "green number maps to visible y" {
     // 600 ms at 150 BPM is 0.375 measures: 150 BPM spends 1.6 s on a measure.
     try std.testing.expectApproxEqAbs(@as(f64, 0.375), visibleY(600, 150), 1e-9);
+}
+
+test "scroll takes CONSTANT from the play, not from the settings" {
+    const tl = [_]core.types.Timeline{.{ .time_us = 0, .y = 0, .section = 0, .bpm = 150, .stop_us = 0, .scroll = 1, .speed = 1, .bar = false }};
+    const chart: core.types.Chart = .{ .arena = undefined, .bpm = 150, .timelines = @constCast(&tl) };
+    var v: View = .{ .render_state = &.{} };
+    const cfg: config.Config = .{ .hs_fix = 3, .assist = .{ .constant = true } };
+    try std.testing.expect(scrollAt(&v, &chart, &cfg, .{}, 0).per_us == null);
+    try std.testing.expect(scrollAt(&v, &chart, &cfg, .{ .constant = true }, 0).per_us != null);
 }
 
 test "main BPM finds a tempo that only starts late in the chart" {

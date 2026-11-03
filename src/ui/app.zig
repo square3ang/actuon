@@ -326,6 +326,13 @@ pub const App = struct {
         }
     }
 
+    /// During play. Under HS auto adjust the green number then refers to the BPM playing now.
+    pub fn moveCover(a: *App, by: f32) void {
+        a.cfg.setCover(a.cfg.lane_cover + by);
+        const s = a.session orelse return;
+        if (a.cfg.hs_auto_adjust and a.cfg.hs_fix != 3) a.view.ref_bpm = s.chart.bpmAt(s.snapshot().time_us);
+    }
+
     pub fn startPlay(a: *App, params: session_mod.Params, record: bool) void {
         if (a.load_thread != null) return;
         // The rendered sound stands in only when no set or skin brings its own for starting a song.
@@ -589,13 +596,14 @@ pub const App = struct {
             a.scene = .select;
             return;
         } };
-        a.view.bga = if (a.cfg.bga) bga.Bga.create(a.gpa, &a.g, s) else null;
+        const bga_shown = a.cfg.bga and (!a.cfg.bga_auto or s.params.autoplay or s.params.replay != null);
+        a.view.bga = if (bga_shown) bga.Bga.create(a.gpa, &a.g, s) else null;
         {
             var arena = std.heap.ArenaAllocator.init(a.gpa);
             defer arena.deinit();
             a.view.scratch_right = skin_mod.scratchRight(skin_mod.loadConf(arena.allocator(), "", skin_mod.playType(s.chart.mode)));
         }
-        a.view.best_ex = a.bestEx(&s.chart.sha256, s.params.ln_mode);
+        a.view.best_ex = a.bestEx(&s.chart.sha256, s.params.rec.ln_mode);
         const pace_target = play.paceTarget(a.cfg.pace_target, s.params.practice != null);
         a.view.target_ex = play.targetEx(pace_target, a.view.best_ex, s.chart.total_notes);
         a.view.target_label = play.pace_targets[@min(pace_target, play.pace_targets.len - 1)].label;
@@ -825,8 +833,8 @@ pub const App = struct {
                     },
                     c.SDL_SCANCODE_UP => a.cfg.green_ms += 25,
                     c.SDL_SCANCODE_DOWN => a.cfg.green_ms = @max(a.cfg.green_ms, 75) - 25,
-                    c.SDL_SCANCODE_PAGEUP => a.cfg.setCover(a.cfg.lane_cover + 0.02),
-                    c.SDL_SCANCODE_PAGEDOWN => a.cfg.setCover(a.cfg.lane_cover - 0.02),
+                    c.SDL_SCANCODE_PAGEUP => a.moveCover(0.02),
+                    c.SDL_SCANCODE_PAGEDOWN => a.moveCover(-0.02),
                     c.SDL_SCANCODE_HOME => a.cfg.setLift(a.cfg.lift + 0.02),
                     c.SDL_SCANCODE_END => a.cfg.setLift(a.cfg.lift - 0.02),
                     c.SDL_SCANCODE_INSERT => a.cfg.setHidden(a.cfg.hidden + 0.02),
@@ -1232,16 +1240,12 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
     defer result.dropBoard(app);
     if (opts.play_path) |p| {
         app.exit_after_play = opts.shot == null;
-        var params: session_mod.Params = .{ .path = p, .autoplay = opts.autoplay, .gauge = config.gaugeType(cfg.gauge), .gas = cfg.gauge == config.gas, .start_us = opts.start_us };
+        var params: session_mod.Params = .{ .path = p, .autoplay = opts.autoplay, .rec = config.playOptions(&app.cfg, 0), .start_us = opts.start_us };
         if (opts.replay) |rp| {
             const bytes = try fs.readAlloc(arena.allocator(), rp, 1 << 28);
             const r = try core.replay.decode(arena.allocator(), bytes);
             params.replay = r;
-            params.gauge = r.gauge;
-            params.gas = r.gas;
-            params.random = r.random;
-            params.ln_mode = r.ln_mode;
-            params.seed = r.seed;
+            params.rec = r;
         }
         if (opts.decide) app.decidePlay(params, true) else app.startPlay(params, true);
     }

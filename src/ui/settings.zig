@@ -13,6 +13,7 @@ const i18n = @import("i18n.zig");
 const tr = i18n.tr;
 const app_mod = @import("app.zig");
 const select = @import("select.zig");
+const play = @import("play.zig");
 const db_mod = @import("../db/db.zig");
 const input = @import("../input/input.zig");
 const ir = @import("../net/ir.zig");
@@ -24,6 +25,8 @@ const App = app_mod.App;
 const Section = enum {
     library,
     tables,
+    play,
+    assist,
     audio,
     display,
     skin,
@@ -36,6 +39,8 @@ const Section = enum {
         return switch (sec) {
             .library => tr("Library"),
             .tables => tr("Tables"),
+            .play => tr("Play"),
+            .assist => tr("Assist"),
             .audio => tr("Audio"),
             .display => tr("Display"),
             .skin => tr("Skin"),
@@ -48,13 +53,33 @@ const Section = enum {
 };
 
 // Declared in section order: the cursor walks this list.
-const Item = enum {
+pub const Item = enum {
     add_root,
     remove_root,
     open_data,
     add_table,
     update_tables,
     table_list,
+    random,
+    random2,
+    double_option,
+    gauge,
+    gauge_auto_shift,
+    gas_floor,
+    hs_fix,
+    hs_auto_adjust,
+    ln_mode,
+    judge_algorithm,
+    pace_target,
+    constant,
+    judge_auto_adjust,
+    assist_expand_judge,
+    assist_constant,
+    assist_judge_area,
+    assist_legacy,
+    assist_mark_note,
+    assist_bpm_guide,
+    assist_no_mine,
     volume,
     bgm_volume,
     bgm_set,
@@ -75,8 +100,12 @@ const Item = enum {
     skin_slots,
     open_skins,
     green,
+    lane_cover,
+    lane_cover_on,
     lift,
+    lift_on,
     hidden,
+    hidden_on,
     judge_offset,
     visual_offset,
     import_beatoraja,
@@ -106,10 +135,12 @@ const Item = enum {
         return switch (it) {
             .add_root, .remove_root, .open_data => .library,
             .add_table, .update_tables, .table_list => .tables,
+            .random, .random2, .double_option, .gauge, .gauge_auto_shift, .gas_floor, .hs_fix, .hs_auto_adjust, .ln_mode, .judge_algorithm, .pace_target, .constant, .judge_auto_adjust => .play,
+            .assist_expand_judge, .assist_constant, .assist_judge_area, .assist_legacy, .assist_mark_note, .assist_bpm_guide, .assist_no_mine => .assist,
             .volume, .bgm_volume, .bgm_set, .sfx_volume, .sound_set, .audio_rate, .audio_frames, .audio_device => .audio,
             .resolution, .fullscreen, .vsync, .fps_limit, .reflex, .bga, .bga_upscale, .language => .display,
             .skin, .skin_slots, .open_skins => .skin,
-            .green, .lift, .hidden, .judge_offset, .visual_offset => .timing,
+            .green, .lane_cover, .lane_cover_on, .lift, .lift_on, .hidden, .hidden_on, .judge_offset, .visual_offset => .timing,
             .import_beatoraja, .import_lr2 => .scores,
             .ir_url, .ir_signup, .ir_signin, .ir_rename, .ir_send_failed, .ir_upload, .ir_download, .download_url, .update => .online,
             .input_poll, .evdev_input, .bind_4k, .bind_5k, .bind_6k, .bind_7k, .bind_10k, .bind_14k, .bind_9k, .beatoraja_select, .bind_start => .controls,
@@ -123,6 +154,30 @@ const Item = enum {
             .add_table => tr("Add by address"),
             .update_tables => tr("Update all"),
             .table_list => tr("Tables"),
+            .random => tr("Random"),
+            .random2 => tr("Random (2P side)"),
+            .double_option => tr("DP option"),
+            .gauge => tr("Gauge"),
+            .gauge_auto_shift => tr("Gauge auto shift (GAS)"),
+            .gas_floor => tr("GAS lowest gauge"),
+            .hs_fix => tr("Hi-speed fix"),
+            .hs_auto_adjust => tr("Hi-speed auto adjust"),
+            .ln_mode => tr("LN mode"),
+            .judge_algorithm => tr("Judge algorithm"),
+            .pace_target => tr("Target"),
+            .constant => tr("Constant (variable sudden)"),
+            .judge_auto_adjust => tr("Judge timing auto adjust"),
+            .assist_expand_judge => tr("Expand judge"),
+            .assist_constant => tr("Constant speed"),
+            .assist_judge_area => tr("Judge area"),
+            .assist_legacy => tr("Legacy note"),
+            .assist_mark_note => tr("Mark note"),
+            .assist_bpm_guide => tr("BPM guide"),
+            .assist_no_mine => tr("No mine"),
+            .lane_cover => tr("Lane cover"),
+            .lane_cover_on => tr("Show lane cover"),
+            .lift_on => tr("Show lift"),
+            .hidden_on => tr("Show hidden"),
             .volume => tr("Master volume"),
             .bgm_volume => tr("Menu music"),
             .bgm_set => tr("Music set"),
@@ -180,6 +235,24 @@ const Item = enum {
             .add_table => tr("Paste a table's web address with Ctrl+V. It loads right away."),
             .update_tables => tr("Downloads every added table again. F8 in song select does the same."),
             .table_list => tr("Enter adds or removes the selected table. Removing keeps chart scores."),
+            .random => tr("Lane option for single play and the 1P side. The EX ones move the scratch too."),
+            .random2 => tr("Lane option for the 2P side of double play."),
+            .double_option => tr("FLIP swaps the sides of a double chart. BATTLE plays a single chart on both sides, AS with auto scratch; it is not saved."),
+            .gauge => tr("The gauge a play starts on."),
+            .gauge_auto_shift => tr("What the gauge does when it would fail or could do better. Select to under shifts down from the gauge above."),
+            .gas_floor => tr("The lowest gauge auto shift may fall to."),
+            .hs_fix => tr("The BPM the green number refers to."),
+            .hs_auto_adjust => tr("Moving the lane cover during play takes the BPM playing now as the reference."),
+            .ln_mode => tr("What the chart's undecided long notes play as. Scores are kept per mode, and the IR ranks LN only."),
+            .judge_algorithm => tr("Which note a press takes when several are in reach: the one that keeps combo, the closest, or the lowest."),
+            .pace_target => tr("What the pace graph and the play screen compare against."),
+            .constant => tr("Notes appear the green number's time before the line, whatever the BPM does."),
+            .judge_auto_adjust => tr("After each play, moves the judge offset to centre that play's timing."),
+            .assist_expand_judge, .assist_legacy, .assist_no_mine => tr("Changes the notes or their judging: a play with it is not saved."),
+            .assist_constant => tr("Notes scroll at one speed through BPM changes and stops. A play with it is not saved."),
+            .assist_judge_area, .assist_mark_note, .assist_bpm_guide => tr("A drawing aid. A play with it is not saved, as beatoraja counts it as an assist."),
+            .lane_cover => tr("Covers the top of the lane. Page Up and Page Down change it during play."),
+            .lane_cover_on, .lift_on, .hidden_on => tr("Off keeps the amount for when it is back on."),
             .volume => tr("Everything the game plays."),
             .sound_set => tr("Enter or click lists the sound sets, or picks a folder holding them. Left/Right steps through them."),
             .bgm_set => tr("Enter or click lists select and decide music, or picks a folder holding it. Left/Right steps through them."),
@@ -191,7 +264,7 @@ const Item = enum {
             .resolution => tr("Applies at once. Fullscreen always fills the screen."),
             .fullscreen => tr("Applies at once."),
             .vsync => tr("Applies at once. Off lowers input latency and may tear."),
-            .bga => tr("Off plays without background images and movies, from the next chart."),
+            .bga => tr("Off plays without background images and movies, Auto shows them in autoplay and replays only. From the next chart."),
             .fps_limit => tr("Applies at once. Off leaves the frame rate to VSync. Judging does not depend on it."),
             .bga_upscale => tr("Cleaner, sharper movies when they are enlarged, for a little CPU and GPU time per movie frame. Applies to the next chart for deblocking."),
             .reflex => tr("NVIDIA GPUs only. Boost holds GPU clocks high and uses more power."),
@@ -704,10 +777,11 @@ fn drawStepper(g: *gfx.Gfx, right: f32, y: f32, h: f32, value: []const u8, on: b
     const ty = y + (h - 22 * u) / 2;
     const col = if (on) gfx.white else gfx.dim;
     g.textRight(">", right, ty, g.scaled(16), col);
-    g.textCentered(value, right - 80 * u, ty, g.scaled(16), gfx.white);
-    g.textRight("<", right - 150 * u, ty, g.scaled(16), col);
+    // Wide enough for the longest beatoraja option name, SELECT TO UNDER.
+    g.textCentered(value, right - 105 * u, ty, g.scaled(16), gfx.white);
+    g.textRight("<", right - 200 * u, ty, g.scaled(16), col);
     const box = 36 * u;
-    if (g.clickIn(right - 150 * u - box + 8 * u, y, box, h)) return -1;
+    if (g.clickIn(right - 200 * u - box + 8 * u, y, box, h)) return -1;
     if (g.clickIn(right - box + 8 * u, y, box, h)) return 1;
     return 0;
 }
@@ -784,7 +858,23 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
         .resolution => step(a, it, drawStepper(g, right, y, h, std.fmt.bufPrint(&buf, "{d}x{d}", .{ cfg.width, cfg.height }) catch "", on)),
         .fullscreen => drawToggle(g, right, y, h, cfg.fullscreen, on),
         .bga_upscale => drawToggle(g, right, y, h, cfg.bga_upscale, on),
-        .bga => drawToggle(g, right, y, h, cfg.bga, on),
+        .bga => if (drawChoices(g, right, y, h, &.{ tr("On"), tr("Auto"), tr("Off") }, if (!cfg.bga) 2 else if (cfg.bga_auto) 1 else 0, on)) |i| {
+            a.sfx(.adjust);
+            cfg.bga = i != 2;
+            cfg.bga_auto = i == 1;
+        },
+        .random => step(a, it, drawStepper(g, right, y, h, select.random_names[cfg.random], on)),
+        .random2 => step(a, it, drawStepper(g, right, y, h, select.random_names[cfg.random2], on)),
+        .double_option => step(a, it, drawStepper(g, right, y, h, select.double_names[cfg.double_option], on)),
+        .gauge => step(a, it, drawStepper(g, right, y, h, select.gauge_names[cfg.gauge_type], on)),
+        .gauge_auto_shift => step(a, it, drawStepper(g, right, y, h, select.gas_names[cfg.gauge_auto_shift], on)),
+        .gas_floor => step(a, it, drawStepper(g, right, y, h, select.gauge_names[cfg.gas_floor], on)),
+        .hs_fix => step(a, it, drawStepper(g, right, y, h, select.hs_names[cfg.hs_fix], on)),
+        .ln_mode => step(a, it, drawStepper(g, right, y, h, select.ln_names[cfg.ln_mode], on)),
+        .judge_algorithm => step(a, it, drawStepper(g, right, y, h, select.algorithm_names[cfg.judge_algorithm], on)),
+        .pace_target => step(a, it, drawStepper(g, right, y, h, play.paceTargetName(cfg.pace_target), on)),
+        .lane_cover => step(a, it, drawStepper(g, right, y, h, std.fmt.bufPrint(&buf, "{d}%", .{@as(u32, @intFromFloat(@round(cfg.lane_cover * 100)))}) catch "", on)),
+        .hs_auto_adjust, .constant, .judge_auto_adjust, .lane_cover_on, .lift_on, .hidden_on, .assist_expand_judge, .assist_constant, .assist_judge_area, .assist_legacy, .assist_mark_note, .assist_bpm_guide, .assist_no_mine => drawToggle(g, right, y, h, flagOf(cfg, it).?.*, on),
         .evdev_input => drawToggle(g, right, y, h, cfg.evdev_input, on),
         .ir_send_failed => drawToggle(g, right, y, h, cfg.ir_send_failed, on),
         .fps_limit => step(a, it, drawStepper(g, right, y, h, if (cfg.fps_limit == 0) tr("Off") else std.fmt.bufPrint(&buf, "{d}", .{fps_limits[fpsIndex(cfg.fps_limit)]}) catch "", on)),
@@ -972,11 +1062,27 @@ pub fn draw(a: *App) void {
     }
 }
 
+/// The on/off rows that are just a config flag.
+fn flagOf(cfg: *config.Config, it: Item) ?*bool {
+    return switch (it) {
+        .hs_auto_adjust => &cfg.hs_auto_adjust,
+        .constant => &cfg.constant,
+        .judge_auto_adjust => &cfg.judge_auto_adjust,
+        .lane_cover_on => &cfg.lane_cover_on,
+        .lift_on => &cfg.lift_on,
+        .hidden_on => &cfg.hidden_on,
+        // These rows stand in beatoraja's order, as config.Assists does.
+        .assist_expand_judge, .assist_constant, .assist_judge_area, .assist_legacy, .assist_mark_note, .assist_bpm_guide, .assist_no_mine => config.Assists.flag(&cfg.assist, @backingInt(it) - @backingInt(Item.assist_expand_judge)),
+        else => null,
+    };
+}
+
 /// Rows where a click on the row itself does what Enter does.
 fn rowActs(it: Item) bool {
     return switch (it) {
         // Lists open from their value or with Enter, not from anywhere on the row.
         .volume, .bgm_volume, .sfx_volume, .audio_rate, .audio_frames, .audio_device, .resolution, .vsync, .fps_limit, .reflex, .language, .input_poll, .lift, .hidden, .judge_offset, .visual_offset, .skin, .bgm_set, .sound_set => false,
+        .bga, .random, .random2, .double_option, .gauge, .gauge_auto_shift, .gas_floor, .hs_fix, .ln_mode, .judge_algorithm, .pace_target, .lane_cover => false,
         else => true,
     };
 }
@@ -1014,7 +1120,23 @@ fn adjust(a: *App, it: Item, dir: i32) void {
         },
         .language => setLanguage(a, @fromBackingInt(@intCast(@mod(@as(i32, @backingInt(i18n.current)) + dir, @as(i32, i18n.names.len))))),
         .beatoraja_select => cfg.beatoraja_select = !cfg.beatoraja_select,
-        .bga => cfg.bga = !cfg.bga,
+        .bga => select.cycleBga(cfg, dir),
+        .random => cfg.random = select.cycle(cfg.random, select.random_names.len, dir),
+        .random2 => cfg.random2 = select.cycle(cfg.random2, select.random_names.len, dir),
+        .double_option => cfg.double_option = select.cycle(cfg.double_option, select.double_names.len, dir),
+        .gauge => cfg.gauge_type = select.cycle(cfg.gauge_type, select.gauge_names.len, dir),
+        .gauge_auto_shift => cfg.gauge_auto_shift = select.cycle(cfg.gauge_auto_shift, select.gas_names.len, dir),
+        // A-EASY, EASY and NORMAL, as beatoraja offers.
+        .gas_floor => cfg.gas_floor = select.cycle(cfg.gas_floor, 3, dir),
+        .hs_fix => cfg.hs_fix = select.cycle(cfg.hs_fix, select.hs_names.len, dir),
+        .ln_mode => select.setLnMode(a, select.cycle(cfg.ln_mode, select.ln_names.len, dir)),
+        .judge_algorithm => cfg.judge_algorithm = select.cycle(cfg.judge_algorithm, select.algorithm_names.len, dir),
+        .pace_target => cfg.pace_target = select.cycle(@min(cfg.pace_target, play.pace_targets.len - 1), play.pace_targets.len, dir),
+        .lane_cover => cfg.setCover(cfg.lane_cover + 0.01 * @as(f32, @floatFromInt(dir))),
+        .hs_auto_adjust, .constant, .judge_auto_adjust, .lane_cover_on, .lift_on, .hidden_on, .assist_expand_judge, .assist_constant, .assist_judge_area, .assist_legacy, .assist_mark_note, .assist_bpm_guide, .assist_no_mine => {
+            const flag = flagOf(cfg, it).?;
+            flag.* = !flag.*;
+        },
         .evdev_input => {
             if (!cfg.evdev_input and !input.evdevReadable()) return say(a, "Reading /dev/input needs the input group: run sudo usermod -aG input $USER, then log in again.", .{});
             cfg.evdev_input = !cfg.evdev_input;
@@ -1443,7 +1565,7 @@ fn activate(a: *App, it: Item) void {
     const s = &a.set;
     // Arrow rows step with Left/Right and their arrows only.
     switch (it) {
-        .lift, .hidden, .judge_offset, .visual_offset => return,
+        .lift, .hidden, .lane_cover, .judge_offset, .visual_offset => return,
         else => {},
     }
     a.sfx(.confirm);
@@ -1557,9 +1679,11 @@ test "a typed green number comes back exactly" {
     try std.testing.expectEqual(@as(u32, green_max), greenShown(greenMs(99999)));
 }
 
-fn openItem(a: *App, it: Item) void {
+/// Opens settings at a row, as song select's option tabs do.
+pub fn openItem(a: *App, it: Item) void {
     a.set.cursor = std.mem.indexOfScalar(Item, items, it).?;
     a.set.inside = true;
+    a.scene = .settings;
 }
 
 test "tabs wrap, enter goes in and escape comes out, then leaves" {

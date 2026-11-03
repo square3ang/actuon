@@ -45,7 +45,7 @@ fn adjust(a: *App, dir: i32) void {
         0 => p.start_ms = std.math.clamp(p.start_ms + d * step_ms, 0, @max(p.end_ms - step_ms, 0)),
         1 => p.end_ms = std.math.clamp(p.end_ms + d * step_ms, @min(p.start_ms + step_ms, p.length_ms), p.length_ms),
         2 => p.freq = @intCast(std.math.clamp(@as(i32, @intCast(p.freq)) + dir * 5, session_mod.Practice.min_freq, session_mod.Practice.max_freq)),
-        3 => a.cfg.gauge = @intCast(@mod(@as(i32, a.cfg.gauge) + dir, config.gas + 1)),
+        3 => a.cfg.gauge_type = select.cycle(a.cfg.gauge_type, select.gauge_names.len, dir),
         else => p.judgerank = std.math.clamp(p.judgerank + dir * 5, 0, 200),
     }
     a.sfx(.adjust);
@@ -100,7 +100,7 @@ pub fn draw(a: *App) void {
         clock(&bufs[0], p.start_ms),
         clock(&bufs[1], p.end_ms),
         std.fmt.bufPrint(&bufs[2], "{d}%", .{p.freq}) catch "",
-        select.gauge_names[@min(a.cfg.gauge, config.gas)],
+        select.gauge_names[a.cfg.gauge_type],
         judge,
     };
     for (labels, values, 0..) |label, value, i| {

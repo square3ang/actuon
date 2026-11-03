@@ -26,22 +26,24 @@ SCREENS = {
     "select_root": (keys(), [], EXACT),
     "select_library": (keys("Return"), [], EXACT),
     "select_songs": (keys("Return", "Return", "Down"), [], EXACT),
-    "select_options": (keys("F1", "F2", "F3", "F4", "F5"), [], EXACT),
+    "select_options": (keys("F4", "F5"), [], EXACT),
     "select_search": (keys("F6"), [], EXACT),
     "select_courses": (keys("Up", "Return"), [], EXACT),
     "select_ir": (keys("F9"), [], EXACT),
     "settings_tabs": (tab(0), [], EXACT),
     "settings_library": (tab(0, "Return"), [], EXACT),
     "settings_tables": (tab(1, "Return"), [], EXACT),
-    "settings_audio": (tab(2, "Return"), [], EXACT),
-    "settings_display": (tab(3, "Return"), [], EXACT),
-    "settings_skin": (tab(4, "Return"), [], EXACT),
-    "settings_timing": (tab(5, "Return"), [], EXACT),
-    "settings_edit": (tab(5, "Return", "Return"), [], EXACT),
-    "settings_scores": (tab(6, "Return"), [], EXACT),
-    "settings_online": (tab(7, "Return"), [], EXACT),
-    "settings_controls": (tab(8, "Return"), [], EXACT),
-    "settings_capture": (tab(8, "Return", "Down", "Return"), [], EXACT),
+    "settings_play": (tab(2, "Return"), [], EXACT),
+    "settings_assist": (tab(3, "Return"), [], EXACT),
+    "settings_audio": (tab(4, "Return"), [], EXACT),
+    "settings_display": (tab(5, "Return"), [], EXACT),
+    "settings_skin": (tab(6, "Return"), [], EXACT),
+    "settings_timing": (tab(7, "Return"), [], EXACT),
+    "settings_edit": (tab(7, "Return", "Return"), [], EXACT),
+    "settings_scores": (tab(8, "Return"), [], EXACT),
+    "settings_online": (tab(9, "Return"), [], EXACT),
+    "settings_controls": (tab(10, "Return"), [], EXACT),
+    "settings_capture": (tab(10, "Return", "Down", "Return"), [], EXACT),
     "play": (keys(), [chart, "--auto"], MOVING),
     "play_double": (keys(), [os.path.join(root, "tests/charts/double.bme"), "--auto"], MOVING),
     "result": (keys(), [chart, "--auto"], EXACT),
@@ -92,7 +94,9 @@ failed = 0
 for name, (_, _, allowed) in SCREENS.items():
     new = pixels(os.path.join(out, name + ".bmp"))
     assert any(new), f"{name}: empty image"
-    if baseline:
+    if baseline and not os.path.exists(os.path.join(baseline, name + ".bmp")):
+        print(f"new  {name}")
+    elif baseline:
         d = difference(pixels(os.path.join(baseline, name + ".bmp")), new)
         ok = d <= allowed
         failed += not ok

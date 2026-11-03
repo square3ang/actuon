@@ -69,7 +69,7 @@ fn startImpl(a: *App, id: i64) !void {
         };
         try paths.append(al, p);
     }
-    const chosen: core.options.Random = @fromBackingInt(@intCast(@min(a.cfg.random, 4)));
+    const chosen: core.options.Random = @fromBackingInt(a.cfg.random);
     const allowed: core.options.Random = switch (limits.random) {
         0 => .off,
         1 => if (chosen == .mirror) .mirror else .off,
@@ -92,9 +92,7 @@ fn launch(a: *App) void {
     const r = &a.course.?;
     a.startPlay(.{
         .path = r.paths[r.stage],
-        .gauge = r.gauge,
-        .random = r.random,
-        .seed = c.SDL_GetTicksNS(),
+        .rec = .{ .gauge = r.gauge, .random = r.random, .seed = c.SDL_GetTicksNS() },
         .initial_gauge = r.gauge_value,
         .judge_offset_us = @as(i64, a.cfg.judge_offset_ms) * 1000,
     }, false);

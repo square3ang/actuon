@@ -105,6 +105,8 @@ pub const State = struct {
     /// The 5 key: beatoraja's way to the detail panel from a keyboard.
     detail_held: bool = false,
     exit_since_ms: u64 = 0,
+    /// Last Start press in play, to find a double press.
+    start_down_ms: u64 = 0,
     /// Index into `mode_filters`.
     mode_filter: u8 = 0,
     /// Up to `max_replays` newest are offered per chart, as beatoraja's slots.
@@ -120,9 +122,14 @@ pub const State = struct {
     pad_scroll_at_ms: u64 = 0,
 };
 
-const random_names = [_][]const u8{ "OFF", "MIRROR", "RANDOM", "R-RANDOM", "S-RANDOM" };
-pub const gauge_names = [_][]const u8{ "ASSIST EASY", "EASY", "NORMAL", "HARD", "EX HARD", "HAZARD", "GAS" };
-const hs_names = [_][]const u8{ "START", "MAX", "MAIN", "OFF" };
+// Option names in the order of their config values, which are beatoraja's but for HS FIX.
+pub const random_names = [_][]const u8{ "OFF", "MIRROR", "RANDOM", "R-RANDOM", "S-RANDOM", "SPIRAL", "H-RANDOM", "ALL-SCR", "RANDOM-EX", "S-RANDOM-EX" };
+pub const gauge_names = [_][]const u8{ "ASSIST EASY", "EASY", "NORMAL", "HARD", "EX HARD", "HAZARD" };
+pub const gas_names = [_][]const u8{ "OFF", "CONTINUE", "HARD TO GROOVE", "BEST CLEAR", "SELECT TO UNDER" };
+pub const hs_names = [_][]const u8{ "START", "MAX", "MAIN", "OFF", "MIN" };
+pub const double_names = [_][]const u8{ "OFF", "FLIP", "BATTLE", "BATTLE AS" };
+pub const algorithm_names = [_][]const u8{ "COMBO", "DURATION", "LOWEST" };
+pub const ln_names = [_][]const u8{ "LN", "CN", "HCN" };
 // In beatoraja's order: its skins show the sort by this index.
 const sort_count = 8;
 const scan_interval_ms = 30_000;
@@ -327,10 +334,6 @@ test "keys mark a favorite and the favorites folder lists it" {
     try std.testing.expectEqualStrings(&sha, a.sel.rows[0].song.?.sha256);
     key(a, c.SDL_SCANCODE_F);
     try std.testing.expectEqual(@as(usize, 0), a.sel.rows.len);
-    const was = a.cfg.pace_target;
-    key(a, c.SDL_SCANCODE_9);
-    try std.testing.expect(a.cfg.pace_target != was);
-    a.cfg.pace_target = was;
 }
 
 test "search patterns escape LIKE's wildcards" {
@@ -995,17 +998,27 @@ fn drawDock(a: *App, dock_y: f32) void {
     const g = &a.g;
     const s = &a.sel;
     const u = g.h / 720;
+    // A tab with a settings row opens it; one with a key presses that key.
     const tab = struct {
-        fn f(aa: *App, ox: f32, oy: f32, w: f32, sc: u32, key_name: []const u8, label: []const u8, value: []const u8) void {
+        fn f(aa: *App, ox: f32, oy: f32, w: f32, target: union(enum) { key: u32, row: settings.Item }, key_name: []const u8, label: []const u8, value: []const u8) void {
             const gg = &aa.g;
             const uu = gg.h / 720;
             const hover = gg.hit(ox, oy, w, 44 * uu);
-            if (gg.clickIn(ox, oy, w, 44 * uu)) aa.click_key = sc;
+            if (gg.clickIn(ox, oy, w, 44 * uu)) switch (target) {
+                .key => |sc| aa.click_key = sc,
+                .row => |it| {
+                    aa.sfxOr(aa.sfx_option_open, .confirm);
+                    settings.openItem(aa, it);
+                },
+            };
             gg.round(ox, oy, w, 44 * uu, 8 * uu, if (hover) gfx.rule else gfx.plate.alpha(225));
-            gg.round(ox + 8 * uu, oy + 6 * uu, 30 * uu, 18 * uu, 4 * uu, gfx.accent);
-            _ = gg.text(key_name, ox + 14 * uu, oy + 6 * uu, gg.scaled(12), gfx.white);
-            _ = gg.text(label, ox + 46 * uu, oy + 5 * uu, gg.scaled(12), gfx.dim);
-            gg.textClip(value, ox + 46 * uu, oy + 20 * uu, w - 56 * uu, gg.scaled(16), gfx.white);
+            const text_x = if (key_name.len > 0) ox + 46 * uu else ox + 12 * uu;
+            if (key_name.len > 0) {
+                gg.round(ox + 8 * uu, oy + 6 * uu, 30 * uu, 18 * uu, 4 * uu, gfx.accent);
+                _ = gg.text(key_name, ox + 14 * uu, oy + 6 * uu, gg.scaled(12), gfx.white);
+            }
+            _ = gg.text(label, text_x, oy + 5 * uu, gg.scaled(12), gfx.dim);
+            gg.textClip(value, text_x, oy + 20 * uu, ox + w - 10 * uu - text_x, gg.scaled(16), gfx.white);
         }
     }.f;
     const on = a.cfg.beatoraja_select;
@@ -1016,17 +1029,19 @@ fn drawDock(a: *App, dock_y: f32) void {
             return 14 * uu + (width + 6 * uu) * i;
         }
     }.f;
-    var dock_buf: [32]u8 = undefined;
-    tab(a, tab_x(u, tw, 0), dock_y, tw, c.SDL_SCANCODE_F1, "F1", "RANDOM", random_names[@min(a.cfg.random, 4)]);
-    tab(a, tab_x(u, tw, 1), dock_y, tw, c.SDL_SCANCODE_F2, "F2", "GAUGE", gauge_names[@min(a.cfg.gauge, config.gas)]);
-    tab(a, tab_x(u, tw, 2), dock_y, tw, c.SDL_SCANCODE_F3, "F3", "HS FIX / GREEN", std.fmt.bufPrint(&dock_buf, "{s}  {d}", .{ hs_names[@min(a.cfg.hs_fix, 3)], a.cfg.green_ms * 3 / 5 }) catch "");
-    tab(a, tab_x(u, tw, 3), dock_y, tw, c.SDL_SCANCODE_F4, if (on) "2" else "F4", tr("SORT"), ([sort_count][]const u8{ tr("TITLE"), tr("ARTIST"), "BPM", tr("LENGTH"), tr("LEVEL"), "CLEAR", "EX", "MISS" })[s.sort]);
-    tab(a, tab_x(u, tw, 4), dock_y, tw, c.SDL_SCANCODE_1, "1", tr("KEY MODE"), mode_filters[s.mode_filter].name);
-    tab(a, tab_x(u, tw, 5), dock_y, tw, c.SDL_SCANCODE_3, "3", "LN MODE", ([_][]const u8{ "LN", "CN", "HCN" })[@min(a.cfg.ln_mode, 2)]);
+    var dock_buf: [2][48]u8 = undefined;
+    const cfg_ = &a.cfg;
+    const gauge_value = if (cfg_.gauge_auto_shift == 0) gauge_names[cfg_.gauge_type] else std.fmt.bufPrint(&dock_buf[1], "{s} +GAS", .{gauge_names[cfg_.gauge_type]}) catch "";
+    tab(a, tab_x(u, tw, 0), dock_y, tw, .{ .row = .random }, "", "RANDOM", random_names[cfg_.random]);
+    tab(a, tab_x(u, tw, 1), dock_y, tw, .{ .row = .gauge }, "", "GAUGE", gauge_value);
+    tab(a, tab_x(u, tw, 2), dock_y, tw, .{ .row = .hs_fix }, "", "HS FIX / GREEN", std.fmt.bufPrint(&dock_buf[0], "{s}  {d}", .{ hs_names[cfg_.hs_fix], cfg_.green_ms * 3 / 5 }) catch "");
+    tab(a, tab_x(u, tw, 3), dock_y, tw, .{ .key = c.SDL_SCANCODE_F4 }, if (on) "2" else "F4", tr("SORT"), ([sort_count][]const u8{ tr("TITLE"), tr("ARTIST"), "BPM", tr("LENGTH"), tr("LEVEL"), "CLEAR", "EX", "MISS" })[s.sort]);
+    tab(a, tab_x(u, tw, 4), dock_y, tw, .{ .key = c.SDL_SCANCODE_1 }, "1", tr("KEY MODE"), mode_filters[s.mode_filter].name);
+    tab(a, tab_x(u, tw, 5), dock_y, tw, if (on) .{ .key = c.SDL_SCANCODE_3 } else .{ .row = .ln_mode }, if (on) "3" else "", "LN MODE", ln_names[cfg_.ln_mode]);
     var replay_buf: [16]u8 = undefined;
     const replays = if (selectedSong(s)) |song| replaysOf(a, song.sha256) else 0;
-    tab(a, tab_x(u, tw, 6), dock_y, tw, c.SDL_SCANCODE_4, "4", tr("REPLAY"), if (replays == 0) tr("NONE") else std.fmt.bufPrint(&replay_buf, "{d} / {d}", .{ s.replay_slot + 1, replays }) catch "");
-    tab(a, tab_x(u, tw, tabs - 1), dock_y, tw, c.SDL_SCANCODE_F5, "F5", tr("AUTOPLAY"), if (s.autoplay) "ON" else "OFF");
+    tab(a, tab_x(u, tw, 6), dock_y, tw, .{ .key = c.SDL_SCANCODE_4 }, "4", tr("REPLAY"), if (replays == 0) tr("NONE") else std.fmt.bufPrint(&replay_buf, "{d} / {d}", .{ s.replay_slot + 1, replays }) catch "");
+    tab(a, tab_x(u, tw, tabs - 1), dock_y, tw, .{ .key = c.SDL_SCANCODE_F5 }, "F5", tr("AUTOPLAY"), if (s.autoplay) "ON" else "OFF");
 
     // The remaining commands, as a row of text buttons.
     const Cmd = struct { sc: u32, label: []const u8 };
@@ -1041,7 +1056,6 @@ fn drawDock(a: *App, dock_y: f32) void {
         .{ .sc = c.SDL_SCANCODE_P, .label = tr("P Practice") },
         .{ .sc = c.SDL_SCANCODE_F, .label = tr("F Favorite") },
         .{ .sc = c.SDL_SCANCODE_8, .label = tr("8 Folder") },
-        .{ .sc = c.SDL_SCANCODE_9, .label = tr("9 Target") },
         .{ .sc = c.SDL_SCANCODE_ESCAPE, .label = tr("Esc Back") },
     };
     var name_buf: [4][32]u8 = undefined;
@@ -1160,27 +1174,48 @@ fn drawPanel(a: *App) void {
     if (panel == 0) return;
     const g = &a.g;
     const u = g.h / 720;
-    var buf: [3][96]u8 = undefined;
-    var names: [3][32]u8 = undefined;
+    var buf: [7][96]u8 = undefined;
+    var names: [7][32]u8 = undefined;
     const cfg = &a.cfg;
-    const lines: [3][]const u8 = switch (panel) {
-        1 => .{
-            std.fmt.bufPrint(&buf[0], "{s}, {s}  RANDOM  {s}", .{ settings.keyName(cfg.p1[0], &names[0]), settings.keyName(cfg.p1[1], &names[1]), random_names[@min(cfg.random, 4)] }) catch "",
-            std.fmt.bufPrint(&buf[1], "{s}  GAUGE  {s}", .{ settings.keyName(cfg.p1[2], &names[2]), gauge_names[@min(cfg.gauge, config.gas)] }) catch "",
-            std.fmt.bufPrint(&buf[2], "{s}  HS FIX  {s}", .{ settings.keyName(cfg.p1[4], &names[2]), hs_names[@min(cfg.hs_fix, 3)] }) catch "",
+    const keyOf = struct {
+        fn f(c_: *const config.Config, i: usize, out: *[32]u8) []const u8 {
+            return settings.keyName(c_.p1[i], out);
+        }
+    }.f;
+    const on = struct {
+        fn f(b: bool) []const u8 {
+            return if (b) "ON" else "OFF";
+        }
+    }.f;
+    var lines: [7][]const u8 = @splat("");
+    switch (panel) {
+        1 => {
+            lines[0] = std.fmt.bufPrint(&buf[0], "{s}, {s}  RANDOM  {s}", .{ keyOf(cfg, 0, &names[0]), keyOf(cfg, 1, &names[1]), random_names[cfg.random] }) catch "";
+            lines[1] = std.fmt.bufPrint(&buf[1], "{s}  GAUGE  {s}", .{ keyOf(cfg, 2, &names[2]), gauge_names[cfg.gauge_type] }) catch "";
+            lines[2] = std.fmt.bufPrint(&buf[2], "{s}  DP OPTION  {s}", .{ keyOf(cfg, 3, &names[3]), double_names[cfg.double_option] }) catch "";
+            lines[3] = std.fmt.bufPrint(&buf[3], "{s}  HS FIX  {s}", .{ keyOf(cfg, 4, &names[4]), hs_names[cfg.hs_fix] }) catch "";
+            lines[4] = std.fmt.bufPrint(&buf[4], "{s}, {s}  RANDOM 2P  {s}", .{ keyOf(cfg, 5, &names[5]), keyOf(cfg, 6, &names[6]), random_names[cfg.random2] }) catch "";
         },
-        2 => .{ tr("Nothing to set here yet"), "", "" },
-        else => .{
-            std.fmt.bufPrint(&buf[0], "{s}  BGA  {s}    {s}  GAS  {s}", .{ settings.keyName(cfg.p1[0], &names[1]), if (cfg.bga) "ON" else "OFF", settings.keyName(cfg.p1[1], &names[0]), if (cfg.gauge == config.gas) "ON" else "OFF" }) catch "",
-            i18n.bufPrint(&buf[1], "{s}, {s}  DURATION  {d} ms", .{ settings.keyName(cfg.p1[3], &names[0]), settings.keyName(cfg.p1[5], &names[1]), cfg.green_ms }) catch "",
-            i18n.bufPrint(&buf[2], "{s}, {s}  JUDGE OFFSET  {d} ms", .{ settings.keyName(cfg.p1[4], &names[0]), settings.keyName(cfg.p1[6], &names[1]), cfg.judge_offset_ms }) catch "",
+        2 => {
+            for (config.Assists.names, 0..) |name, i| lines[i] = std.fmt.bufPrint(&buf[i], "{s}  {s}  {s}", .{ keyOf(cfg, i, &names[i]), name, on(config.Assists.flag(&cfg.assist, i).*) }) catch "";
         },
-    };
-    const w = 420 * u;
+        else => {
+            lines[0] = std.fmt.bufPrint(&buf[0], "{s}  BGA  {s}", .{ keyOf(cfg, 0, &names[0]), if (!cfg.bga) "OFF" else if (cfg.bga_auto) "AUTO" else "ON" }) catch "";
+            lines[1] = std.fmt.bufPrint(&buf[1], "{s}  GAS  {s}", .{ keyOf(cfg, 1, &names[1]), gas_names[cfg.gauge_auto_shift] }) catch "";
+            lines[2] = i18n.bufPrint(&buf[2], "{s}, {s}  DURATION  {d} ms", .{ keyOf(cfg, 3, &names[3]), keyOf(cfg, 5, &names[5]), cfg.green_ms }) catch "";
+            lines[3] = i18n.bufPrint(&buf[3], "{s}, {s}  JUDGE OFFSET  {d} ms", .{ keyOf(cfg, 4, &names[4]), keyOf(cfg, 6, &names[6]), cfg.judge_offset_ms }) catch "";
+            lines[4] = tr("The rest is under F10 Settings, Play and Assist");
+        },
+    }
+    var count: usize = 0;
+    for (lines, 0..) |line, i| {
+        if (line.len > 0) count = i + 1;
+    }
+    const w = 460 * u;
     const x = (g.w - w) / 2;
-    const y = g.h * 0.32;
-    g.panel(x, y, w, 118 * u, "");
-    for (lines, 0..) |line, i| _ = g.text(line, x + 20 * u, y + 16 * u + 30 * u * @as(f32, @floatFromInt(i)), g.scaled(16), gfx.white);
+    const y = g.h * 0.28;
+    g.panel(x, y, w, (28 + 30 * @as(f32, @floatFromInt(count))) * u, "");
+    for (lines[0..count], 0..) |line, i| _ = g.text(line, x + 20 * u, y + 16 * u + 30 * u * @as(f32, @floatFromInt(i)), g.scaled(16), gfx.white);
 }
 
 fn barOf(row: Row) skin_scene.Bar {
@@ -1257,22 +1292,15 @@ fn fillSkinState(a: *App) void {
     st.stagefile = s.jacket;
     const cfg = &a.cfg;
     st.select.?.panel = panelOf(s);
-    st.select.?.gauge_index = @min(cfg.gauge, 4);
-    st.select.?.random_index = cfg.random;
-    // beatoraja lists off first and adds min BPM last.
-    st.select.?.hsfix_index = if (cfg.hs_fix >= 3) 0 else cfg.hs_fix + 1;
-    // GAS starts from the gauge picked and falls: beatoraja's "select to under".
-    st.select.?.autoshift_index = if (cfg.gauge == config.gas) 4 else 0;
-    st.select.?.bga_index = if (cfg.bga) 0 else 2;
+    st.select.?.cfg = cfg.*;
     st.select.?.mode_index = mode_filters[s.mode_filter].skin_index;
     st.select.?.sort_index = s.sort;
-    st.select.?.ln_index = @min(cfg.ln_mode, 2);
     st.select.?.replays = if (song) |sg| replaysOf(a, sg.sha256) else 0;
     st.select.?.replay_slot = s.replay_slot;
     st.green_ms = cfg.green_ms;
-    st.cover = cfg.lane_cover;
-    st.lift = cfg.lift;
-    st.hidden = cfg.hidden;
+    st.cover = cfg.coverShown();
+    st.lift = cfg.liftShown();
+    st.hidden = cfg.hiddenShown();
     st.judge_offset_ms = cfg.judge_offset_ms;
 }
 
@@ -1602,9 +1630,11 @@ fn startSong(a: *App, song: db_mod.Song) void {
 /// A round of a versus room: everyone's seed is the same, only LN mode ranks, and no decide screen holds up the clock.
 pub fn startVersus(a: *App, song: db_mod.Song, seed: u64) void {
     var params = songParams(a, song) orelse return;
-    params.seed = seed;
+    params.rec.seed = seed;
     params.autoplay = false;
-    params.ln_mode = .ln;
+    params.rec.ln_mode = .ln;
+    // Every player's round is ranked, so none of it may go unsaved.
+    params.assist = .{};
     a.startPlay(params, true);
 }
 
@@ -1626,13 +1656,10 @@ fn songParams(a: *App, song: db_mod.Song) ?session_mod.Params {
         .path = a.play_path_buf[0..song.path.len],
         .table_level = a.play_level_buf[0..level_n],
         .table_name = a.play_table_buf[0..table_n],
-        .gauge = config.gaugeType(a.cfg.gauge),
-        .gas = a.cfg.gauge == config.gas,
-        .random = @fromBackingInt(@intCast(@min(a.cfg.random, 4))),
-        .seed = c.SDL_GetTicksNS(),
+        .rec = config.playOptions(&a.cfg, c.SDL_GetTicksNS()),
+        .assist = config.assistOf(&a.cfg),
         .autoplay = a.sel.autoplay,
         .judge_offset_us = @as(i64, a.cfg.judge_offset_ms) * 1000,
-        .ln_mode = std.enums.fromInt(core.options.LnMode, a.cfg.ln_mode) orelse .ln,
     };
 }
 
@@ -1640,11 +1667,8 @@ fn startSongWith(a: *App, song: db_mod.Song, replay: ?core.replay.Replay, sectio
     var params = songParams(a, song) orelse return;
     if (replay) |r| {
         params.replay = r;
-        params.gauge = r.gauge;
-        params.gas = r.gas;
-        params.random = r.random;
-        params.seed = r.seed;
-        params.ln_mode = r.ln_mode;
+        params.rec = r;
+        params.assist = .{};
         params.autoplay = false;
         params.judge_offset_us = 0;
     }
@@ -1780,10 +1804,10 @@ fn keySound(a: *App, sc: u32) void {
     const s = &a.sel;
     switch (sc) {
         c.SDL_SCANCODE_UP, c.SDL_SCANCODE_DOWN, c.SDL_SCANCODE_PAGEUP, c.SDL_SCANCODE_PAGEDOWN => a.sfx(.move),
-        c.SDL_SCANCODE_F1, c.SDL_SCANCODE_F2, c.SDL_SCANCODE_F3, c.SDL_SCANCODE_F4, c.SDL_SCANCODE_F5 => a.sfx(.adjust),
+        c.SDL_SCANCODE_F4, c.SDL_SCANCODE_F5, c.SDL_SCANCODE_1 => a.sfx(.adjust),
+        c.SDL_SCANCODE_3 => if (a.cfg.beatoraja_select) a.sfx(.adjust),
         c.SDL_SCANCODE_F6, c.SDL_SCANCODE_F7, c.SDL_SCANCODE_F8, c.SDL_SCANCODE_F9, c.SDL_SCANCODE_7 => a.sfx(.confirm),
         c.SDL_SCANCODE_F10, c.SDL_SCANCODE_6 => a.sfxOr(a.sfx_option_open, .confirm),
-        c.SDL_SCANCODE_1, c.SDL_SCANCODE_3 => a.sfx(.adjust),
         c.SDL_SCANCODE_8 => if (selectedSong(s) != null) a.sfx(.confirm),
         c.SDL_SCANCODE_ESCAPE => a.sfx(.back),
         c.SDL_SCANCODE_RETURN => if (s.cursor < s.rows.len and s.rows[s.cursor].song == null and s.rows[s.cursor].kind != .course) a.sfx(.confirm),
@@ -1874,20 +1898,49 @@ fn padBrowse(a: *App, at: usize) void {
     }
 }
 
+/// Scores are kept per LN mode, so the list shows the new mode's.
+pub fn setLnMode(a: *App, mode: u8) void {
+    a.cfg.ln_mode = mode;
+    db_mod.setLnMode(a.db, mode) catch |e| std.log.err("LN mode not applied to scores: {t}", .{e});
+    a.sel.replay_slot = 0;
+    reload(a);
+}
+
+/// One step through a list of `n` choices, either way.
+pub fn cycle(v: u8, n: usize, dir: i32) u8 {
+    return @intCast(@mod(@as(i32, v) + dir, @as(i32, @intCast(n))));
+}
+
+/// The BGA setting's three states, as beatoraja's ON, AUTO, OFF.
+pub fn cycleBga(cfg: *config.Config, dir: i32) void {
+    const now: u8 = if (!cfg.bga) 2 else if (cfg.bga_auto) 1 else 0;
+    const next = cycle(now, 3, dir);
+    cfg.bga = next != 2;
+    cfg.bga_auto = next == 1;
+}
+
 fn padOption(a: *App, panel: u8, at: usize) void {
     const cfg = &a.cfg;
-    const gauges = config.gas + 1;
     switch (panel) {
         1 => switch (at) {
-            0 => cfg.random = (cfg.random + 1) % 5,
-            1 => cfg.random = (cfg.random + 4) % 5,
-            2 => cfg.gauge = (cfg.gauge + 1) % gauges,
-            4 => cfg.hs_fix = (cfg.hs_fix + 1) % 4,
+            0 => cfg.random = cycle(cfg.random, random_names.len, 1),
+            1 => cfg.random = cycle(cfg.random, random_names.len, -1),
+            2 => cfg.gauge_type = cycle(cfg.gauge_type, gauge_names.len, 1),
+            3 => cfg.double_option = cycle(cfg.double_option, double_names.len, 1),
+            4 => cfg.hs_fix = cycle(cfg.hs_fix, hs_names.len, 1),
+            5 => cfg.random2 = cycle(cfg.random2, random_names.len, 1),
+            6 => cfg.random2 = cycle(cfg.random2, random_names.len, -1),
             else => return,
         },
+        // The assists, in beatoraja's button order.
+        2 => {
+            if (at >= config.Assists.names.len) return;
+            const flag = config.Assists.flag(&cfg.assist, at);
+            flag.* = !flag.*;
+        },
         3 => switch (at) {
-            0 => cfg.bga = !cfg.bga,
-            1 => cfg.gauge = if (cfg.gauge == config.gas) 4 else config.gas,
+            0 => cycleBga(cfg, 1),
+            1 => cfg.gauge_auto_shift = cycle(cfg.gauge_auto_shift, gas_names.len, 1),
             3 => cfg.green_ms = @max(cfg.green_ms, 75) - 25,
             5 => cfg.green_ms += 25,
             4 => cfg.judge_offset_ms -= 1,
@@ -1909,7 +1962,6 @@ fn padSelect(a: *App, at: usize, panel: u8, down: bool, repeat: bool) void {
 
 /// Start + keys change hi-speed, Select + keys the green number by one, as in beatoraja's
 /// ControlInputProcessor. Never uses the input up: the same key still plays its note.
-/// shortcut: double-pressing Start does not toggle the lane cover, add it with a cover on/off setting.
 fn padPlay(a: *App, at: ?usize, down: bool, repeat: bool) void {
     const s = &a.sel;
     if (at) |i| if (i >= 7 and !down) {
@@ -1994,6 +2046,7 @@ pub fn pad(a: *App, code: u16, down: bool, repeat: bool) bool {
                     return false;
                 }
             }
+            if (is_start and down and !repeat and !a.pause.open) startTap(a, c.SDL_GetTicks());
             padPlay(a, at, down, repeat);
             return false;
         },
@@ -2002,6 +2055,16 @@ pub fn pad(a: *App, code: u16, down: bool, repeat: bool) bool {
 }
 
 const result_input_ms = 500;
+const double_press_ms = 500;
+
+/// Start pressed twice quickly shows or hides the lane cover, as in beatoraja.
+fn startTap(a: *App, now_ms: u64) void {
+    const s = &a.sel;
+    if (s.start_down_ms != 0 and now_ms - s.start_down_ms <= double_press_ms) {
+        a.cfg.lane_cover_on = !a.cfg.lane_cover_on;
+        s.start_down_ms = 0;
+    } else s.start_down_ms = now_ms;
+}
 // beatoraja's default exitPressDuration.
 const play_exit_hold_ms = 1000;
 
@@ -2027,7 +2090,7 @@ pub fn tickPad(a: *App, now_ms: u64) void {
             if (s.pad_scroll == 0 or now_ms < s.pad_scroll_at_ms) return;
             s.pad_scroll_at_ms = now_ms + pad_scroll_next_ms;
             if (s.start_held) {
-                a.cfg.setCover(a.cfg.lane_cover + 0.005 * @as(f32, @floatFromInt(s.pad_scroll)));
+                a.moveCover(0.005 * @as(f32, @floatFromInt(s.pad_scroll)));
             } else if (s.pad_scroll > 0) {
                 a.cfg.green_ms += 1;
             } else a.cfg.green_ms = @max(a.cfg.green_ms, 2) - 1;
@@ -2065,9 +2128,6 @@ pub fn key(a: *App, sc: u32) void {
         c.SDL_SCANCODE_PAGEDOWN => s.cursor = @min(s.cursor + 15, s.rows.len -| 1),
         c.SDL_SCANCODE_RETURN => openRow(a),
         c.SDL_SCANCODE_ESCAPE => goBack(a),
-        c.SDL_SCANCODE_F1 => a.cfg.random = (a.cfg.random + 1) % 5,
-        c.SDL_SCANCODE_F2 => a.cfg.gauge = (a.cfg.gauge + 1) % (config.gas + 1),
-        c.SDL_SCANCODE_F3 => a.cfg.hs_fix = (a.cfg.hs_fix + 1) % 4,
         c.SDL_SCANCODE_F4 => {
             s.sort = @intCast((s.sort + 1) % sort_count);
             reload(a);
@@ -2090,18 +2150,14 @@ pub fn key(a: *App, sc: u32) void {
             reload(a);
         },
         c.SDL_SCANCODE_2 => key(a, c.SDL_SCANCODE_F4),
-        c.SDL_SCANCODE_3 => {
-            a.cfg.ln_mode = (@as(u8, @min(a.cfg.ln_mode, 2)) + 1) % 3;
-            db_mod.setLnMode(a.db, a.cfg.ln_mode) catch |e| std.log.err("LN mode not applied to scores: {t}", .{e});
-            s.replay_slot = 0;
-            reload(a);
-        },
+        // Play options live in settings; beatoraja's number keys keep theirs under its controls.
+        c.SDL_SCANCODE_3 => if (a.cfg.beatoraja_select) setLnMode(a, cycle(a.cfg.ln_mode, ln_names.len, 1)),
         c.SDL_SCANCODE_4 => nextReplay(a),
         c.SDL_SCANCODE_F => if (selectedSong(s)) |song| toggleFavorite(a, song),
         c.SDL_SCANCODE_P => if (selectedSong(s)) |song| practice.open(a, song),
         c.SDL_SCANCODE_V => versus.openScreen(a),
-        c.SDL_SCANCODE_9 => {
-            a.cfg.pace_target = (@as(u8, @min(a.cfg.pace_target, play.pace_targets.len - 1)) + 1) % @as(u8, play.pace_targets.len);
+        c.SDL_SCANCODE_9 => if (a.cfg.beatoraja_select) {
+            a.cfg.pace_target = cycle(@min(a.cfg.pace_target, play.pace_targets.len - 1), play.pace_targets.len, 1);
             s.status = play.paceTargetName(a.cfg.pace_target);
         },
         c.SDL_SCANCODE_6 => settings.openControls(a),
@@ -2235,23 +2291,41 @@ test "the courses row lists courses by table" {
     try std.testing.expectEqual(@as(usize, 3), a.sel.cursor);
 }
 
-test "function keys cycle the options and wrap" {
+test "play options are set in settings, number keys change them only under beatoraja controls" {
     const a = try testing.open();
     defer testing.close(a);
-    for (0..5) |_| key(a, c.SDL_SCANCODE_F1);
-    try std.testing.expectEqual(@as(u8, 0), a.cfg.random);
     key(a, c.SDL_SCANCODE_F1);
-    try std.testing.expectEqual(@as(u8, 1), a.cfg.random);
-    a.cfg.gauge = config.gas;
-    key(a, c.SDL_SCANCODE_F2);
-    try std.testing.expectEqual(@as(u8, 0), a.cfg.gauge);
-    a.cfg.hs_fix = 3;
-    key(a, c.SDL_SCANCODE_F3);
-    try std.testing.expectEqual(@as(u8, 0), a.cfg.hs_fix);
+    key(a, c.SDL_SCANCODE_3);
+    key(a, c.SDL_SCANCODE_9);
+    try std.testing.expectEqual(@as(u8, 0), a.cfg.random);
+    try std.testing.expectEqual(@as(u8, 0), a.cfg.ln_mode);
+    try std.testing.expectEqual(@as(u8, 0), a.cfg.pace_target);
+    a.cfg.beatoraja_select = true;
+    key(a, c.SDL_SCANCODE_3);
+    try std.testing.expectEqual(@as(u8, 1), a.cfg.ln_mode);
     key(a, c.SDL_SCANCODE_F5);
     try std.testing.expect(a.sel.autoplay);
     key(a, c.SDL_SCANCODE_F10);
     try std.testing.expectEqual(.settings, a.scene);
+}
+
+test "the option panels step every beatoraja option and wrap" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.cfg.random = random_names.len - 1;
+    padOption(a, 1, 0);
+    try std.testing.expectEqual(@as(u8, 0), a.cfg.random);
+    padOption(a, 1, 6);
+    try std.testing.expectEqual(@as(u8, random_names.len - 1), a.cfg.random2);
+    padOption(a, 1, 3);
+    try std.testing.expectEqual(@as(u8, 1), a.cfg.double_option);
+    padOption(a, 2, 6);
+    try std.testing.expect(a.cfg.assist.no_mine);
+    padOption(a, 3, 0);
+    padOption(a, 3, 0);
+    try std.testing.expect(!a.cfg.bga);
+    padOption(a, 3, 0);
+    try std.testing.expect(a.cfg.bga and !a.cfg.bga_auto);
 }
 
 test "beatoraja select does nothing until it is turned on" {
@@ -2307,18 +2381,18 @@ test "start and select pick the panel, whose keys change options instead of movi
     _ = pad(a, start, true, false);
     try std.testing.expectEqual(@as(u8, 1), panelOf(&a.sel));
     _ = pad(a, a.cfg.p1[1], true, false);
-    try std.testing.expectEqual(@as(u8, 4), a.cfg.random);
+    try std.testing.expectEqual(@as(u8, random_names.len - 1), a.cfg.random);
     _ = pad(a, a.cfg.p1[0], true, false);
     try std.testing.expectEqual(@as(u8, 0), a.cfg.random);
     try std.testing.expectEqual(.root, a.sel.view);
     _ = pad(a, sel, true, false);
     try std.testing.expectEqual(@as(u8, 3), panelOf(&a.sel));
     _ = pad(a, a.cfg.p1[1], true, false);
-    try std.testing.expectEqual(@as(u8, 4), a.cfg.gauge);
+    try std.testing.expectEqual(@as(u8, 0), a.cfg.gauge_auto_shift);
     _ = pad(a, a.cfg.p1[6], true, false);
     try std.testing.expectEqual(@as(i32, 1), a.cfg.judge_offset_ms);
     _ = pad(a, a.cfg.p1[0], true, false);
-    try std.testing.expect(!a.cfg.bga);
+    try std.testing.expect(a.cfg.bga and a.cfg.bga_auto);
     _ = pad(a, start, false, false);
     try std.testing.expectEqual(@as(u8, 2), panelOf(&a.sel));
     a.scene = .result;
@@ -2341,9 +2415,6 @@ test "the number keys and arrows work without beatoraja controls" {
     try std.testing.expectEqual(.root, a.sel.view);
     key(a, c.SDL_SCANCODE_LEFT);
     try std.testing.expect(a.running);
-    key(a, c.SDL_SCANCODE_3);
-    try std.testing.expectEqual(@as(u8, 1), a.cfg.ln_mode);
-    a.cfg.ln_mode = 0;
     key(a, c.SDL_SCANCODE_RIGHT);
     try std.testing.expectEqual(.library, a.sel.view);
     key(a, c.SDL_SCANCODE_LEFT);
@@ -2627,4 +2698,17 @@ test "a status line clears a while after it last changed" {
     try std.testing.expectEqualStrings("two", text);
     f.tick(&text, 1000 + 2 * status_ms);
     try std.testing.expectEqualStrings("", text);
+}
+
+test "a quick second Start press toggles the lane cover, a slow one does not" {
+    const a = try testing.open();
+    defer testing.close(a);
+    const was = a.cfg.lane_cover_on;
+    startTap(a, 1000);
+    startTap(a, 1000 + double_press_ms + 1);
+    try std.testing.expectEqual(was, a.cfg.lane_cover_on);
+    startTap(a, 1000 + double_press_ms + 100);
+    try std.testing.expectEqual(!was, a.cfg.lane_cover_on);
+    startTap(a, 1000 + double_press_ms + 200);
+    try std.testing.expectEqual(!was, a.cfg.lane_cover_on);
 }

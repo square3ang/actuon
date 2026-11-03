@@ -31,7 +31,20 @@ pub const Config = struct {
 
     /// The share of the lane notes fall through, top cover to judge line.
     pub fn openLane(cfg: *const Config) f32 {
-        return 1 - cfg.lift - cfg.lane_cover;
+        return 1 - cfg.liftShown() - cfg.coverShown();
+    }
+
+    /// What play draws: a cover switched off keeps its amount for when it is back on.
+    pub fn coverShown(cfg: *const Config) f32 {
+        return if (cfg.lane_cover_on) cfg.lane_cover else 0;
+    }
+
+    pub fn liftShown(cfg: *const Config) f32 {
+        return if (cfg.lift_on) cfg.lift else 0;
+    }
+
+    pub fn hiddenShown(cfg: *const Config) f32 {
+        return if (cfg.hidden_on) cfg.hidden else 0;
     }
 
     roots: []const []const u8 = &.{},
@@ -48,6 +61,8 @@ pub const Config = struct {
     bga_upscale: bool = true,
     /// Off skips loading BGA images and movies.
     bga: bool = true,
+    /// With BGA on, shows it in autoplay and replays only: beatoraja's AUTO.
+    bga_auto: bool = false,
     audio_rate: u32 = 48000,
     audio_frames: u32 = 128,
     /// PortAudio name of an output. Empty picks the output automatically.
@@ -62,23 +77,46 @@ pub const Config = struct {
     /// Added to input timestamps: positive means "the player hits late, forgive it".
     judge_offset_ms: i32 = 0,
     visual_offset_ms: i32 = 0,
-    /// Index into the gauge types up to hazard; `gas` means auto shift from EX HARD.
-    gauge: u8 = gas,
+    /// Index into the gauge types up to hazard.
+    gauge_type: u8 = 4,
+    /// An options.Gas: beatoraja's gauge auto shift.
+    gauge_auto_shift: u8 = @backingInt(core.options.Gas.select_to_under),
+    /// The lowest gauge a shift may fall to: A-EASY, EASY or NORMAL.
+    gas_floor: u8 = 0,
+    /// An older save's gauge, where 6 meant auto shift from EX HARD. Moved to the fields above on load.
+    gauge: ?u8 = null,
+    /// options.Random for each side; the second is for double play.
     random: u8 = 0,
+    random2: u8 = 0,
+    /// An options.Double: off, flip, battle, battle with auto scratch.
+    double_option: u8 = 0,
+    /// An options.Algorithm.
+    judge_algorithm: u8 = 0,
     /// What LNs the chart leaves open become: 0 LN, 1 CN, 2 HCN.
     ln_mode: u8 = 0,
     /// What a play is measured against, an index into play.pace_targets.
     pace_target: u8 = 0,
     /// The versus score board sits on the left instead of the right.
     versus_panel_left: bool = false,
-    /// 0 start BPM, 1 max BPM, 2 main BPM (mode of the chart), 3 off (classic HS).
+    /// 0 start BPM, 1 max BPM, 2 main BPM (mode of the chart), 3 off (classic HS), 4 min BPM.
     hs_fix: u8 = 2,
+    /// Changing the lane cover during play takes the BPM playing now as the reference: beatoraja's HS auto adjust.
+    hs_auto_adjust: bool = false,
     /// Green number: milliseconds a note is visible at the reference BPM.
     green_ms: u32 = 600,
     lane_cover: f32 = 0,
     /// Fractions of the lane: raises the judge line, and hides notes just above it.
     lift: f32 = 0,
     hidden: f32 = 0,
+    /// Off keeps the amount but draws nothing, as beatoraja's on/off for each.
+    lane_cover_on: bool = true,
+    lift_on: bool = true,
+    hidden_on: bool = true,
+    /// Notes appear the green number's time before the line whatever the BPM does: beatoraja's CONSTANT.
+    constant: bool = false,
+    /// After each play, moves the judge offset by that play's average timing.
+    judge_auto_adjust: bool = false,
+    assist: Assists = .{},
     /// The default skin; a slot in `skins` overrides it.
     skin: []const u8 = "",
     skins: SkinSlots = .{},
@@ -148,10 +186,109 @@ fn sideOf5(side: [9]u16) [7]u16 {
     return side[0..5].* ++ side[7..9].*;
 }
 
-pub const gas: u8 = 6;
+/// The options a replay records, as set. `load` keeps every field in range.
+pub fn playOptions(cfg: *const Config, seed: u64) core.replay.Replay {
+    return .{
+        .gauge = @fromBackingInt(cfg.gauge_type),
+        .gas = @fromBackingInt(cfg.gauge_auto_shift),
+        .gas_floor = @fromBackingInt(cfg.gas_floor),
+        .random = @fromBackingInt(cfg.random),
+        .random2 = @fromBackingInt(cfg.random2),
+        .flip = cfg.double_option == @backingInt(core.options.Double.flip),
+        .ln_mode = @fromBackingInt(cfg.ln_mode),
+        .algorithm = @fromBackingInt(cfg.judge_algorithm),
+        .seed = seed,
+    };
+}
 
-pub fn gaugeType(setting: u8) core.gauge.Type {
-    return if (setting == gas) .exhard else @fromBackingInt(@intCast(@min(setting, 5)));
+/// beatoraja's assists, in its order. Any of them keeps the play from being saved.
+pub const Assists = struct {
+    expand_judge: bool = false,
+    /// Notes scroll at one speed through BPM changes and stops.
+    constant: bool = false,
+    judge_area: bool = false,
+    legacy: bool = false,
+    mark_note: bool = false,
+    bpm_guide: bool = false,
+    no_mine: bool = false,
+
+    pub const names = [_][]const u8{ "EXPAND JUDGE", "CONSTANT", "JUDGE AREA", "LEGACY NOTE", "MARK NOTE", "BPM GUIDE", "NO MINE" };
+
+    /// The `i`th in beatoraja's order, below `names.len`. `a` is a pointer, const or not.
+    pub fn flag(a: anytype, i: usize) @TypeOf(&a.expand_judge) {
+        inline for (@typeInfo(Assists).@"struct".field_names, 0..) |name, k| if (k == i) return &@field(a, name);
+        unreachable;
+    }
+};
+
+/// What a play changes that a replay cannot record.
+pub const Assist = struct {
+    battle: bool = false,
+    auto_scratch: bool = false,
+    picked: Assists = .{},
+
+    /// Changes the notes or their judging: beatoraja's ASSIST rather than LIGHT ASSIST.
+    pub fn judging(a: Assist) bool {
+        return a.battle or a.picked.legacy or a.picked.no_mine or a.picked.expand_judge;
+    }
+
+    /// The rest only draw aids: they judge nothing differently, but beatoraja counts them as assists too.
+    pub fn any(a: Assist) bool {
+        const p = a.picked;
+        return a.judging() or p.constant or p.judge_area or p.mark_note or p.bpm_guide;
+    }
+};
+
+pub fn assistOf(cfg: *const Config) Assist {
+    return .{
+        .battle = cfg.double_option >= @backingInt(core.options.Double.battle),
+        .auto_scratch = cfg.double_option == @backingInt(core.options.Double.battle_auto_scratch),
+        .picked = cfg.assist,
+    };
+}
+
+/// A hand-edited value would crash an enum cast, or show one option and play another.
+fn clampOptions(cfg: *Config) void {
+    if (cfg.gauge) |g| {
+        const shifted = g >= 6;
+        cfg.gauge_type = if (shifted) @backingInt(core.gauge.Type.exhard) else g;
+        cfg.gauge_auto_shift = @backingInt(if (shifted) core.options.Gas.select_to_under else core.options.Gas.none);
+        cfg.gauge = null;
+    }
+    const top = struct {
+        fn of(comptime E: type) u8 {
+            return @intCast(std.enums.values(E).len - 1);
+        }
+    }.of;
+    cfg.gauge_type = @min(cfg.gauge_type, @backingInt(core.gauge.Type.hazard));
+    cfg.gauge_auto_shift = @min(cfg.gauge_auto_shift, top(core.options.Gas));
+    cfg.gas_floor = @min(cfg.gas_floor, @backingInt(core.gauge.Type.normal));
+    cfg.random = @min(cfg.random, top(core.options.Random));
+    cfg.random2 = @min(cfg.random2, top(core.options.Random));
+    cfg.double_option = @min(cfg.double_option, top(core.options.Double));
+    cfg.judge_algorithm = @min(cfg.judge_algorithm, top(core.options.Algorithm));
+    cfg.ln_mode = @min(cfg.ln_mode, top(core.options.LnMode));
+    cfg.hs_fix = @min(cfg.hs_fix, 4);
+}
+
+test "an older gauge setting moves to the gauge and its auto shift" {
+    var shifted: Config = .{ .gauge = 6 };
+    clampOptions(&shifted);
+    try std.testing.expectEqual(@as(u8, 4), shifted.gauge_type);
+    try std.testing.expectEqual(core.options.Gas.select_to_under, playOptions(&shifted, 0).gas);
+    var hard: Config = .{ .gauge = 3, .random = 200, .double_option = 9 };
+    clampOptions(&hard);
+    try std.testing.expectEqual(core.gauge.Type.hard, playOptions(&hard, 0).gauge);
+    try std.testing.expectEqual(core.options.Gas.none, playOptions(&hard, 0).gas);
+    try std.testing.expectEqual(core.options.Random.s_random_ex, playOptions(&hard, 0).random);
+    try std.testing.expect(assistOf(&hard).auto_scratch);
+}
+
+test "each assist name has its flag, in beatoraja's order" {
+    var a: Assists = .{};
+    try std.testing.expectEqual(@typeInfo(Assists).@"struct".field_names.len, Assists.names.len);
+    try std.testing.expectEqual(&a.expand_judge, Assists.flag(&a, 0));
+    try std.testing.expectEqual(&a.no_mine, Assists.flag(&a, Assists.names.len - 1));
 }
 
 pub fn path(gpa: std.mem.Allocator) ![]u8 {
@@ -224,8 +361,7 @@ pub fn load(a: std.mem.Allocator) Config {
         return .{};
     };
     cfg.clampCovers();
-    // A hand-edited value would show one mode, play another and read scores under a third.
-    cfg.ln_mode = @min(cfg.ln_mode, 2);
+    clampOptions(&cfg);
     cfg.download_url = migrateDownloadUrl(cfg.download_url);
     dropPlainIr(&cfg);
     return cfg;
@@ -252,7 +388,7 @@ fn migrateDownloadUrl(url: []const u8) []const u8 {
 pub fn save(gpa: std.mem.Allocator, cfg: Config) void {
     const p = path(gpa) catch return;
     defer gpa.free(p);
-    const text = std.json.Stringify.valueAlloc(gpa, cfg, .{ .whitespace = .indent_2 }) catch return;
+    const text = std.json.Stringify.valueAlloc(gpa, cfg, .{ .whitespace = .indent_2, .emit_null_optional_fields = false }) catch return;
     defer gpa.free(text);
     fs.writeAtomic(gpa, p, text) catch |e| std.log.err("config save failed: {t}", .{e});
 }
