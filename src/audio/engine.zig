@@ -5,6 +5,7 @@ const std = @import("std");
 const c = @import("c");
 const builtin = @import("builtin");
 const decode = @import("decode.zig");
+const alsa = @import("alsa.zig");
 
 pub const max_voices = 256;
 /// Largest buffer the settings allow.
@@ -90,6 +91,7 @@ pub const Engine = struct {
     feed_frames: u32 = 0,
     feed_quit: std.atomic.Value(bool) = .init(false),
     pa_ready: bool = false,
+    alsa_out: if (builtin.os.tag == .linux) ?alsa.Out else void = if (builtin.os.tag == .linux) null else {},
     /// What `open` was asked for, not necessarily what opened. Must outlive the engine.
     device: []const u8 = "",
 
@@ -117,7 +119,7 @@ pub const Engine = struct {
     }
 
     /// Opens the lowest-latency path available. Windows order is ASIO, WASAPI exclusive, then WASAPI
-    /// shared as the mandatory fallback; Linux prefers JACK (including PipeWire's) then ALSA.
+    /// shared as the mandatory fallback; Linux is in `openLinux`.
     /// A named `device` comes first; if it is gone or refuses, the usual order still gives sound.
     pub fn open(e: *Engine, want_rate: u32, frames: u32, prefer_null: bool, device: []const u8) !void {
         e.rate = want_rate;
@@ -127,6 +129,7 @@ pub const Engine = struct {
             if (c.Pa_Initialize() != c.paNoError) return e.openNull();
             e.pa_ready = true;
         }
+        if (builtin.os.tag == .linux) return e.openLinux(frames, device);
         if (device.len > 0) {
             if (namedDevice(device)) |dev| {
                 if (e.openOn(c.Pa_GetHostApiInfo(c.Pa_GetDeviceInfo(dev).*.hostApi).*.type, dev, want_rate, frames)) return;
@@ -135,21 +138,62 @@ pub const Engine = struct {
         }
         const order: []const c.PaHostApiTypeId = switch (builtin.os.tag) {
             .windows => &.{ c.paASIO, c.paWASAPI },
-            .macos => &.{c.paCoreAudio},
-            // PortAudio's JACK backend only links to physical ports, so through PipeWire's JACK layer
-            // it stays silent whenever the default sink is virtual. ALSA follows the default sink.
-            else => if (pipewireRunning()) &.{ c.paALSA, c.paJACK } else &.{ c.paJACK, c.paALSA },
+            else => &.{c.paCoreAudio},
         };
-        for (order) |ty| {
-            const index = c.Pa_HostApiTypeIdToHostApiIndex(ty);
-            if (index < 0) continue;
-            const info = c.Pa_GetHostApiInfo(index);
-            if (info == null or info.*.defaultOutputDevice < 0) continue;
-            if (e.openOn(ty, info.*.defaultOutputDevice, want_rate, frames)) return;
-        }
+        for (order) |ty| if (e.openDefaultOf(ty, frames)) return;
         const dev = c.Pa_GetDefaultOutputDevice();
         if (dev >= 0 and e.tryOpen(c.paInDevelopment, dev, want_rate, frames, false)) return;
         return e.openNull();
+    }
+
+    /// ALSA through libasound, with JACK from PortAudio. A named device is always ALSA.
+    fn openLinux(e: *Engine, frames: u32, device: []const u8) !void {
+        if (device.len > 0) {
+            if (e.openAlsa(alsa.fromPortAudioName(device), frames)) return;
+            std.log.warn("audio device \"{s}\" did not open, using the default", .{device});
+        }
+        // PortAudio's JACK backend only links to physical ports, so through PipeWire's JACK layer
+        // it stays silent whenever the default sink is virtual. ALSA follows the default sink.
+        const jack_first = !pipewireRunning();
+        if (jack_first and e.openDefaultOf(c.paJACK, frames)) return;
+        if (e.openAlsa("default", frames)) return;
+        if (!jack_first and e.openDefaultOf(c.paJACK, frames)) return;
+        return e.openNull();
+    }
+
+    fn openDefaultOf(e: *Engine, ty: c.PaHostApiTypeId, frames: u32) bool {
+        const index = c.Pa_HostApiTypeIdToHostApiIndex(ty);
+        if (index < 0) return false;
+        const info = c.Pa_GetHostApiInfo(index);
+        if (info == null or info.*.defaultOutputDevice < 0) return false;
+        return e.openOn(ty, info.*.defaultOutputDevice, e.rate, frames);
+    }
+
+    fn openAlsa(e: *Engine, name: []const u8, frames: u32) bool {
+        const out = alsa.Out.open(name, e.rate, frames, feed_max) orelse return false;
+        e.alsa_out = out;
+        e.feed_frames = out.period;
+        e.host = .{ .latency_ms = out.lead_s * 1000, .exclusive = std.mem.startsWith(u8, name, "hw:") };
+        @memcpy(e.host.name[0.."ALSA".len], "ALSA");
+        e.feed_quit.store(false, .release);
+        e.feed_thread = c.SDL_CreateThread(alsaThread, "audio-write", e);
+        return true;
+    }
+
+    /// Mixes each period only once the device has room for it, as `writeThread` does through PortAudio.
+    fn alsaThread(ud: ?*anyopaque) callconv(.c) c_int {
+        const e: *Engine = @ptrCast(@alignCast(ud));
+        raiseAudioPriority();
+        const out = &e.alsa_out.?;
+        var buf: [feed_max * 2]f32 = undefined;
+        var scratch: [feed_max * alsa.max_channels * 4]u8 = undefined;
+        while (!e.feed_quit.load(.acquire)) {
+            if (!out.waitRoom()) continue;
+            e.mix(&buf, out.period);
+            if (!e.paused) e.updateClock(out.lead_s, out.period);
+            out.write(buf[0 .. out.period * 2], &scratch);
+        }
+        return 0;
     }
 
     /// Reopens on another output or buffer size, keeping the rate that loaded sounds were decoded at.
@@ -178,8 +222,7 @@ pub const Engine = struct {
         if (api == null) return null;
         const offered: []const c.PaHostApiTypeId = switch (builtin.os.tag) {
             .windows => &.{ c.paASIO, c.paWASAPI },
-            .macos => &.{c.paCoreAudio},
-            else => &.{c.paALSA},
+            else => &.{c.paCoreAudio},
         };
         if (std.mem.indexOfScalar(c.PaHostApiTypeId, offered, api.*.type) == null) return null;
         return deviceKey(buf, builtin.os.tag, api.*.type, std.mem.span(info.*.name));
@@ -197,6 +240,7 @@ pub const Engine = struct {
     /// Names of the stereo outputs. Empty when PortAudio never started.
     pub fn outputDevices(e: *const Engine, a: std.mem.Allocator) []const []const u8 {
         if (!e.pa_ready) return &.{};
+        if (builtin.os.tag == .linux) return alsa.outputNames(a);
         var names: std.ArrayList([]const u8) = .empty;
         var buf: [device_key_max]u8 = undefined;
         var dev: c.PaDeviceIndex = 0;
@@ -265,18 +309,58 @@ pub const Engine = struct {
 
     fn writeThread(ud: ?*anyopaque) callconv(.c) c_int {
         const e: *Engine = @ptrCast(@alignCast(ud));
-        _ = c.SDL_SetCurrentThreadPriority(c.SDL_THREAD_PRIORITY_TIME_CRITICAL);
+        raiseAudioPriority();
         var buf: [feed_max * 2]f32 = undefined;
         const frames = e.feed_frames;
         const buffer_s = @as(f64, @floatFromInt(frames)) / @as(f64, @floatFromInt(e.rate));
         const latency_s = e.host.latency_ms / 1000;
+        const period_ns: u64 = @intFromFloat(buffer_s * 1e9);
+        var wrote_at = c.SDL_GetTicksNS();
         while (!e.feed_quit.load(.acquire)) {
+            const in_time = e.waitForRoom(frames, period_ns, wrote_at);
             e.mix(&buf, frames);
-            if (!e.paused) e.updateClock(latency_s + buffer_s, frames);
+            // A block mixed before the room was there waits a period in the write as well.
+            if (!e.paused) e.updateClock(if (in_time) latency_s else latency_s + buffer_s, frames);
             const err = c.Pa_WriteStream(e.stream, &buf, frames);
             if (err != c.paNoError and err != c.paOutputUnderflowed) c.SDL_Delay(1);
+            wrote_at = c.SDL_GetTicksNS();
         }
         return 0;
+    }
+
+    /// Every block must be ready within one period, so this thread outranks everything else the game runs.
+    fn raiseAudioPriority() void {
+        switch (builtin.os.tag) {
+            // SDL's time-critical is only a nice level here; realtime comes through rtkit when the system allows it.
+            .linux => {
+                const rr: c_int = @backingInt(std.os.linux.SCHED.Mode.RR);
+                if (c.SDL_SetLinuxThreadPriorityAndPolicy(std.os.linux.gettid(), c.SDL_THREAD_PRIORITY_TIME_CRITICAL, rr)) return;
+                std.log.warn("audio thread stays non-realtime: {s}", .{std.mem.span(c.SDL_GetError())});
+            },
+            // MMCSS Pro Audio ranks above a time-critical thread of a normal process. The task is never reverted: the thread ends with the stream.
+            .windows => {
+                var task: ?*anyopaque = null;
+                if (c.PaWasapi_ThreadPriorityBoost(&task, c.eThreadPriorityProAudio) == c.paNoError) return;
+                std.log.warn("audio thread has no MMCSS boost", .{});
+            },
+            else => {},
+        }
+        _ = c.SDL_SetCurrentThreadPriority(c.SDL_THREAD_PRIORITY_TIME_CRITICAL);
+    }
+
+    /// Mixing waits for room in the device: a block mixed early sits a period in the write, and so
+    /// does every keysound queued after it. False when the host never reports room, as a period past due.
+    fn waitForRoom(e: *Engine, frames: u32, period_ns: u64, wrote_at: u64) bool {
+        // Room comes about a period after the last write; polling only near then keeps wakeups few.
+        c.SDL_DelayNS((wrote_at + period_ns * 3 / 4) -| c.SDL_GetTicksNS());
+        const give_up = wrote_at + 2 * period_ns;
+        while (c.SDL_GetTicksNS() < give_up) {
+            const room = c.Pa_GetStreamWriteAvailable(e.stream);
+            if (room < 0) return false;
+            if (room >= frames) return true;
+            c.SDL_DelayNS(50_000);
+        }
+        return false;
     }
 
     fn openNull(e: *Engine) !void {
@@ -315,6 +399,10 @@ pub const Engine = struct {
             _ = c.Pa_CloseStream(s);
             e.stream = null;
         }
+        if (builtin.os.tag == .linux) if (e.alsa_out) |*o| {
+            o.close();
+            e.alsa_out = null;
+        };
     }
 
     /// Installs sounds and schedule for a song. Must not race the writer thread, so it pauses first.

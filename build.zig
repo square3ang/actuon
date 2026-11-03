@@ -104,7 +104,11 @@ pub fn build(b: *std.Build) void {
         mod.linkSystemLibrary("dxgi", .{});
         mod.linkSystemLibrary("dxguid", .{});
     }
-    if (os == .linux) mod.linkSystemLibrary("vulkan", .{ .use_pkg_config = .force });
+    if (os == .linux) {
+        mod.linkSystemLibrary("vulkan", .{ .use_pkg_config = .force });
+        mod.linkSystemLibrary("alsa", .{ .use_pkg_config = .force });
+        translate.linkSystemLibrary("alsa", .{});
+    }
     if (os == .macos) {
         mod.addCSourceFile(.{ .file = b.path("src/input/hid_macos.c"), .flags = &.{} });
         mod.linkFramework("IOKit", .{});

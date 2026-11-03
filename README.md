@@ -60,7 +60,7 @@ Download the package for your OS from [Releases](https://github.com/square3ang/a
 2. <kbd>Enter</kbd> opens a folder or starts a chart. <kbd>Esc</kbd> leaves play.
 
 To build from source, you need Zig 0.17.x and these libraries, found through pkg-config: SDL3, SDL3_ttf, PortAudio, SQLite, Lua 5.4,
-libarchive and FFmpeg (avformat, avcodec, avfilter, avutil, swscale). Linux also needs Vulkan.
+libarchive and FFmpeg (avformat, avcodec, avfilter, avutil, swscale). Linux also needs Vulkan and ALSA (libasound).
 Shaders build from WGSL with `naga` (`cargo install naga-cli`); Windows and macOS also need `spirv-cross`. On Windows, use MSYS2's `portaudio-asio` for ASIO output.
 With Homebrew, add the `lib/pkgconfig` of `libarchive`, `lua@5.4` and `sqlite` to `PKG_CONFIG_PATH`.
 

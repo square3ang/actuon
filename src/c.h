@@ -27,3 +27,6 @@
 #ifdef _WIN32
 #include <pa_win_wasapi.h>
 #endif
+#ifdef __linux__
+#include <alsa/asoundlib.h>
+#endif

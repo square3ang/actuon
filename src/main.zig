@@ -151,6 +151,7 @@ fn fetchTable(gpa: std.mem.Allocator, url: []const u8) !void {
 test {
     _ = @import("audio/decode.zig");
     _ = @import("audio/engine.zig");
+    _ = @import("audio/alsa.zig");
     _ = @import("audio/menu_sound.zig");
     _ = @import("audio/skin_sound.zig");
     _ = @import("audio/preview.zig");
