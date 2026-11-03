@@ -38,10 +38,10 @@ var pushes: std.atomic.Value(u32) = .init(0);
 
 /// Sleeps up to `ns`, less once an event is queued, so a press is judged without waiting out the sim's tick.
 pub fn wait(ns: u64) void {
-    // Windows futex timeouts round to the system timer, too coarse for the tick.
-    if (builtin.os.tag == .windows) return actuon_input_wait(ns);
     const seen = pushes.load(.acquire);
     if (q_tail.load(.monotonic) != q_head.load(.acquire)) return;
+    // Windows futex timeouts round to the system timer, too coarse for the tick.
+    if (builtin.os.tag == .windows) return actuon_input_wait(ns);
     const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromNanoseconds(ns), .clock = .awake } };
     fs.io.futexWaitTimeout(u32, &pushes.raw, seen, timeout) catch {};
 }
