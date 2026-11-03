@@ -2,7 +2,7 @@
 """Retakes the site's screenshots (site/screens/*.webp) from generated demo charts.
 Usage: site_shots.py ACTUON_BIN WORK_DIR
 WORK_DIR keeps the downloaded photographs between runs. Needs xvfb-run, Vulkan, ImageMagick and the network once.
-The photographs are credited in the footer of every site page: change both together."""
+The photographs are credited in the footer of every site page and under the README's screens: change them together."""
 import concurrent.futures, json, math, os, random, shutil, struct, subprocess, sys, urllib.parse, urllib.request, wave
 
 binary, work = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])

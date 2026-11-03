@@ -20,6 +20,15 @@ The next-generation BMS player.
 > [!NOTE]
 > **Public beta preparation.** See [docs/compat.md](docs/compat.md) for what works and what does not yet.
 
+![Song select: the chart's artwork fills the screen behind its data and the song wheel](site/screens/select.webp)
+
+<p>
+  <img src="site/screens/play.webp" width="49%" alt="Autoplay partway through a chart, with its BGA beside the lanes">
+  <img src="site/screens/result.webp" width="49%" alt="The result screen after autoplay: rank AAA and a MAX lamp">
+</p>
+
+<sub>Screens show demo charts. Photographs, cropped: <a href="https://commons.wikimedia.org/wiki/File:Pumori,_Nepal,_Asia.jpg">Vyacheslav Argenberg</a> (CC BY 4.0), <a href="https://commons.wikimedia.org/wiki/File:Lake_Kinney_mit_Mount_Whitehorn.jpg">Florian Fuchs</a> (CC BY 3.0), via Wikimedia Commons. Retake them with <code>tools/site_shots.py</code>.</sub>
+
 ## Features
 
 | | |
@@ -66,18 +75,17 @@ Packaging scripts for each OS are in [`packaging/`](packaging). To release, set 
 
 | Key | Action |
 | --- | --- |
-| <kbd>F1</kbd> <kbd>F2</kbd> <kbd>F3</kbd> <kbd>F4</kbd> | Random option, gauge, HS fix, sort |
-| <kbd>F5</kbd> | Autoplay |
+| <kbd>F4</kbd> <kbd>F5</kbd> | Sort, autoplay |
 | <kbd>F6</kbd> <kbd>F7</kbd> <kbd>F8</kbd> | Search, rescan, update difficulty tables |
-| <kbd>F9</kbd> <kbd>F10</kbd> | IR ranking and rivals, settings |
-| <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> | Key mode filter, sort, LN mode for charts that leave it open (CN and HCN plays have their own scores and replays, and stay off the IR) |
+| <kbd>F9</kbd> <kbd>F10</kbd> | IR ranking and rivals, settings. Random, gauge and its auto shift, HS fix, LN mode, judge algorithm, score target and the assists are under Settings, Play and Assist (CN and HCN plays have their own scores and replays, and stay off the IR; an assisted play is not saved) |
+| <kbd>1</kbd> <kbd>2</kbd> | Key mode filter, sort |
 | <kbd>4</kbd> <kbd>R</kbd> | Replay slot, play that replay |
-| <kbd>F</kbd> <kbd>9</kbd> <kbd>P</kbd> | Favorite the chart, change the score target, practice a section of the chart |
+| <kbd>F</kbd> <kbd>P</kbd> | Favorite the chart, practice a section of the chart |
 | <kbd>V</kbd> | Versus room: create one for the chart, or join by code. Needs an IR account |
 | <kbd>F12</kbd> | Screenshot, on any screen, into `screenshots/` in the data folder |
 | <kbd>T</kbd> | Timing graph over a skin's result screen |
 | <kbd>6</kbd> <kbd>7</kbd> <kbd>8</kbd> <kbd>0</kbd> | Key settings, the chart's IR page in the browser, the chart's folder, search |
-| Start, Select | With **beatoraja controls** on (Settings, Controls): 7 key inputs work as in beatoraja. Hold for option panels in song select, with a key for speed in play, both for 1 second to quit |
+| Start, Select | With **beatoraja controls** on (Settings, Controls): 7 key inputs work as in beatoraja. Hold for option panels in song select, with a key for speed in play, both for 1 second to quit; press Start twice to show or hide the lane cover. <kbd>3</kbd> and <kbd>9</kbd> change the LN mode and score target |
 | <kbd>↑</kbd> <kbd>↓</kbd> | Green number while playing |
 | <kbd>Page Up</kbd> <kbd>Page Down</kbd> | Lane cover while playing |
 | <kbd>←</kbd> <kbd>→</kbd> or mouse click | Seek in autoplay: 5 s steps, or to the clicked fraction of the song |

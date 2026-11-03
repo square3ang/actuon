@@ -998,50 +998,38 @@ fn drawDock(a: *App, dock_y: f32) void {
     const g = &a.g;
     const s = &a.sel;
     const u = g.h / 720;
-    // A tab with a settings row opens it; one with a key presses that key.
-    const tab = struct {
-        fn f(aa: *App, ox: f32, oy: f32, w: f32, target: union(enum) { key: u32, row: settings.Item }, key_name: []const u8, label: []const u8, value: []const u8) void {
-            const gg = &aa.g;
-            const uu = gg.h / 720;
-            const hover = gg.hit(ox, oy, w, 44 * uu);
-            if (gg.clickIn(ox, oy, w, 44 * uu)) switch (target) {
-                .key => |sc| aa.click_key = sc,
-                .row => |it| {
-                    aa.sfxOr(aa.sfx_option_open, .confirm);
-                    settings.openItem(aa, it);
-                },
-            };
-            gg.round(ox, oy, w, 44 * uu, 8 * uu, if (hover) gfx.rule else gfx.plate.alpha(225));
-            const text_x = if (key_name.len > 0) ox + 46 * uu else ox + 12 * uu;
-            if (key_name.len > 0) {
-                gg.round(ox + 8 * uu, oy + 6 * uu, 30 * uu, 18 * uu, 4 * uu, gfx.accent);
-                _ = gg.text(key_name, ox + 14 * uu, oy + 6 * uu, gg.scaled(12), gfx.white);
-            }
-            _ = gg.text(label, text_x, oy + 5 * uu, gg.scaled(12), gfx.dim);
-            gg.textClip(value, text_x, oy + 20 * uu, ox + w - 10 * uu - text_x, gg.scaled(16), gfx.white);
-        }
-    }.f;
+    // Only what a key changes here, as in beatoraja: the play options live in settings.
+    // LN mode stays too, since it decides which scores the chart shows; without a key it opens its settings row.
+    const Tab = struct { sc: ?u32, key: []const u8, label: []const u8, value: []const u8 };
     const on = a.cfg.beatoraja_select;
-    const tabs: f32 = 8;
-    const tw = (g.w - 28 * u - 6 * u * (tabs - 1)) / tabs;
-    const tab_x = struct {
-        fn f(uu: f32, width: f32, i: f32) f32 {
-            return 14 * uu + (width + 6 * uu) * i;
-        }
-    }.f;
-    var dock_buf: [2][48]u8 = undefined;
-    const cfg_ = &a.cfg;
-    const gauge_value = if (cfg_.gauge_auto_shift == 0) gauge_names[cfg_.gauge_type] else std.fmt.bufPrint(&dock_buf[1], "{s} +GAS", .{gauge_names[cfg_.gauge_type]}) catch "";
-    tab(a, tab_x(u, tw, 0), dock_y, tw, .{ .row = .random }, "", "RANDOM", random_names[cfg_.random]);
-    tab(a, tab_x(u, tw, 1), dock_y, tw, .{ .row = .gauge }, "", "GAUGE", gauge_value);
-    tab(a, tab_x(u, tw, 2), dock_y, tw, .{ .row = .hs_fix }, "", "HS FIX / GREEN", std.fmt.bufPrint(&dock_buf[0], "{s}  {d}", .{ hs_names[cfg_.hs_fix], cfg_.green_ms * 3 / 5 }) catch "");
-    tab(a, tab_x(u, tw, 3), dock_y, tw, .{ .key = c.SDL_SCANCODE_F4 }, if (on) "2" else "F4", tr("SORT"), ([sort_count][]const u8{ tr("TITLE"), tr("ARTIST"), "BPM", tr("LENGTH"), tr("LEVEL"), "CLEAR", "EX", "MISS" })[s.sort]);
-    tab(a, tab_x(u, tw, 4), dock_y, tw, .{ .key = c.SDL_SCANCODE_1 }, "1", tr("KEY MODE"), mode_filters[s.mode_filter].name);
-    tab(a, tab_x(u, tw, 5), dock_y, tw, if (on) .{ .key = c.SDL_SCANCODE_3 } else .{ .row = .ln_mode }, if (on) "3" else "", "LN MODE", ln_names[cfg_.ln_mode]);
     var replay_buf: [16]u8 = undefined;
     const replays = if (selectedSong(s)) |song| replaysOf(a, song.sha256) else 0;
-    tab(a, tab_x(u, tw, 6), dock_y, tw, .{ .key = c.SDL_SCANCODE_4 }, "4", tr("REPLAY"), if (replays == 0) tr("NONE") else std.fmt.bufPrint(&replay_buf, "{d} / {d}", .{ s.replay_slot + 1, replays }) catch "");
-    tab(a, tab_x(u, tw, tabs - 1), dock_y, tw, .{ .key = c.SDL_SCANCODE_F5 }, "F5", tr("AUTOPLAY"), if (s.autoplay) "ON" else "OFF");
+    const all = [_]Tab{
+        .{ .sc = c.SDL_SCANCODE_F4, .key = if (on) "2" else "F4", .label = tr("SORT"), .value = ([sort_count][]const u8{ tr("TITLE"), tr("ARTIST"), "BPM", tr("LENGTH"), tr("LEVEL"), "CLEAR", "EX", "MISS" })[s.sort] },
+        .{ .sc = c.SDL_SCANCODE_1, .key = "1", .label = tr("KEY MODE"), .value = mode_filters[s.mode_filter].name },
+        .{ .sc = if (on) c.SDL_SCANCODE_3 else null, .key = if (on) "3" else "", .label = "LN MODE", .value = ln_names[a.cfg.ln_mode] },
+        .{ .sc = c.SDL_SCANCODE_4, .key = "4", .label = tr("REPLAY"), .value = if (replays == 0) tr("NONE") else std.fmt.bufPrint(&replay_buf, "{d} / {d}", .{ s.replay_slot + 1, replays }) catch "" },
+        .{ .sc = c.SDL_SCANCODE_F5, .key = "F5", .label = tr("AUTOPLAY"), .value = if (s.autoplay) "ON" else "OFF" },
+    };
+    const n: f32 = @floatFromInt(all.len);
+    const tw = (g.w - 28 * u - 6 * u * (n - 1)) / n;
+    for (all, 0..) |t, i| {
+        const x = 14 * u + (tw + 6 * u) * @as(f32, @floatFromInt(i));
+        if (g.clickIn(x, dock_y, tw, 44 * u)) {
+            if (t.sc) |sc| a.click_key = sc else {
+                a.sfxOr(a.sfx_option_open, .confirm);
+                settings.openItem(a, .ln_mode);
+            }
+        }
+        g.round(x, dock_y, tw, 44 * u, 8 * u, if (g.hit(x, dock_y, tw, 44 * u)) gfx.rule else gfx.plate.alpha(225));
+        const text_x = if (t.key.len > 0) x + 46 * u else x + 12 * u;
+        if (t.key.len > 0) {
+            g.round(x + 8 * u, dock_y + 6 * u, 30 * u, 18 * u, 4 * u, gfx.accent);
+            _ = g.text(t.key, x + 14 * u, dock_y + 6 * u, g.scaled(12), gfx.white);
+        }
+        _ = g.text(t.label, text_x, dock_y + 5 * u, g.scaled(12), gfx.dim);
+        g.textClip(t.value, text_x, dock_y + 20 * u, x + tw - 10 * u - text_x, g.scaled(16), gfx.white);
+    }
 
     // The remaining commands, as a row of text buttons.
     const Cmd = struct { sc: u32, label: []const u8 };
