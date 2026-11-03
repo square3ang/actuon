@@ -376,7 +376,9 @@ pub const Gfx = struct {
         return d;
     }
 
-    fn fragmentTextures(s: *c.sg_shader_desc, count: usize) void {
+    /// Textures at bindings 0..count, all paired with sampler slot 0 at `sampler_binding`. sokol refuses
+    /// a texture outside a pair, even one the shader only reads with textureLoad.
+    fn fragmentTextures(s: *c.sg_shader_desc, count: usize, sampler_binding: u8) void {
         for (0..count) |b| {
             s.views[b].texture.stage = c.SG_SHADERSTAGE_FRAGMENT;
             s.views[b].texture.image_type = c.SG_IMAGETYPE_2D;
@@ -384,7 +386,15 @@ pub const Gfx = struct {
             s.views[b].texture.spirv_set1_binding_n = @intCast(b);
             s.views[b].texture.hlsl_register_t_n = @intCast(b);
             s.views[b].texture.msl_texture_n = @intCast(b);
+            s.texture_sampler_pairs[b].stage = c.SG_SHADERSTAGE_FRAGMENT;
+            s.texture_sampler_pairs[b].view_slot = @intCast(b);
+            s.texture_sampler_pairs[b].sampler_slot = 0;
         }
+        s.samplers[0].stage = c.SG_SHADERSTAGE_FRAGMENT;
+        s.samplers[0].sampler_type = c.SG_SAMPLERTYPE_FILTERING;
+        s.samplers[0].spirv_set1_binding_n = sampler_binding;
+        s.samplers[0].hlsl_register_s_n = sampler_binding;
+        s.samplers[0].msl_sampler_n = sampler_binding;
     }
 
     fn upPipeline(comptime i: usize) c.sg_pipeline {
@@ -392,7 +402,8 @@ pub const Gfx = struct {
         var s = std.mem.zeroes(c.sg_shader_desc);
         s.vertex_func = shaderFunc("upscale.vert", "vs_5_0");
         s.fragment_func = shaderFunc(name, "ps_5_0");
-        fragmentTextures(&s, up_passes[i].len);
+        // The passes use no sampler; the declared one sits past the textures, where it collides with nothing.
+        fragmentTextures(&s, up_passes[i].len, up_passes[i].len);
         var d = std.mem.zeroes(c.sg_pipeline_desc);
         d.shader = c.sg_make_shader(&s);
         d.colors[0].pixel_format = c.SG_PIXELFORMAT_RGBA16F;
@@ -405,15 +416,7 @@ pub const Gfx = struct {
         var s = std.mem.zeroes(c.sg_shader_desc);
         s.vertex_func = shaderFunc("upscale.vert", "vs_5_0");
         s.fragment_func = shaderFunc("upscale.frag", "ps_5_0");
-        fragmentTextures(&s, 2);
-        s.samplers[0].stage = c.SG_SHADERSTAGE_FRAGMENT;
-        s.samplers[0].sampler_type = c.SG_SAMPLERTYPE_FILTERING;
-        s.samplers[0].spirv_set1_binding_n = 2;
-        s.samplers[0].hlsl_register_s_n = 2;
-        s.samplers[0].msl_sampler_n = 2;
-        s.texture_sampler_pairs[0].stage = c.SG_SHADERSTAGE_FRAGMENT;
-        s.texture_sampler_pairs[0].view_slot = 1;
-        s.texture_sampler_pairs[0].sampler_slot = 0;
+        fragmentTextures(&s, 2, 2);
         var d = std.mem.zeroes(c.sg_pipeline_desc);
         d.shader = c.sg_make_shader(&s);
         d.colors[0].pixel_format = c.SG_PIXELFORMAT_RGBA8;
@@ -669,6 +672,7 @@ pub const Gfx = struct {
             c.sg_apply_pipeline(g.up_pipes[i]);
             var bind = std.mem.zeroes(c.sg_bindings);
             for (inputs, 0..) |input, b| bind.views[b] = if (input < 0) src.view else s.reads[@intCast(input)];
+            bind.samplers[0] = g.samplers[0];
             c.sg_apply_bindings(&bind);
             c.sg_draw(0, 3, 1);
             c.sg_end_pass();
