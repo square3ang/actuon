@@ -213,6 +213,11 @@ pub const Session = struct {
     pub fn parseFile(gpa: std.mem.Allocator, path: []const u8, selected: ?[]const i32, seed: u64) !Chart {
         const data = try fs.readAlloc(gpa, path, 1 << 28);
         defer gpa.free(data);
+        return parseBytes(gpa, path, data, selected, seed);
+    }
+
+    /// `path` only picks the format.
+    pub fn parseBytes(gpa: std.mem.Allocator, path: []const u8, data: []const u8, selected: ?[]const i32, seed: u64) !Chart {
         if (std.ascii.endsWithIgnoreCase(path, ".bmson")) return core.bmson.parse(gpa, data);
         return core.bms.parse(gpa, data, .{
             .is_pms = std.ascii.endsWithIgnoreCase(path, ".pms"),

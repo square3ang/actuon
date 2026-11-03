@@ -4,6 +4,7 @@ const std = @import("std");
 const c = @import("c");
 const fs = @import("../platform/fs.zig");
 const decode = @import("decode.zig");
+const clip = @import("clip.zig");
 
 /// Longer than the engine's one second fade, the last it reads of anything replaced.
 const retire_ms = 3000;
@@ -12,18 +13,25 @@ const Job = struct {
     gpa: std.mem.Allocator,
     rate: u32,
     path: []const u8,
+    /// `path` is a chart with no preview of its own, so one is mixed from its sounds.
+    from_chart: bool,
     data: []f32 = &.{},
     done: std.atomic.Value(bool) = .init(false),
+    /// Set once the cursor has moved on, so a slow mix stops early.
+    cancel: std.atomic.Value(bool) = .init(false),
     thread: ?*c.SDL_Thread = null,
 
     fn run(ud: ?*anyopaque) callconv(.c) c_int {
         const j: *Job = @ptrCast(@alignCast(ud));
         defer j.done.store(true, .release);
-        const bytes = fs.readAlloc(j.gpa, j.path, 1 << 28) catch return 0;
-        defer j.gpa.free(bytes);
-        const s = decode.decode(std.heap.page_allocator, bytes, j.path, j.rate) catch return 0;
-        j.data = s.data;
+        j.data = (if (j.from_chart) clip.render(j.gpa, std.heap.page_allocator, j.path, j.rate, &j.cancel) else j.decodeFile()) catch return 0;
         return 0;
+    }
+
+    fn decodeFile(j: *Job) ![]f32 {
+        const bytes = try fs.readAlloc(j.gpa, j.path, 1 << 28);
+        defer j.gpa.free(bytes);
+        return (try decode.decode(std.heap.page_allocator, bytes, j.path, j.rate)).data;
     }
 
     /// Joins, and hands over `path`, which the caller keeps or frees.
@@ -51,9 +59,9 @@ pub const Preview = struct {
         p.retired.append(p.gpa, .{ .data = data, .at = now }) catch {};
     }
 
-    /// Call each frame of song select. `path` is the preview wanted, null for none. An old preview
-    /// keeps playing until the new one has decoded.
-    pub fn tick(p: *Preview, path: ?[]const u8, now: u64) void {
+    /// Call each frame of song select. `path` is the preview wanted, null for none, or with
+    /// `from_chart` a chart to mix one from. An old preview keeps playing until the new one is ready.
+    pub fn tick(p: *Preview, path: ?[]const u8, from_chart: bool, now: u64) void {
         var i: usize = 0;
         while (i < p.retired.items.len) {
             const r = p.retired.items[i];
@@ -79,6 +87,7 @@ pub const Preview = struct {
                 p.gpa.free(job_path);
             }
         };
+        if (p.job) |j| if (path == null or !std.mem.eql(u8, path.?, j.path)) j.cancel.store(true, .release);
         const want = path orelse {
             p.retire(p.current, now);
             p.current = &.{};
@@ -88,7 +97,7 @@ pub const Preview = struct {
         };
         if (p.job != null or std.mem.eql(u8, want, p.current_path)) return;
         const j = p.gpa.create(Job) catch return;
-        j.* = .{ .gpa = p.gpa, .rate = p.rate, .path = p.gpa.dupe(u8, want) catch {
+        j.* = .{ .gpa = p.gpa, .rate = p.rate, .from_chart = from_chart, .path = p.gpa.dupe(u8, want) catch {
             p.gpa.destroy(j);
             return;
         } };
@@ -99,7 +108,10 @@ pub const Preview = struct {
 
     /// Decoded audio stays mapped until exit, past the engine.
     pub fn deinit(p: *Preview) void {
-        if (p.job) |j| p.gpa.free(j.finish());
+        if (p.job) |j| {
+            j.cancel.store(true, .release);
+            p.gpa.free(j.finish());
+        }
         p.gpa.free(p.current_path);
         p.retired.deinit(p.gpa);
     }
@@ -130,9 +142,30 @@ test "with nothing wanted, a preview goes silent and its audio waits out the fad
     const data = try std.heap.page_allocator.alloc(f32, 2);
     p.current = data;
     p.current_path = try std.testing.allocator.dupe(u8, "x");
-    p.tick(null, 1000);
+    p.tick(null, false, 1000);
     try std.testing.expectEqual(@as(usize, 0), p.current.len);
     try std.testing.expectEqual(@as(usize, 1), p.retired.items.len);
-    p.tick(null, 1000 + retire_ms);
+    p.tick(null, false, 1000 + retire_ms);
     try std.testing.expectEqual(@as(usize, 0), p.retired.items.len);
+}
+
+test "a preview still mixing for a chart the cursor left is told to stop, then dropped" {
+    const gpa = std.testing.allocator;
+    fs.io = std.testing.io;
+    var p: Preview = .{ .gpa = gpa, .rate = 48000 };
+    defer p.deinit();
+    const j = try gpa.create(Job);
+    j.* = .{ .gpa = gpa, .rate = 48000, .from_chart = true, .path = try gpa.dupe(u8, "a.bms") };
+    p.job = j;
+    p.tick("a.bms", true, 0);
+    try std.testing.expect(!j.cancel.load(.acquire));
+    p.tick("b.bms", true, 0);
+    try std.testing.expect(j.cancel.load(.acquire));
+    j.data = try std.heap.page_allocator.alloc(f32, 2);
+    j.done.store(true, .release);
+    // Its mix is freed unplayed, and the chart now wanted starts: a missing file, so it ends at once.
+    p.tick("b.bms", true, 0);
+    try std.testing.expectEqual(@as(usize, 0), p.current.len);
+    try std.testing.expect(p.job != null);
+    try std.testing.expectEqualStrings("b.bms", p.job.?.path);
 }

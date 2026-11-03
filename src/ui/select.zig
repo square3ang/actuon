@@ -73,6 +73,7 @@ pub const State = struct {
     preview_checked: bool = true,
     preview_buf: [4096]u8 = undefined,
     preview_len: usize = 0,
+    preview_from_chart: bool = false,
     jacket: ?*gfx.Texture = null,
     jacket_key: u64 = 0,
     jacket_since: u64 = 0,
@@ -837,12 +838,18 @@ fn updatePreview(a: *App) void {
         s.preview_len = 0;
         var tmp = std.heap.ArenaAllocator.init(a.gpa);
         defer tmp.deinit();
-        if (song) |sg| if (findPreview(tmp.allocator(), sg)) |p| if (p.len <= s.preview_buf.len) {
-            @memcpy(s.preview_buf[0..p.len], p);
-            s.preview_len = p.len;
-        };
+        if (song) |sg| {
+            const found = findPreview(tmp.allocator(), sg);
+            // A chart with no preview of its own gets one mixed from its sounds.
+            s.preview_from_chart = found == null;
+            const p = found orelse sg.path;
+            if (p.len <= s.preview_buf.len) {
+                @memcpy(s.preview_buf[0..p.len], p);
+                s.preview_len = p.len;
+            }
+        }
     }
-    a.preview.tick(if (s.preview_len > 0) s.preview_buf[0..s.preview_len] else null, now);
+    a.preview.tick(if (s.preview_len > 0) s.preview_buf[0..s.preview_len] else null, s.preview_from_chart, now);
 }
 
 fn drawHeader(a: *App) void {
