@@ -5,6 +5,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("c");
+const fs = @import("../platform/fs.zig");
 
 pub const Raw = struct { mono_ns: u64, code: u16, down: bool };
 
@@ -20,12 +21,29 @@ var q_tail: std.atomic.Value(u32) = .init(0);
 var q_lock: std.atomic.Value(bool) = .init(false);
 
 pub fn push(ev: Raw) void {
-    while (q_lock.swap(true, .acquire)) std.atomic.spinLoopHint();
-    defer q_lock.store(false, .release);
-    const h = q_head.load(.monotonic);
-    if (h -% q_tail.load(.acquire) >= q_buf.len) return;
-    q_buf[h % q_buf.len] = ev;
-    q_head.store(h +% 1, .release);
+    {
+        while (q_lock.swap(true, .acquire)) std.atomic.spinLoopHint();
+        defer q_lock.store(false, .release);
+        const h = q_head.load(.monotonic);
+        if (h -% q_tail.load(.acquire) >= q_buf.len) return;
+        q_buf[h % q_buf.len] = ev;
+        q_head.store(h +% 1, .release);
+    }
+    _ = pushes.fetchAdd(1, .release);
+    if (builtin.os.tag == .windows) actuon_input_wake() else fs.io.futexWake(u32, &pushes.raw, 1);
+}
+
+/// Counts pushes, for the futex the sim thread sleeps on.
+var pushes: std.atomic.Value(u32) = .init(0);
+
+/// Sleeps up to `ns`, less once an event is queued, so a press is judged without waiting out the sim's tick.
+pub fn wait(ns: u64) void {
+    // Windows futex timeouts round to the system timer, too coarse for the tick.
+    if (builtin.os.tag == .windows) return actuon_input_wait(ns);
+    const seen = pushes.load(.acquire);
+    if (q_tail.load(.monotonic) != q_head.load(.acquire)) return;
+    const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromNanoseconds(ns), .clock = .awake } };
+    fs.io.futexWaitTimeout(u32, &pushes.raw, seen, timeout) catch {};
 }
 
 pub fn pop() ?Raw {
@@ -99,12 +117,18 @@ export fn actuon_input_push_hid(usage: u32, down: c_int) callconv(.c) void {
 extern fn actuon_rawinput_start() c_int;
 extern fn actuon_rawinput_sample(bits: *KeyBits) void;
 extern fn actuon_hid_start() c_int;
+extern fn actuon_input_wait_start() void;
+extern fn actuon_input_wait(ns: u64) void;
+extern fn actuon_input_wake() void;
 
 /// `evdev` opts Linux into /dev/input; without it Linux keeps SDL's key events and their compositor timestamps.
 pub fn startDirect(evdev_on: bool) void {
     switch (builtin.os.tag) {
         .linux => evdev.set(evdev_on),
-        .windows => if (actuon_rawinput_start() != 0) direct_keyboard.store(true, .release),
+        .windows => {
+            actuon_input_wait_start();
+            if (actuon_rawinput_start() != 0) direct_keyboard.store(true, .release);
+        },
         .macos => if (actuon_hid_start() != 0) direct_keyboard.store(true, .release),
         else => {},
     }
@@ -365,6 +389,7 @@ pub fn evdevReadable() bool {
 }
 
 test "sampling pushes one event per changed key" {
+    fs.io = std.testing.io;
     clear();
     var prev: KeyBits = @splat(0);
     var cur: KeyBits = @splat(0);
@@ -397,6 +422,7 @@ test "a keyboard plugged in later reuses an unplugged one's slot" {
 
 test "unplugging a device lets go of the keys it held" {
     if (builtin.os.tag != .linux) return;
+    fs.io = std.testing.io;
     clear();
     evdev.held[1].set(44);
     evdev.releaseHeld(1, 9);
@@ -407,6 +433,28 @@ test "unplugging a device lets go of the keys it held" {
     try std.testing.expect(pop() == null);
     evdev.releaseHeld(1, 10);
     try std.testing.expect(pop() == null);
+}
+
+fn pushLater(_: ?*anyopaque) callconv(.c) c_int {
+    c.SDL_Delay(20);
+    push(.{ .mono_ns = 0, .code = 1, .down = true });
+    return 0;
+}
+
+test "a queued event cuts the sim's wait short" {
+    fs.io = std.testing.io;
+    if (builtin.os.tag == .windows) actuon_input_wait_start();
+    clear();
+    const t = c.SDL_CreateThread(pushLater, "push-later", null).?;
+    const start = c.SDL_GetTicksNS();
+    while (q_tail.load(.monotonic) == q_head.load(.acquire)) wait(5 * std.time.ns_per_s);
+    c.SDL_WaitThread(t, null);
+    try std.testing.expect(c.SDL_GetTicksNS() - start < std.time.ns_per_s);
+    // Already queued: no sleep at all.
+    const again = c.SDL_GetTicksNS();
+    wait(5 * std.time.ns_per_s);
+    try std.testing.expect(c.SDL_GetTicksNS() - again < std.time.ns_per_s);
+    clear();
 }
 
 test "scancode table" {

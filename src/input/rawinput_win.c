@@ -83,6 +83,34 @@ void actuon_rawinput_sample(unsigned char *bits) {
     }
 }
 
+// The sim thread sleeps on a high-resolution timer and wakes early when input.zig queues an event.
+static HANDLE wake_event, wake_timer;
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
+void actuon_input_wait_start(void) {
+    wake_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    wake_timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    // Before Windows 10 1803 there is no high-resolution timer; the ordinary one rounds to the system tick.
+    if (wake_timer == NULL) wake_timer = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
+}
+
+void actuon_input_wake(void) {
+    if (wake_event != NULL) SetEvent(wake_event);
+}
+
+void actuon_input_wait(unsigned long long ns) {
+    LARGE_INTEGER due;
+    due.QuadPart = -(LONGLONG)(ns / 100); // negative: relative, in 100 ns units
+    if (wake_event == NULL || wake_timer == NULL || !SetWaitableTimer(wake_timer, &due, 0, NULL, NULL, FALSE)) {
+        Sleep(0);
+        return;
+    }
+    HANDLE both[2] = {wake_event, wake_timer};
+    WaitForMultipleObjects(2, both, FALSE, INFINITE);
+}
+
 int actuon_rawinput_start(void) {
     static volatile LONG ready = 0;
     build_code_vk();

@@ -88,18 +88,25 @@ fn report(name: []const u8, ns: []u64) void {
     });
 }
 
+const bench_events = 2000;
+
+/// Pushes from its own thread, as the OS input paths do.
+fn benchPusher(_: ?*anyopaque) callconv(.c) c_int {
+    for (0..bench_events) |_| {
+        c.SDL_DelayPrecise(1_000_000);
+        input.push(.{ .mono_ns = c.SDL_GetTicksNS(), .code = 0, .down = true });
+    }
+    return 0;
+}
+
 /// Same wait loop as Session.simThread: enqueue to pop is the delay the judge sees on top of the OS.
 fn queueBench() void {
-    var samples: [2000]u64 = undefined;
+    const pusher = c.SDL_CreateThread(benchPusher, "bench-push", null) orelse return;
+    defer c.SDL_WaitThread(pusher, null);
+    var samples: [bench_events]u64 = undefined;
     var n: usize = 0;
-    var next = c.SDL_GetTicksNS();
     while (n < samples.len) {
-        const now = c.SDL_GetTicksNS();
-        if (now >= next) {
-            input.push(.{ .mono_ns = now, .code = 0, .down = true });
-            next = now + 1_000_000;
-        }
-        c.SDL_DelayPrecise(250_000);
+        input.wait(250_000);
         while (input.pop()) |e| {
             samples[n] = c.SDL_GetTicksNS() - e.mono_ns;
             n += 1;
@@ -126,7 +133,7 @@ fn realKeys(seconds: u32) void {
             samples[n] = c.SDL_GetTicksNS() -| e.mono_ns;
             n += 1;
         };
-        c.SDL_DelayPrecise(250_000);
+        input.wait(250_000);
     }
     report("kernel timestamp to judge thread", samples[0..n]);
 }

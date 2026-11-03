@@ -476,7 +476,7 @@ pub const Session = struct {
                 if (s.sim.failed) s.engine.stopAll();
                 break;
             }
-            c.SDL_DelayPrecise(250_000);
+            input.wait(250_000);
         }
         return 0;
     }
