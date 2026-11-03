@@ -34,7 +34,7 @@ The next-generation BMS player.
 | | |
 | --- | --- |
 | **Platforms** | Windows, macOS, Linux |
-| **Input** | Never waits for the frame: RawInput and IOKit HID on their own thread; on Linux compositor timestamps, or more exact kernel ones with evdev |
+| **Input** | Never waits for the frame: RawInput, IOKit HID and evdev on their own thread, with kernel timestamps on Linux |
 | **Formats** | BMS, BME, BML, PMS, BMSON; Shift-JIS, EUC-KR, UTF-8 |
 | **Modes** | 4K, 5K, 6K, 7K, 10K, 14K, 9K |
 | **Your data** | Imports beatoraja and LR2 score databases |
@@ -97,7 +97,7 @@ Key bindings and audio devices are in settings. `actuon latency` measures your s
 
 Windows needs no setup. macOS asks for the Input Monitoring permission; if you refuse, the player uses SDL's keyboard events.
 
-Linux needs no setup either: SDL's keyboard events carry the compositor's timestamps, not the frame's. For more exact kernel timestamps and key polling, turn on **evdev input** in Settings, Controls. It reads `/dev/input`, so add yourself to the `input` group and log in again:
+Linux reads keys from `/dev/input`, so add yourself to the `input` group and log in again. Without it, the game warns in song select and falls back to SDL's keyboard events, which reach play only once per frame:
 
 ```sh
 sudo usermod -aG input $USER

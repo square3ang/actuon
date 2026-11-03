@@ -120,7 +120,6 @@ pub const Item = enum {
     download_url,
     update,
     input_poll,
-    evdev_input,
     bind_4k,
     bind_5k,
     bind_6k,
@@ -143,7 +142,7 @@ pub const Item = enum {
             .green, .lane_cover, .lane_cover_on, .lift, .lift_on, .hidden, .hidden_on, .judge_offset, .visual_offset => .timing,
             .import_beatoraja, .import_lr2 => .scores,
             .ir_url, .ir_signup, .ir_signin, .ir_rename, .ir_send_failed, .ir_upload, .ir_download, .download_url, .update => .online,
-            .input_poll, .evdev_input, .bind_4k, .bind_5k, .bind_6k, .bind_7k, .bind_10k, .bind_14k, .bind_9k, .beatoraja_select, .bind_start => .controls,
+            .input_poll, .bind_4k, .bind_5k, .bind_6k, .bind_7k, .bind_10k, .bind_14k, .bind_9k, .beatoraja_select, .bind_start => .controls,
         };
     }
 
@@ -215,7 +214,6 @@ pub const Item = enum {
             .download_url => tr("Download URL"),
             .update => tr("Game version"),
             .input_poll => tr("Key polling"),
-            .evdev_input => tr("evdev input"),
             .bind_4k => tr("4 key"),
             .bind_5k => tr("5 key"),
             .bind_6k => tr("6 key"),
@@ -293,7 +291,6 @@ pub const Item = enum {
                 tr("Key checks per second during play. Higher takes more CPU. Event keeps evdev's kernel timestamps, the most exact.")
             else
                 tr("Key checks per second during play. Higher takes more CPU. Event is not recommended: it times keys on arrival, with OS jitter."),
-            .evdev_input => tr("Reads /dev/input for kernel timestamps and key polling. Off, the compositor still stamps keys, not the frame."),
             .bind_5k, .bind_10k => tr("Enter, then press each input in turn: 5 keys, scratch A, scratch B, per side."),
             .bind_7k, .bind_14k => tr("Enter, then press each input in turn: 7 keys, scratch A, scratch B, per side."),
             .bind_4k => tr("Enter, then press each of the 4 keys in turn."),
@@ -565,11 +562,10 @@ pub fn openControls(a: *App) void {
     a.scene = .settings;
 }
 
-/// Key polling needs a key state sampler: Windows has one, Linux only through evdev, macOS none.
-fn rowShown(a: *const App, it: Item) bool {
+/// Key polling needs a key state sampler: Windows has one, Linux only once evdev reads a keyboard, macOS none.
+fn rowShown(_: *const App, it: Item) bool {
     return switch (it) {
-        .input_poll => builtin.os.tag == .windows or (builtin.os.tag == .linux and a.cfg.evdev_input),
-        .evdev_input => builtin.os.tag == .linux,
+        .input_poll => builtin.os.tag == .windows or (builtin.os.tag == .linux and input.direct_keyboard.load(.acquire)),
         else => true,
     };
 }
@@ -875,7 +871,6 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
         .pace_target => step(a, it, drawStepper(g, right, y, h, play.paceTargetName(cfg.pace_target), on)),
         .lane_cover => step(a, it, drawStepper(g, right, y, h, std.fmt.bufPrint(&buf, "{d}%", .{@as(u32, @intFromFloat(@round(cfg.lane_cover * 100)))}) catch "", on)),
         .hs_auto_adjust, .constant, .judge_auto_adjust, .lane_cover_on, .lift_on, .hidden_on, .assist_expand_judge, .assist_constant, .assist_judge_area, .assist_legacy, .assist_mark_note, .assist_bpm_guide, .assist_no_mine => drawToggle(g, right, y, h, flagOf(cfg, it).?.*, on),
-        .evdev_input => drawToggle(g, right, y, h, cfg.evdev_input, on),
         .ir_send_failed => drawToggle(g, right, y, h, cfg.ir_send_failed, on),
         .fps_limit => step(a, it, drawStepper(g, right, y, h, if (cfg.fps_limit == 0) tr("Off") else std.fmt.bufPrint(&buf, "{d}", .{fps_limits[fpsIndex(cfg.fps_limit)]}) catch "", on)),
         .beatoraja_select => drawToggle(g, right, y, h, cfg.beatoraja_select, on),
@@ -1136,11 +1131,6 @@ fn adjust(a: *App, it: Item, dir: i32) void {
         .hs_auto_adjust, .constant, .judge_auto_adjust, .lane_cover_on, .lift_on, .hidden_on, .assist_expand_judge, .assist_constant, .assist_judge_area, .assist_legacy, .assist_mark_note, .assist_bpm_guide, .assist_no_mine => {
             const flag = flagOf(cfg, it).?;
             flag.* = !flag.*;
-        },
-        .evdev_input => {
-            if (!cfg.evdev_input and !input.evdevReadable()) return say(a, "Reading /dev/input needs the input group: run sudo usermod -aG input $USER, then log in again.", .{});
-            cfg.evdev_input = !cfg.evdev_input;
-            input.setEvdev(cfg.evdev_input);
         },
         .ir_send_failed => cfg.ir_send_failed = !cfg.ir_send_failed,
         .fps_limit => {
@@ -1944,7 +1934,7 @@ test "a folder added around others takes their place" {
 test "up and down never land on a row the platform hides" {
     const a = try testing.open();
     defer testing.close(a);
-    a.cfg.evdev_input = false;
+    input.direct_keyboard.store(false, .release);
     // Only Windows samples keys without evdev.
     try std.testing.expectEqual(builtin.os.tag == .windows, rowShown(a, .input_poll));
     openControls(a);
@@ -1956,7 +1946,8 @@ test "up and down never land on a row the platform hides" {
         try std.testing.expect(rowShown(a, items[a.set.cursor]));
         key(a, c.SDL_SCANCODE_UP);
     }
-    a.cfg.evdev_input = true;
+    input.direct_keyboard.store(true, .release);
+    defer input.direct_keyboard.store(false, .release);
     try std.testing.expectEqual(builtin.os.tag != .macos, rowShown(a, .input_poll));
 }
 

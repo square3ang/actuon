@@ -67,10 +67,8 @@ pub const Config = struct {
     audio_frames: u32 = 128,
     /// PortAudio name of an output. Empty picks the output automatically.
     audio_device: []const u8 = "",
-    /// Key sampling rate during play in Hz. 0 uses OS key events instead, which on Linux carry evdev's kernel timestamps when evdev input is on.
+    /// Key sampling rate during play in Hz. 0 uses OS key events instead, which on Linux carry evdev's kernel timestamps.
     input_poll_hz: u32 = if (@import("builtin").os.tag == .linux) 0 else 1000,
-    /// Linux reads keys from /dev/input (kernel timestamps, key polling) instead of SDL's key events.
-    evdev_input: bool = false,
     volume: f32 = 0.8,
     bgm_volume: f32 = 0.5,
     sfx_volume: f32 = 0.8,

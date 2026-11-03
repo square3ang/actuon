@@ -52,7 +52,7 @@
   <section class="moment">
     <div>
       <h2>判定は、フレームではなく押した瞬間で。</h2>
-      <p>ノーツはフレームレートと独立したティッククロックで動きます。WindowsとmacOSは専用スレッドでキー入力の時刻を計ります。Linuxはコンポジタが付けた時刻を使い、evdevをオンにするとより正確なカーネルの時刻を使います。どれもフレームを待ちません。</p>
+      <p>ノーツはフレームレートと独立したティッククロックで動きます。Windows、macOS、Linuxはどれも専用スレッドでキー入力を読み、Linuxは/dev/inputのカーネル時刻を使います。どれもフレームを待ちません。</p>
       <p class="sky"><code>actuon latency</code>で環境を測定できます。</p>
     </div>
     <img class="screen" src="/screens/play.webp" width="1280" height="720" loading="lazy" alt="譜面をオートプレイ中、レーンの横でBGAが流れている">

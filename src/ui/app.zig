@@ -1185,7 +1185,7 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
     defer c.SDL_Quit();
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    var cfg = config.load(arena.allocator());
+    const cfg = config.load(arena.allocator());
     i18n.current = i18n.resolve(cfg.language);
     const flags: u64 = c.rb_window_flags() | c.SDL_WINDOW_RESIZABLE | c.SDL_WINDOW_HIGH_PIXEL_DENSITY | (if (cfg.fullscreen) @as(u64, c.SDL_WINDOW_FULLSCREEN) else 0);
     const win = c.SDL_CreateWindow("actuon", @intCast(cfg.width), @intCast(cfg.height), flags) orelse return error.SdlWindow;
@@ -1195,9 +1195,7 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
     defer engine.destroy();
     engine.gain = cfg.volume;
     try engine.open(cfg.audio_rate, cfg.audio_frames, opts.null_audio, cfg.audio_device);
-    // Without read access evdev cannot run, so it shows as off and key polling stays hidden.
-    cfg.evdev_input = cfg.evdev_input and input.evdevReadable();
-    input.startDirect(cfg.evdev_input);
+    const direct_input = input.startDirect();
 
     const app = try gpa.create(App);
     defer gpa.destroy(app);
@@ -1248,6 +1246,10 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
             params.rec = r;
         }
         if (opts.decide) app.decidePlay(params, true) else app.startPlay(params, true);
+    }
+    if (@import("builtin").os.tag == .linux and !direct_input) {
+        std.log.warn("no readable keyboard under /dev/input: keys come from the compositor, a frame late", .{});
+        app.sel.status = tr("Reading /dev/input needs the input group: run sudo usermod -aG input $USER, then log in again.");
     }
     if (config.set_aside) app.sel.status = tr("Settings could not be read: moved to config.json.bad");
     if (crash.takePrevious(arena.allocator())) app.sel.status = tr("The last run crashed: see crash-last.txt in the data folder");

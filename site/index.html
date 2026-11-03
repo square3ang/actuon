@@ -52,7 +52,7 @@
   <section class="moment">
     <div>
       <h2>Judged when you pressed. Not when the frame ran.</h2>
-      <p>Notes run on a tick clock, apart from the frame rate. Windows and macOS time key presses on their own thread. Linux takes the compositor's timestamp, or the more exact kernel one with evdev on. None of them waits for the frame.</p>
+      <p>Notes run on a tick clock, apart from the frame rate. Windows, macOS and Linux read key presses on their own thread, Linux from /dev/input with kernel timestamps. None of them waits for the frame.</p>
       <p class="sky"><code>actuon latency</code> measures your setup.</p>
     </div>
     <img class="screen" src="/screens/play.webp" width="1280" height="720" loading="lazy" alt="Autoplay partway through a chart, with its BGA running beside the lanes">

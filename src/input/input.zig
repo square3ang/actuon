@@ -121,30 +121,29 @@ extern fn actuon_input_wait_start() void;
 extern fn actuon_input_wait(ns: u64) void;
 extern fn actuon_input_wake() void;
 
-/// `evdev` opts Linux into /dev/input; without it Linux keeps SDL's key events and their compositor timestamps.
-pub fn startDirect(evdev_on: bool) void {
+/// False when the OS path is unavailable and SDL's key events stay in charge, which on Linux means
+/// no read access to /dev/input: SDL's keys then reach play only once per frame.
+pub fn startDirect() bool {
     switch (builtin.os.tag) {
-        .linux => evdev.set(evdev_on),
+        .linux => {
+            if (!evdev.readable()) return false;
+            evdev.start();
+        },
         .windows => {
             actuon_input_wait_start();
             if (actuon_rawinput_start() != 0) direct_keyboard.store(true, .release);
         },
         .macos => if (actuon_hid_start() != 0) direct_keyboard.store(true, .release),
-        else => {},
+        else => return false,
     }
     // shortcut: macOS has no key state sampler and stays on HID events, add CGEventSourceKeyState with a keycode table when it can be tested there.
-    // Linux starts it with evdev, which settings can turn on later.
     if (builtin.os.tag == .windows and direct_keyboard.load(.acquire)) startSampler();
+    return builtin.os.tag == .linux or direct_keyboard.load(.acquire);
 }
 
 fn startSampler() void {
     const t = c.SDL_CreateThread(pollThread, "input-poll", null);
     if (t != null) c.SDL_DetachThread(t);
-}
-
-/// Turns Linux evdev input on or off while the game runs.
-pub fn setEvdev(on: bool) void {
-    evdev.set(on);
 }
 
 /// One bit per Linux-style key code, the layout EVIOCGKEY returns.
@@ -294,31 +293,10 @@ const evdev = if (builtin.os.tag == .linux) struct {
         }
     }
 
-    /// The player's setting; the evdev thread alone opens and closes devices to follow it.
-    var wanted: std.atomic.Value(bool) = .init(false);
-    /// Touched only from the main thread.
-    var started = false;
-
-    fn set(on: bool) void {
-        wanted.store(on, .release);
-        // SDL's key events take over at once; the thread lets go of the devices within a second.
-        if (!on) direct_keyboard.store(false, .release);
-        if (!on or started) return;
+    fn start() void {
         const t = c.SDL_CreateThread(run, "input-evdev", null) orelse return;
         c.SDL_DetachThread(t);
-        started = true;
         startSampler();
-    }
-
-    /// Settings never opens over play, so the sampler is not reading these when they close.
-    fn closeAll() void {
-        for (fds[0..n.load(.monotonic)], 0..) |*f, slot| {
-            if (f.fd < 0) continue;
-            _ = linux.close(f.fd);
-            f.fd = -1;
-            releaseHeld(slot, c.SDL_GetTicksNS());
-        }
-        n.store(0, .release);
     }
 
     fn run(_: ?*anyopaque) callconv(.c) c_int {
@@ -328,11 +306,6 @@ const evdev = if (builtin.os.tag == .linux) struct {
         var nodes_at = nodesChangedAt();
         var rescan_until: u64 = 0;
         while (true) {
-            if (!wanted.load(.acquire)) {
-                closeAll();
-                c.SDL_Delay(100);
-                continue;
-            }
             if (!direct_keyboard.load(.monotonic)) {
                 openKeyboards();
                 if (n.load(.monotonic) > 0) direct_keyboard.store(true, .release);
@@ -376,17 +349,12 @@ const evdev = if (builtin.os.tag == .linux) struct {
         }
     }
 } else struct {
-    fn set(_: bool) void {}
+    fn start() void {}
     fn sample(_: *KeyBits) void {}
     fn readable() bool {
         return false;
     }
 };
-
-/// Whether evdev input can be turned on: a keyboard under /dev/input this user may read.
-pub fn evdevReadable() bool {
-    return evdev.readable();
-}
 
 test "sampling pushes one event per changed key" {
     fs.io = std.testing.io;
