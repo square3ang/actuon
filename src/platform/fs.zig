@@ -24,7 +24,7 @@ pub fn writeAtomic(gpa: std.mem.Allocator, path: []const u8, data: []const u8) !
     try f.writeStreamingAll(io, data);
     // Rename can reach the disk before the data does, and a power cut would then leave an empty file.
     try f.sync(io);
-    try Dir.cwd().rename(tmp, Dir.cwd(), path, io);
+    try rename(tmp, path);
 }
 
 pub fn exists(path: []const u8) bool {
@@ -45,7 +45,15 @@ pub fn removeTree(path: []const u8) void {
 }
 
 pub fn rename(from: []const u8, to: []const u8) !void {
-    try Dir.cwd().rename(from, Dir.cwd(), to, io);
+    // Not std: on Windows it opens the source for writing, which a running exe or loaded DLL refuses. SDL uses MoveFileExW there.
+    var from_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var to_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const from_z = try std.fmt.bufPrintSentinel(&from_buf, "{s}", .{from}, 0);
+    const to_z = try std.fmt.bufPrintSentinel(&to_buf, "{s}", .{to}, 0);
+    if (!c.SDL_RenamePath(from_z, to_z)) {
+        std.log.warn("rename {s}: {s}", .{ from, std.mem.span(c.SDL_GetError()) });
+        return error.RenameFailed;
+    }
 }
 
 pub fn setExecutable(path: []const u8) !void {
