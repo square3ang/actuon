@@ -60,6 +60,8 @@ pub const State = struct {
     scan_thread: ?*c.SDL_Thread = null,
     scan_progress: std.atomic.Value(u32) = .init(0),
     scan_done: std.atomic.Value(bool) = .init(false),
+    // A running scan may already have passed files added since it started.
+    scan_again: bool = false,
     last_scan_ms: u64 = 0,
     download: ?*download.Job = null,
     download_buf: [64]u8 = undefined,
@@ -173,7 +175,12 @@ fn scanThread(ud: ?*anyopaque) callconv(.c) c_int {
 
 pub fn startScan(a: *App) void {
     const s = &a.sel;
-    if (s.scan_thread != null or a.cfg.roots.len == 0) return;
+    if (a.cfg.roots.len == 0) return;
+    if (s.scan_thread != null) {
+        s.scan_again = true;
+        return;
+    }
+    s.scan_again = false;
     s.scan_done.store(false, .release);
     s.scan_progress.store(0, .release);
     s.scan_thread = c.SDL_CreateThread(scanThread, "scan", a);
@@ -189,6 +196,7 @@ fn tickScan(a: *App) void {
             s.scan_thread = null;
             s.last_scan_ms = c.SDL_GetTicks();
             if (s.stats.parsed > 0 or s.stats.removed > 0) reload(a);
+            if (s.scan_again) startScan(a);
         }
     } else if (c.SDL_GetTicks() - s.last_scan_ms > scan_interval_ms) startScan(a);
     _ = tickTables(a);
@@ -1496,6 +1504,11 @@ fn startDownload(a: *App, row: Row) void {
         s.status = tr("A download is already running");
         return;
     }
+    // A finished download stays a missing row until the scan lists it; this would fetch it again.
+    if (s.scan_thread != null) {
+        s.status = tr("Wait for the library scan to finish");
+        return;
+    }
     if (a.cfg.roots.len == 0) {
         s.status = tr("Add a library folder first");
         return;
@@ -2290,6 +2303,19 @@ test "a table opens by level and lists charts the library lacks" {
     key(a, c.SDL_SCANCODE_DOWN);
     key(a, c.SDL_SCANCODE_RETURN);
     try std.testing.expectEqualStrings("Add a library folder first", a.sel.status);
+    // While a scan runs, a just-downloaded chart still shows as missing; enter must not fetch it again.
+    a.sel.scan_thread = @ptrFromInt(8);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expectEqualStrings("Wait for the library scan to finish", a.sel.status);
+    try std.testing.expect(a.sel.download == null);
+    // A scan asked for mid-scan runs after it, since the running one may have passed the new files.
+    const roots = a.cfg.roots;
+    a.cfg.roots = &.{"x"};
+    startScan(a);
+    a.cfg.roots = roots;
+    try std.testing.expect(a.sel.scan_again);
+    a.sel.scan_thread = null;
+    a.sel.scan_again = false;
     key(a, c.SDL_SCANCODE_ESCAPE);
     try std.testing.expectEqual(.table, a.sel.view);
     key(a, c.SDL_SCANCODE_ESCAPE);

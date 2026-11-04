@@ -382,6 +382,7 @@ const rows = [_]Row{
     .{ "No tables yet. Add one in Settings, Tables.", "난이도표가 없어요. 설정 > 난이도표에서 추가하세요.", "難易度表がありません。設定の難易度表で追加してください。", "暂无难度表。请在设置的难度表中添加。" },
     .{ "Updating tables...", "난이도표 업데이트 중...", "難易度表を更新中...", "正在更新难度表..." },
     .{ "A download is already running", "이미 받는 중이에요", "すでにダウンロード中です", "已有下载正在进行" },
+    .{ "Wait for the library scan to finish", "라이브러리 검색이 끝날 때까지 기다려 주세요", "ライブラリのスキャン完了までお待ちください", "请等待曲库扫描完成" },
     .{ "Add a library folder first", "라이브러리 폴더를 먼저 추가하세요", "先にライブラリフォルダを追加してください", "请先添加曲库文件夹" },
     .{ "No download source for this chart", "이 채보를 받을 곳이 없어요", "この譜面のダウンロード元がありません", "此谱面没有下载来源" },
     .{ "Could not start download", "다운로드를 시작하지 못했어요", "ダウンロードを開始できません", "无法开始下载" },
