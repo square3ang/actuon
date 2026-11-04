@@ -800,8 +800,8 @@ test "workers send every replay once and try again on a busy server" {
     defer server.deinit(fs.io);
     const total = 5;
     const Peer = struct {
-        fn run(listener: *std.Io.net.Server, seen: *[total + 1][]const u8, names: *[total + 1][64]u8, sizes: *[total + 1]usize) void {
-            for (seen, names, sizes, 0..) |*one, *name, *size, n| {
+        fn run(listener: *std.Io.net.Server, seen: *[total + 1][]const u8, names: *[total + 1][64]u8, sizes: *[total + 1]usize, charts: *[total + 1]usize) void {
+            for (seen, names, sizes, charts, 0..) |*one, *name, *size, *chart, n| {
                 const stream = listener.accept(fs.io) catch return;
                 defer stream.close(fs.io);
                 var in_buf: [1024]u8 = undefined;
@@ -809,7 +809,11 @@ test "workers send every replay once and try again on a busy server" {
                 const start = reader.interface.takeDelimiterInclusive('\n') catch return;
                 const at = std.mem.indexOf(u8, start, "/scores/") orelse return;
                 one.* = std.fmt.bufPrint(name, "{s}", .{start[at + 8 ..][0..1]}) catch return;
-                if (std.mem.indexOf(u8, start, "&chart=205") == null) return;
+                if (std.mem.indexOf(u8, start, "&chart=")) |c_at| {
+                    const digits = start[c_at + 7 ..];
+                    const end = std.mem.indexOfNone(u8, digits, "0123456789") orelse digits.len;
+                    chart.* = std.fmt.parseInt(usize, digits[0..end], 10) catch 0;
+                }
                 while (true) {
                     const line = reader.interface.takeDelimiterInclusive('\n') catch return;
                     if (line.len == 2) break;
@@ -828,15 +832,19 @@ test "workers send every replay once and try again on a busy server" {
     var seen: [total + 1][]const u8 = @splat("");
     var names: [total + 1][64]u8 = undefined;
     var sizes: [total + 1]usize = @splat(0);
-    const thread = try std.Thread.spawn(.{}, Peer.run, .{ &server, &seen, &names, &sizes });
+    var charts: [total + 1]usize = @splat(0);
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{ &server, &seen, &names, &sizes, &charts });
     defer thread.join();
 
     const d = try db_mod.openMain(a);
     defer d.close();
     try d.exec("DELETE FROM replay; INSERT INTO replay(id,sha256,ex,clear,data) VALUES(1,'a',1,1,'r'),(2,'b',1,1,'r'),(3,'c',1,1,'r'),(4,'d',1,1,'r'),(5,'e',1,1,'r')");
     defer d.exec("DELETE FROM replay") catch {};
-    // stop.bms is 205 bytes: each upload is that chart, then the one-byte replay.
+    // Each upload is the chart, then the one-byte replay. Its size is read here: a Windows checkout adds CRs.
     const chart = "tests/charts/stop.bms";
+    const chart_bytes = try fs.readAlloc(a, chart, 1 << 20);
+    defer a.free(chart_bytes);
+    const chart_len = chart_bytes.len;
     const pending = [total]Pending{
         .{ .id = 1, .sha = "a", .path = chart }, .{ .id = 2, .sha = "b", .path = chart }, .{ .id = 3, .sha = "c", .path = chart },
         .{ .id = 4, .sha = "d", .path = chart }, .{ .id = 5, .sha = "e", .path = chart },
@@ -848,7 +856,10 @@ test "workers send every replay once and try again on a busy server" {
     try std.testing.expectEqual(@as(u32, total), s.accepted);
     try std.testing.expectEqual(@as(u32, 0), s.failed);
     try std.testing.expectEqual(@as(u32, total), s.progress.load(.acquire));
-    for (sizes) |n| try std.testing.expectEqual(@as(usize, 206), n);
+    for (sizes, charts) |n, len| {
+        try std.testing.expectEqual(chart_len, len);
+        try std.testing.expectEqual(chart_len + 1, n);
+    }
 }
 
 test "only scores the server cannot match become claims" {
