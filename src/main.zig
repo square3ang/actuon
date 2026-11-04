@@ -188,6 +188,7 @@ test {
     _ = @import("audio/latency.zig");
     _ = @import("platform/http.zig");
     _ = @import("platform/fs.zig");
+    _ = @import("platform/crash.zig");
     _ = @import("table/table.zig");
     _ = @import("ui/course.zig");
     _ = @import("net/ir.zig");
