@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:latest
     steps:
-      - run: pacman -Syu --noconfirm git zig sdl3 sdl3_ttf portaudio sqlite lua54 libarchive ffmpeg vulkan-icd-loader vulkan-headers rust python nodejs base-devel pkgconf rclone patchelf
+      - run: pacman -Syu --noconfirm git zig sdl3 sdl3_ttf portaudio sqlite lua54 libarchive ffmpeg vulkan-icd-loader vulkan-headers rust python nodejs base-devel pkgconf patchelf
       - uses: actions/checkout@v4
       # A tag the binary does not report would offer the same update forever.
       - if: github.ref_type == 'tag'
@@ -24,6 +24,19 @@ jobs:
       - run: echo "$PWD/.naga/bin" >> "$GITHUB_PATH"
       - run: zig build test
       - run: node tests/site_lang.mjs
+      - run: |
+          curl -fsSLo /usr/local/bin/linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage
+          chmod +x /usr/local/bin/linuxdeploy
+          APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 packaging/linux/build-appimage.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: linux, path: actuon-x86_64.AppImage, if-no-files-found: error }
+  # The core, its tools and the server, apart from the game so the two run side by side. None of it needs naga.
+  server:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - run: pacman -Syu --noconfirm git zig sqlite rust python base-devel pkgconf rclone
+      - uses: actions/checkout@v4
       - run: zig build tools -Doptimize=ReleaseSafe
       - run: python3 tests/golden_check.py "$PWD/zig-out/bin/chartdump"
       - name: Parser fuzz
@@ -39,12 +52,6 @@ jobs:
         working-directory: web
       - run: python3 tests/ir_e2e.py server/target/release/actuon-ir zig-out/bin/mkreplay tests/charts/stop.bms "$(mktemp -d)"
       - run: python3 tests/backup_check.py server/backup/backup.sh "$(mktemp -d)"
-      - run: |
-          curl -fsSLo /usr/local/bin/linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage
-          chmod +x /usr/local/bin/linuxdeploy
-          APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 packaging/linux/build-appimage.sh
-      - uses: actions/upload-artifact@v4
-        with: { name: linux, path: actuon-x86_64.AppImage, if-no-files-found: error }
   macos:
     runs-on: macos-latest
     steps:
@@ -93,7 +100,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: windows, path: zig-out/actuon-windows.zip, if-no-files-found: error }
   release:
-    needs: [linux, macos, windows]
+    needs: [linux, server, macos, windows]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions: { contents: write }
