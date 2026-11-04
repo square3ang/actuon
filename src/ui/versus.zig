@@ -258,6 +258,12 @@ pub fn skinDrawsBoard(skin: *const skin_model.Skin) bool {
     return false;
 }
 
+/// A skin with a target number shows the one opponent there; osu! skins have none.
+fn skinShowsTarget(skin: *const skin_model.Skin) bool {
+    for (skin.objects) |*o| if (o.kind == .number and (o.ref == 121 or o.ref == 151 or o.ref == 153)) return true;
+    return false;
+}
+
 pub fn fillTarget(a: *App) void {
     const v = &a.versus;
     if (!v.in_round) return;
@@ -285,15 +291,19 @@ fn shownEx(p: *const room_mod.Player) u32 {
     return p.final_ex orelse p.ex;
 }
 
-/// A small board for what skins have no place for: more than one opponent, or a lost connection.
+/// A small board for what skins have no place for: more than one opponent, an opponent with no target slot, or a lost connection.
 pub fn drawPlayBoard(a: *App) void {
     const v = &a.versus;
     if (!v.in_round) return;
     if (v.view.status == .lost) {
         a.g.textCentered(tr("Connection to the room was lost"), a.g.w / 2, 12 * a.g.h / 720, a.g.scaled(14), gfx.amber);
     }
-    if (v.view.count < 3) return;
-    if (a.play_skin) |sk| if (skinDrawsBoard(sk)) return;
+    if (v.view.count < 2) return;
+    if (a.play_skin) |sk| {
+        if (skinDrawsBoard(sk)) return;
+        if (v.view.count == 2 and skinShowsTarget(sk)) return;
+    } else if (v.view.count == 2) return; // the built-in deck shows the one opponent as its target
+
     drawBoard(a, if (a.cfg.versus_panel_left) 12 * a.g.h / 720 else a.g.w - 232 * a.g.h / 720, 84 * a.g.h / 720);
 }
 
@@ -629,6 +639,9 @@ test "a skin reading the versus numbers replaces the board, and they read the ro
     try std.testing.expect(!skinDrawsBoard(&skin));
     skin.objects = &objects;
     try std.testing.expect(skinDrawsBoard(&skin));
+    try std.testing.expect(!skinShowsTarget(&skin));
+    objects[0].ref = 121;
+    try std.testing.expect(skinShowsTarget(&skin));
     var v: room_mod.View = .{ .count = 1 };
     v.players[0] = .{ .ex = 7, .judged = 3, .final_ex = 8 };
     var st: skin_scene.State = .{ .versus = &v };
