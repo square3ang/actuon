@@ -175,10 +175,10 @@ fn bearer(a: std.mem.Allocator, token: []const u8) ![]const std.http.Header {
 }
 
 /// A whole room finishes at once and the server checks few replays at a time, and a round has no later sync.
-fn sendScore(client: *std.http.Client, a: std.mem.Allocator, url: []const u8, replay: []const u8, hs: []const std.http.Header, room: []const u8) !http.Response {
+fn sendScore(client: *std.http.Client, a: std.mem.Allocator, url: []const u8, upload: []const u8, hs: []const std.http.Header, room: []const u8) !http.Response {
     var tries: u32 = 0;
     while (true) : (tries += 1) {
-        const r = try http.send(client, a, .POST, url, replay, hs);
+        const r = try http.send(client, a, .POST, url, upload, hs);
         if (!shouldRetryScore(r.status, room, tries)) return r;
         c.SDL_Delay(score_retry_ms);
     }
@@ -188,7 +188,7 @@ fn shouldRetryScore(status: u16, room: []const u8, tries: u32) bool {
     return status == 503 and room.len > 0 and tries < score_retries;
 }
 
-/// Submit, and when the server has never seen this chart (428) upload it and submit again.
+/// Submit the chart and the replay together: the server checks them and keeps no copy of the chart.
 /// `prev_rank` gets the player's place from before this score, when the caller wants it.
 pub fn submit(gpa: std.mem.Allocator, client: *std.http.Client, base: []const u8, token: []const u8, sha: []const u8, chart_path: []const u8, replay: []const u8, room: []const u8, prev_rank: ?*i64) !u16 {
     // Without the file nothing says how the chart should be parsed.
@@ -197,16 +197,11 @@ pub fn submit(gpa: std.mem.Allocator, client: *std.http.Client, base: []const u8
     defer arena.deinit();
     const a = arena.allocator();
     const hs = try bearer(a, token);
+    const chart = fs.readAlloc(a, chart_path, 16 << 20) catch return error.NoChart;
+    const upload = try std.mem.concat(a, u8, &.{ chart, replay });
     const format = @backingInt(core.Format.of(chart_path));
-    const url = try std.fmt.allocPrint(a, "{s}/scores/{s}?format={d}{s}{s}", .{ base, sha, format, if (room.len > 0) "&room=" else "", room });
-    var r = try sendScore(client, a, url, replay, hs, room);
-    if (r.status == 428) {
-        const chart = try fs.readAlloc(a, chart_path, 16 << 20);
-        const put = try std.fmt.allocPrint(a, "{s}/charts/{s}?format={d}", .{ base, sha, format });
-        const up = try http.send(client, a, .PUT, put, chart, hs);
-        if (up.status != 200) return up.status;
-        r = try sendScore(client, a, url, replay, hs, room);
-    }
+    const url = try std.fmt.allocPrint(a, "{s}/scores/{s}?format={d}&chart={d}{s}{s}", .{ base, sha, format, chart.len, if (room.len > 0) "&room=" else "", room });
+    const r = try sendScore(client, a, url, upload, hs, room);
     if (prev_rank) |out| if (r.status == 200) {
         const v = std.json.parseFromSliceLeaky(struct { prev_rank: i64 = 0 }, a, r.body, .{ .ignore_unknown_fields = true }) catch return r.status;
         out.* = v.prev_rank;
@@ -592,7 +587,6 @@ fn pushThread(ud: ?*anyopaque) callconv(.c) c_int {
     return 0;
 }
 
-/// shortcut: every new chart still costs a refused POST before its PUT, ask for the known list first if that shows.
 fn pushAllReplays(s: *Sync, pending: []const Pending) !void {
     var next: std.atomic.Value(usize) = .init(0);
     var workers: [push_workers]Push = @splat(.{ .s = s, .pending = pending, .next = &next });
@@ -806,8 +800,8 @@ test "workers send every replay once and try again on a busy server" {
     defer server.deinit(fs.io);
     const total = 5;
     const Peer = struct {
-        fn run(listener: *std.Io.net.Server, seen: *[total + 1][]const u8, names: *[total + 1][64]u8) void {
-            for (seen, names, 0..) |*one, *name, n| {
+        fn run(listener: *std.Io.net.Server, seen: *[total + 1][]const u8, names: *[total + 1][64]u8, sizes: *[total + 1]usize) void {
+            for (seen, names, sizes, 0..) |*one, *name, *size, n| {
                 const stream = listener.accept(fs.io) catch return;
                 defer stream.close(fs.io);
                 var in_buf: [1024]u8 = undefined;
@@ -815,11 +809,14 @@ test "workers send every replay once and try again on a busy server" {
                 const start = reader.interface.takeDelimiterInclusive('\n') catch return;
                 const at = std.mem.indexOf(u8, start, "/scores/") orelse return;
                 one.* = std.fmt.bufPrint(name, "{s}", .{start[at + 8 ..][0..1]}) catch return;
+                if (std.mem.indexOf(u8, start, "&chart=205") == null) return;
                 while (true) {
                     const line = reader.interface.takeDelimiterInclusive('\n') catch return;
                     if (line.len == 2) break;
+                    if (std.ascii.startsWithIgnoreCase(line, "content-length: "))
+                        size.* = std.fmt.parseInt(usize, std.mem.trim(u8, line[16..], " \r\n"), 10) catch return;
                 }
-                reader.interface.discardAll(1) catch return;
+                reader.interface.discardAll(size.*) catch return;
                 var out_buf: [128]u8 = undefined;
                 var writer = stream.writer(fs.io, &out_buf);
                 const status = if (n == 0) "503 Busy" else "200 OK";
@@ -830,16 +827,19 @@ test "workers send every replay once and try again on a busy server" {
     };
     var seen: [total + 1][]const u8 = @splat("");
     var names: [total + 1][64]u8 = undefined;
-    const thread = try std.Thread.spawn(.{}, Peer.run, .{ &server, &seen, &names });
+    var sizes: [total + 1]usize = @splat(0);
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{ &server, &seen, &names, &sizes });
     defer thread.join();
 
     const d = try db_mod.openMain(a);
     defer d.close();
     try d.exec("DELETE FROM replay; INSERT INTO replay(id,sha256,ex,clear,data) VALUES(1,'a',1,1,'r'),(2,'b',1,1,'r'),(3,'c',1,1,'r'),(4,'d',1,1,'r'),(5,'e',1,1,'r')");
     defer d.exec("DELETE FROM replay") catch {};
+    // stop.bms is 205 bytes: each upload is that chart, then the one-byte replay.
+    const chart = "tests/charts/stop.bms";
     const pending = [total]Pending{
-        .{ .id = 1, .sha = "a", .path = "/a.bms" }, .{ .id = 2, .sha = "b", .path = "/b.bms" }, .{ .id = 3, .sha = "c", .path = "/c.bms" },
-        .{ .id = 4, .sha = "d", .path = "/d.bms" }, .{ .id = 5, .sha = "e", .path = "/e.bms" },
+        .{ .id = 1, .sha = "a", .path = chart }, .{ .id = 2, .sha = "b", .path = chart }, .{ .id = 3, .sha = "c", .path = chart },
+        .{ .id = 4, .sha = "d", .path = chart }, .{ .id = 5, .sha = "e", .path = chart },
     };
     var base_buf: [64]u8 = undefined;
     const base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{server.socket.address.getPort()});
@@ -848,6 +848,7 @@ test "workers send every replay once and try again on a busy server" {
     try std.testing.expectEqual(@as(u32, total), s.accepted);
     try std.testing.expectEqual(@as(u32, 0), s.failed);
     try std.testing.expectEqual(@as(u32, total), s.progress.load(.acquire));
+    for (sizes) |n| try std.testing.expectEqual(@as(usize, 206), n);
 }
 
 test "only scores the server cannot match become claims" {

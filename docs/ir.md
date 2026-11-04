@@ -3,15 +3,18 @@
 `server/` is a self-hosted IR in Rust. It accepts a replay, re-simulates it with the same Zig core through FFI in a child
 process with a 30 s limit, and stores the score it computes itself, not one the client claims.
 
-Scores and accounts live in SQLite in WAL mode (`ir.db`), and uploaded charts next to it in the data directory.
+Each score comes with its chart: `POST /scores/SHA?format=N&chart=LEN`, whose body is the chart's LEN bytes and then the
+replay. The chart must hash to SHA. The server checks both and keeps only the chart's title and artist, never the file.
+
+Scores and accounts live in SQLite in WAL mode (`ir.db`) in the data directory.
 
 It listens on `127.0.0.1:8730` over plain HTTP, so put a TLS proxy in front before opening it to the internet. Use one
 that buffers request bodies, as nginx does by default: a worker waits for the whole body, so a few very slow clients could
-otherwise hold all eight.
+otherwise hold all eight. A score upload can be 32 MiB, a 16 MiB chart and a 16 MiB replay, so let the proxy take that
+much (`client_max_body_size 32m`).
 
 Registration allows 10 accounts a day per client address, and login 10 tries a minute per address and name. Each account
-can store 64 MiB of charts and 50,000 unverified claims, the server 10 GiB of charts, and an upload must parse as a chart
-with notes. Two chart or replay checks run at once, one per player, and four password hashes: the next gets a 503 until
+can hold 50,000 unverified claims, and a chart must parse with notes. Two checks run at once, one per player, and four password hashes: the next gets a 503 until
 one ends. A chart longer than an hour, or a replay that runs ten minutes past its chart, is refused, so no check
 runs long. A name is 1 to 32 letters, digits, spaces inside, or `_ - . /`. Each check runs in a child process with a 1 GiB address space limit, a 30 s CPU limit and no way to open files.
 A PMS score is refused when reading the chart as BMS finds more notes, because PMS parsing drops channels it has no lane for.
@@ -39,8 +42,8 @@ Behind Cloudflare's proxy, run `server/cloudflare_firewall.sh` as root on a fire
 
 ## Backups
 
-The `actuon-backup.timer` sends the database and charts to any S3-compatible storage, such as Cloudflare R2, every 6
-hours. It keeps database copies for 30 days and charts for good. The bucket must exist, and `server/.env` names it.
+The `actuon-backup.timer` sends the database to any S3-compatible storage, such as Cloudflare R2, every 6 hours. It
+keeps copies for 30 days. The bucket must exist, and `server/.env` names it.
 
 A failed backup shows in `systemctl --failed` and `journalctl -u actuon-backup`, and the timer tries again in 6 hours.
 Backups hold password and token hashes and are not encrypted, so keep the bucket private.
@@ -65,8 +68,8 @@ Client: the IR server is `https://ir.actuon.app` unless changed in Settings > On
 IR also are, with Change IR name. A name is also what you sign in with, and it is public in rankings. Changing it keeps your
 scores and rivals, and the old name stops working. Nothing goes to the server before you sign in, except when you open a ranking. The password goes to the
 server and only the token it returns is saved. From a terminal, `actuon ir-register URL NAME` and `actuon ir-login URL NAME`
-do the same with the password on stdin. Use `actuon ir-rival NAME` to add a rival. A server that lacks a chart asks the client to upload it, so it holds copies of
-the charts played on it. Check that you are allowed to host them.
+do the same with the password on stdin. Use `actuon ir-rival NAME` to add a rival. Every score upload
+sends its chart along, and a score whose chart file is gone from the library cannot be sent.
 
 Settings > Online has IR sync. Upload sends every saved replay that beats your best verified EX or clear on the server.
 Local scores still ahead of the server after that, such as ones imported from beatoraja or LR2, go to `POST /me/claims`.
@@ -120,7 +123,7 @@ location = /play {
 A replay counts for a round only with that round's chart and seed, and only the first one does.
 
 Reported numbers are only shown while the round runs. A round is decided by `final_ex`, which is set when the
-player's replay passes the usual check: `POST /scores/SHA?format=N&room=CODE`.
+player's replay passes the usual check: `POST /scores/SHA?format=N&chart=LEN&room=CODE`.
 
 ## Web page
 
@@ -130,16 +133,14 @@ player's replay passes the usual check: `POST /scores/SHA?format=N&room=CODE`.
 web/target/release/actuon-web 127.0.0.1:8731 http://127.0.0.1:8730
 ```
 
-The server names a chart when it checks the upload. Older charts get named once, in the background, after the first start.
+The server names a chart each time it checks a score on it.
 
-To share the API's host name, send the page's paths to it and leave everything else on the API. `PUT /charts/{sha}` stays on the API, so split that path by method:
+To share the API's host name, send the page's paths to it and leave everything else on the API:
 
 ```nginx
-map $request_method $ir_charts { GET 127.0.0.1:8731; default 127.0.0.1:8730; }
-# Inside the server block:
 location = / { proxy_pass http://127.0.0.1:8731; }
 location ~ ^/(style\.css|logo\.svg|icon\.svg|fonts/) { proxy_pass http://127.0.0.1:8731; }
-location /charts/ { proxy_pass http://$ir_charts; proxy_set_header Host $host; proxy_set_header X-Real-IP $http_cf_connecting_ip; }
+location /charts/ { proxy_pass http://127.0.0.1:8731; proxy_set_header Host $host; proxy_set_header X-Real-IP $http_cf_connecting_ip; }
 ```
 
 Register and login attempts count per client, so the proxy must name the client in `X-Real-IP`. Without it, every player

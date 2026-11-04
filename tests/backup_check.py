@@ -4,7 +4,7 @@ import glob, os, sqlite3, subprocess, sys
 
 script, work = os.path.abspath(sys.argv[1]), sys.argv[2]
 data, bucket = os.path.join(work, "data"), os.path.join(work, "bucket")
-os.makedirs(os.path.join(data, "charts"))
+os.makedirs(data)
 env = {**os.environ, "DATA_DIR": data, "S3_BUCKET": bucket, "RCLONE_CONFIG_BACKUP_TYPE": "local"}
 
 def run(*args):
@@ -29,13 +29,10 @@ assert r.returncode == 0 and copies() == [], "a database with no accounts must n
 db.execute("INSERT INTO user VALUES(1)")
 db.execute("INSERT INTO t VALUES('kept')")
 db.commit()  # stays open, so this row is only in ir.db-wal
-write(os.path.join(data, "charts", "abc"), "chart")
-write(os.path.join(data, "charts", "abc.tmp123"), "half an upload")
 
 r = run("once")
 assert r.returncode == 0, r.stderr
 assert len(copies()) == 1
-assert os.listdir(os.path.join(bucket, "charts")) == ["abc"], "temporary uploads stay out"
 
 os.utime(copies()[0], (1, 1))
 old = copies()[0]
@@ -46,13 +43,11 @@ assert len(copies()) == 1 and "ir-2000" not in copies()[0], "copies past 30 days
 db.execute("INSERT INTO t VALUES('after backup')")
 db.commit()
 db.close()
-os.remove(os.path.join(data, "charts", "abc"))
 r = run("restore")
 assert r.returncode == 0, r.stderr
 db = sqlite3.connect(os.path.join(data, "ir.db"))
 assert db.execute("SELECT v FROM t").fetchall() == [("kept",)]
 db.close()
-assert os.path.exists(os.path.join(data, "charts", "abc"))
 def replaced():
     return sorted(f for f in glob.glob(os.path.join(data, "ir.db.before-restore-*")) if not f.endswith(("-wal", "-shm")))
 

@@ -26,8 +26,6 @@ once() {
 	fi
 	gzip -c "$work/ir.db" >"$work/$name"
 	rclone copyto "$work/$name" "$remote/db/$name"
-	# After the database, so every chart it names is included. Names are hashes, so a held chart never changes.
-	rclone copy "$data/charts" "$remote/charts" --ignore-existing --exclude '*.tmp*'
 	# Only reached once the new copy is up, so a failing upload never eats the old ones.
 	rclone delete "$remote/db" --min-age 30d
 	echo "backed up $name"
@@ -40,8 +38,6 @@ restore() {
 	rclone copyto "$remote/db/$name" "$work/ir.db.gz"
 	gzip -d "$work/ir.db.gz"
 	check_db "$work/ir.db"
-	mkdir -p "$data/charts"
-	rclone copy "$remote/charts" "$data/charts" --ignore-existing
 	# Copied first, so a full disk stops this before anything moves.
 	cp "$work/ir.db" "$data/ir.db.restoring"
 	# Moved, not read: the database being replaced may be the corrupt one. The pid keeps two restores apart.

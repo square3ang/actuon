@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """End-to-end IR test: server re-simulation decides the score. Usage: ir_e2e.py SERVER_BIN MKREPLAY CHART WORKDIR"""
-import hashlib, json, os, socket, sqlite3, struct, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+import hashlib, json, os, socket, struct, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 
 server, mkreplay, chart, work = sys.argv[1:5]
 base = "http://127.0.0.1:18731"
@@ -37,15 +37,10 @@ def stop_server():
     proc.terminate()
     proc.wait()
 
-def title_of(sha):
-    return call("GET", f"/scores/{sha}")[1]["title"]
+chart_bytes = open(chart, "rb").read()
 
-def clear_titles(version):
-    db = sqlite3.connect(os.path.join(work, "ir", "ir.db"))
-    db.execute("UPDATE chart SET title=''")
-    db.execute(f"PRAGMA user_version={version}")
-    db.commit()
-    db.close()
+def score(sha, token, replay=replay, chart=chart_bytes, query="format=1"):
+    return call("POST", f"/scores/{sha}?{query}&chart={len(chart)}", chart + replay, token)
 
 proc = start_server()
 try:
@@ -58,27 +53,25 @@ try:
     status, r = call("POST", "/login", {"name": "alice", "password": "correct horse"})
     assert status == 200
     old, alice = alice, r["token"]
-    assert call("POST", f"/scores/{sha}?format=1", replay, old)[0] == 401, "rotated token must die"
-    assert call("POST", f"/scores/{sha}?format=1", replay)[0] == 401
-    assert call("POST", f"/scores/{sha}?format=1", replay, alice)[0] == 428
-    chart_bytes = open(chart, "rb").read()
-    assert call("PUT", f"/charts/{sha}?format=1", b"tampered" + chart_bytes, alice)[0] == 400
+    assert score(sha, old)[0] == 401, "rotated token must die"
+    assert score(sha, None)[0] == 401
+    assert call("POST", f"/scores/{sha}?format=1", replay, alice)[0] == 400, "a score needs its chart"
+    assert call("POST", f"/scores/{sha}?format=1&chart={10**9}", replay, alice)[0] == 400, "the chart length must fit the upload"
+    assert score(sha, alice, chart=b"tampered" + chart_bytes)[0] == 400
     garbage = b"not a chart"
-    assert call("PUT", f"/charts/{hashlib.sha256(garbage).hexdigest()}?format=1", garbage, alice)[0] == 422, "only playable charts are stored"
-    assert call("PUT", f"/charts/{sha}?format=1", chart_bytes, alice)[0] == 200
-    assert call("PUT", f"/charts/{sha}?format=1", chart_bytes, alice)[0] == 200, "a chart already held costs nothing"
-    assert not [f for f in os.listdir(os.path.join(work, "ir", "charts")) if ".tmp" in f], "no temporary files stay behind"
-    assert call("POST", f"/scores/{sha}", replay, alice)[0] == 400, "the format comes with each score"
-    status, r = call("POST", f"/scores/{sha}?format=1", replay, alice)
+    assert score(hashlib.sha256(garbage).hexdigest(), alice, chart=garbage)[0] == 422, "only playable charts count"
+    assert score(sha, alice, query="x=1")[0] == 400, "the format comes with each score"
+    status, r = score(sha, alice)
     assert status == 200, r
     assert r["ex"] > notes, r  # a perfect stream scores near the max, computed by the server
     assert r["prev_rank"] == 0, r
     best = r["ex"]
-    assert call("POST", f"/scores/{sha}?format=1", b"ACTRgarbage", alice)[0] == 422
+    assert score(sha, alice, replay=b"ACTRgarbage")[0] == 422
+    assert sorted(os.listdir(os.path.join(work, "ir"))) == ["ir.db", "ir.db-shm", "ir.db-wal"], "the server keeps no chart"
     assert call("GET", "/scores/" + "../etc")[0] in (400, 404)
     first_date = call("GET", "/me/scores", None, alice)[1]["scores"][0]["date"]
     time.sleep(1.1)
-    assert call("POST", f"/scores/{sha}?format=1", replay, alice)[0] == 200
+    assert score(sha, alice)[0] == 200
     assert call("GET", "/me/scores", None, alice)[1]["scores"][0]["date"] == first_date, "no improvement, so the tiebreak date stays"
     recent = call("GET", "/recent")[1]["scores"]
     assert recent and recent[0]["sha256"] == sha and recent[0]["title"] == call("GET", f"/scores/{sha}")[1]["title"] != "" and "pass" not in recent[0] and "token" not in recent[0]
@@ -102,9 +95,9 @@ try:
     rows = call("GET", f"/scores/{sha}")[1]["scores"]
     assert [(s["name"], s["verified"]) for s in rows] == [("alice", True), ("bob", False)], "a claim stays below verified scores"
     assert len([s for s in rows if s["name"] == "alice"]) == 1, "one row per player"
-    status, r = call("POST", f"/scores/{sha}?format=1", replay, bob)
+    status, r = score(sha, bob)
     assert status == 200 and r["prev_rank"] == 2, r  # the claim's place, before this score counted
-    status, r = call("POST", f"/scores/{sha}?format=1", replay, bob)
+    status, r = score(sha, bob)
     assert status == 200 and r["prev_rank"] == 2, r
     rows = call("GET", f"/scores/{sha}")[1]["scores"]
     assert ("bob", best, True) in [(s["name"], s["ex"], s["verified"]) for s in rows], "a verified score replaces a lower claim"
@@ -159,12 +152,10 @@ try:
 
     # PMS has no lane for channel 16, so naming the format would leave only the easy note to judge.
     cut_sha, cut_chart, cut_replay = bms("cut.bms", ["11", "16"])
-    assert call("PUT", f"/charts/{cut_sha}?format=1", cut_chart, bob)[0] == 200
-    assert call("POST", f"/scores/{cut_sha}?format=2", cut_replay, bob)[0] == 422, "a format that drops notes is refused"
-    assert call("POST", f"/scores/{cut_sha}?format=1", cut_replay, bob)[0] == 200
+    assert score(cut_sha, bob, cut_replay, cut_chart, "format=2")[0] == 422, "a format that drops notes is refused"
+    assert score(cut_sha, bob, cut_replay, cut_chart)[0] == 200
     pms_sha, pms_chart, pms_replay = bms("real.pms", ["11", "22"])
-    assert call("PUT", f"/charts/{pms_sha}?format=2", pms_chart, bob)[0] == 200
-    assert call("POST", f"/scores/{pms_sha}?format=2", pms_replay, bob)[0] == 200, "a real PMS chart still ranks"
+    assert score(pms_sha, bob, pms_replay, pms_chart, "format=2")[0] == 200, "a real PMS chart still ranks"
 
     host = call("POST", "/register", {"name": "roomhost", "password": "correct horse"})[1]["token"]
     guest = call("POST", "/register", {"name": "roomguest", "password": "correct horse"})[1]["token"]
@@ -216,12 +207,12 @@ try:
     assert all(p["final_ex"] is None for p in seen["players"]), "a reported score decides nothing"
     seen = host_play.ask({**claim, "ex": 0})
     assert [p["ex"] for p in seen["players"] if p["name"] == "roomguest"] == [1234], "a live score reaches the room"
-    assert call("POST", f"/scores/{sha}?format=1&room={room}", replay, guest)[0] == 200
+    assert score(sha, guest, query=f"format=1&room={room}")[0] == 200
     seen = host_play.ask({**claim, "ex": 0})
     assert all(p["final_ex"] is None for p in seen["players"]), "a replay from another round decides nothing"
     subprocess.run([mkreplay, chart, replay_path + ".round", seen["seed"]], capture_output=True, check=True)
     round_replay = open(replay_path + ".round", "rb").read()
-    assert call("POST", f"/scores/{sha}?format=1&room={room}", round_replay, guest)[0] == 200
+    assert score(sha, guest, round_replay, query=f"format=1&room={room}")[0] == 200
     seen = host_play.ask({**claim, "ex": 0})
     assert [p["final_ex"] for p in seen["players"] if p["name"] == "roomguest"] == [notes * 2], "the checked replay decides"
     rejoined = Play(guest)
@@ -245,20 +236,6 @@ try:
     assert sent == [200] * 7 + [429], sent
     assert len(call("GET", "/me/scores", None, hoarder)[1]["scores"]) == 49000, "a refused batch stores nothing"
     assert call("POST", "/me/claims", claims(0), hoarder)[0] == 200, "sending held rows again adds nothing"
-
-    stop_server()
-    clear_titles(0)
-    proc = start_server()
-    for _ in range(100):
-        if title_of(sha):
-            break
-        time.sleep(0.1)
-    assert title_of(sha), "old charts get named behind the workers"
-    stop_server()
-    clear_titles(1)
-    proc = start_server()
-    time.sleep(1)
-    assert title_of(sha) == "", "and only once"
     print(f"IR e2e OK: ex {best} of max {notes * 2}")
 finally:
     stop_server()

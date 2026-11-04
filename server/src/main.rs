@@ -29,10 +29,6 @@ const LOGIN_ATTEMPTS: u32 = 10;
 /// A day, not an hour: every per-account limit multiplies by the accounts one address can make.
 const REGISTER_WINDOW_SECS: u64 = 24 * 3600;
 const REGISTER_ATTEMPTS: u32 = 10;
-/// A chart another player already stored costs nothing, so this only counts charts new to the server.
-const MAX_OWNER_CHART_BYTES: i64 = 64 << 20;
-/// However many accounts someone makes, the disk stays usable.
-const MAX_TOTAL_CHART_BYTES: i64 = 10 << 30;
 const MAX_OWNER_CLAIMS: i64 = 50_000;
 /// Checks plus hashes stay below the 8 workers, so reads still get through.
 const MAX_CHECKS: usize = 2;
@@ -44,7 +40,7 @@ const RANK_ORDER: &str = "ORDER BY s.verified DESC, s.ex DESC, s.date, s.user";
 const SCHEMA: &str = "
 PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS user(id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, pass TEXT NOT NULL, token TEXT UNIQUE NOT NULL);
-CREATE TABLE IF NOT EXISTS chart(sha256 TEXT PRIMARY KEY, owner INTEGER NOT NULL, size INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '', artist TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS chart(sha256 TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', artist TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS score(
   user INTEGER NOT NULL, sha256 TEXT NOT NULL, clear INTEGER NOT NULL, ex INTEGER NOT NULL, max_combo INTEGER NOT NULL, miss INTEGER NOT NULL,
   notes INTEGER NOT NULL, gauge_type INTEGER NOT NULL, date INTEGER NOT NULL, PRIMARY KEY(user, sha256));
@@ -64,7 +60,6 @@ CREATE VIEW best AS
 ";
 
 struct Ctx {
-    data: PathBuf,
     /// shortcut: per-process and lost on restart, move to a shared store if the server ever runs multiple instances
     attempts: Mutex<HashMap<String, (Instant, u32)>>,
     /// The players with a check running, so one player cannot hold every slot.
@@ -75,8 +70,6 @@ struct Ctx {
     online: Mutex<HashMap<i64, usize>>,
 }
 
-/// Holds the slot of naming old charts: no account has this id.
-const SERVER_USER: i64 = 0;
 /// shortcut: a thread per multiplayer connection, move to async I/O if this many players are ever online.
 const MAX_PLAYERS_ONLINE: usize = 1024;
 /// A dropped connection stays open here until the proxy gives up on it, so a reconnect overlaps it.
@@ -372,69 +365,12 @@ fn login(req: &mut Request, db: &Connection, ctx: &Ctx) -> ApiResult {
     Ok(json!({"token": token}))
 }
 
-fn chart_path(ctx: &Ctx, sha: &str) -> PathBuf {
-    // sha is validated hex, so this cannot leave the directory.
-    ctx.data.join("charts").join(sha)
-}
-
 fn format_of(url: &str) -> Result<u8, ApiError> {
     query_of(url)
         .get("format")
         .and_then(|f| f.parse().ok())
         .filter(|f| (1..=3).contains(f))
         .ok_or(ApiError::new(400, "format must be 1, 2 or 3"))
-}
-
-fn chart_known(db: &Connection, sha: &str) -> Result<bool, ApiError> {
-    Ok(db
-        .query_row("SELECT 1 FROM chart WHERE sha256=?1", [sha], |_| Ok(()))
-        .optional()?
-        .is_some())
-}
-
-fn chart_room(db: &Connection, user: i64, size: i64) -> Result<(), ApiError> {
-    let (mine, total): (i64, i64) = db.query_row(
-        "SELECT COALESCE(SUM(size) FILTER (WHERE owner=?1),0), COALESCE(SUM(size),0) FROM chart",
-        [user],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    if mine + size > MAX_OWNER_CHART_BYTES || total + size > MAX_TOTAL_CHART_BYTES {
-        return Err(ApiError::new(429, "chart storage limit reached"));
-    }
-    Ok(())
-}
-
-fn upload_chart(req: &mut Request, db: &Connection, ctx: &Ctx, sha: &str) -> ApiResult {
-    let user = auth(req, db)?;
-    let format = format_of(req.url())?;
-    let body = read_body(req, MAX_CHART)?;
-    if core::chart_sha256(&body) != sha {
-        return Err(ApiError::new(400, "chart does not match its hash"));
-    }
-    let path = chart_path(ctx, sha);
-    if path.exists() && chart_known(db, sha)? {
-        return Ok(json!({"stored": true}));
-    }
-    chart_room(db, user, body.len() as i64)?;
-    let _slot = CheckSlot::take(ctx, user)?;
-    // Random: two players can upload the same new chart at once.
-    let tmp = path.with_extension(format!("tmp{}", new_token()?));
-    std::fs::write(&tmp, &body)?;
-    let info = match check_isolated(&tmp, format).and_then(|info| {
-        std::fs::rename(&tmp, &path)?;
-        Ok(info)
-    }) {
-        Ok(info) => info,
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e);
-        }
-    };
-    db.execute(
-        "INSERT INTO chart(sha256,owner,size,title,artist) VALUES(?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING",
-        params![sha, user, body.len() as i64, info.title, info.artist],
-    )?;
-    Ok(json!({"stored": true}))
 }
 
 /// Runs this binary as a child: a chart that crashes or hangs the parser must not take the server down.
@@ -482,63 +418,19 @@ fn run_child(
     }
 }
 
-fn check_isolated(path: &Path, format: u8) -> Result<core::ChartInfo, ApiError> {
-    let rejected = "file is not a playable chart";
-    let args = [
-        "--check-chart".into(),
-        path.as_os_str().to_owned(),
-        format.to_string().into(),
-    ];
-    serde_json::from_str(&run_child(&args, &[], rejected)?)
-        .map_err(|_| ApiError::new(422, rejected))
-}
-
-/// Charts stored before titles were kept. No format is stored, and PMS names a chart as BMS does.
-/// Runs once, because a chart that cannot be named would otherwise be parsed again at every start.
-fn name_old_charts(db: &Connection, ctx: &Ctx) -> Result<(), ApiError> {
-    let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version >= 1 {
-        return Ok(());
-    }
-    let shas = db
-        .prepare("SELECT sha256 FROM chart WHERE title=''")?
-        .query_map([], |r| r.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    for sha in shas {
-        let path = chart_path(ctx, &sha);
-        // Players go first: this only takes a slot that is free.
-        let _slot = loop {
-            match CheckSlot::take(ctx, SERVER_USER) {
-                Ok(slot) => break slot,
-                Err(_) => std::thread::sleep(Duration::from_secs(1)),
-            }
-        };
-        let Ok(info) = check_isolated(&path, 1).or_else(|_| check_isolated(&path, 3)) else {
-            eprintln!("chart {sha} could not be named");
-            continue;
-        };
-        db.execute(
-            "UPDATE chart SET title=?1, artist=?2 WHERE sha256=?3",
-            params![info.title, info.artist, sha],
-        )?;
-    }
-    db.execute_batch("PRAGMA user_version=1")?;
-    Ok(())
-}
-
+/// Checks the chart and replays the replay in a child. The upload is the chart then the replay.
 fn verify_isolated(
-    ctx: &Ctx,
-    sha: &str,
     format: u8,
-    replay: &[u8],
-) -> Result<core::Verified, ApiError> {
-    let rejected = "replay could not be verified";
+    chart_len: usize,
+    upload: &[u8],
+) -> Result<(core::ChartInfo, core::Verified), ApiError> {
+    let rejected = "chart or replay could not be verified";
     let args = [
         "--verify".into(),
-        chart_path(ctx, sha).into_os_string(),
         format.to_string().into(),
+        chart_len.to_string().into(),
     ];
-    serde_json::from_str(&run_child(&args, replay, rejected)?)
+    serde_json::from_str(&run_child(&args, upload, rejected)?)
         .map_err(|_| ApiError::new(422, rejected))
 }
 
@@ -546,18 +438,28 @@ fn submit(req: &mut Request, db: &Connection, ctx: &Ctx, sha: &str) -> ApiResult
     let user = auth(req, db)?;
     // Per score, not per chart: a wrong format then costs only the one who sent it.
     let format = format_of(req.url())?;
-    if !chart_known(db, sha)? {
-        // 428: the client uploads the chart, then retries.
-        return Err(ApiError::new(428, "chart required"));
+    let upload = read_body(req, MAX_CHART + MAX_REPLAY)?;
+    // The chart comes with every score and is dropped after the check, so the server holds no charts.
+    let chart_len = query_of(req.url())
+        .get("chart")
+        .and_then(|n| n.parse::<usize>().ok())
+        .filter(|n| *n <= MAX_CHART && *n <= upload.len())
+        .ok_or(ApiError::new(400, "chart length must come with the upload"))?;
+    if core::chart_sha256(&upload[..chart_len]) != sha {
+        return Err(ApiError::new(400, "chart does not match its hash"));
     }
-    let replay = read_body(req, MAX_REPLAY)?;
-    let v = {
+    let (info, v) = {
         let _slot = CheckSlot::take(ctx, user)?;
-        verify_isolated(ctx, sha, format, &replay)?
+        verify_isolated(format, chart_len, &upload)?
     };
     if !v.ok {
         return Err(ApiError::new(422, "replay could not be verified"));
     }
+    db.execute(
+        "INSERT INTO chart(sha256,title,artist) VALUES(?1,?2,?3)
+         ON CONFLICT(sha256) DO UPDATE SET title=excluded.title, artist=excluded.artist",
+        params![sha, info.title, info.artist],
+    )?;
     let (prev_rank, _, _) = standing(db, sha, Some(user))?;
     db.execute(
         "INSERT INTO score(user,sha256,clear,ex,max_combo,miss,notes,gauge_type,date) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
@@ -810,10 +712,6 @@ fn route(req: &mut Request, db: &Connection, ctx: &Ctx) -> ApiResult {
         (Method::Get, ["health"]) => Ok(json!({"ok": true})),
         (Method::Post, ["register"]) => register(req, db, ctx),
         (Method::Post, ["login"]) => login(req, db, ctx),
-        (Method::Put, ["charts", sha]) => {
-            sha_ok(sha)?;
-            upload_chart(req, db, ctx, sha)
-        }
         (Method::Post, ["scores", sha]) => {
             sha_ok(sha)?;
             submit(req, db, ctx, sha)
@@ -939,46 +837,31 @@ fn confine_child() {
     }
 }
 
-/// Child mode of upload_chart: chart path and format in argv.
-fn check_chart_main(args: &[String]) -> i32 {
-    let (Some(path), Some(format)) = (args.get(2), args.get(3).and_then(|f| f.parse::<u8>().ok()))
-    else {
-        return 2;
-    };
-    let Ok(chart) = std::fs::read(Path::new(path)) else {
-        return 2;
-    };
-    confine_child();
-    match core::check_chart(&chart, format) {
-        Ok(info) => {
-            println!("{}", serde_json::to_string(&info).unwrap_or_default());
-            0
-        }
-        Err(_) => 1,
-    }
-}
-
-/// Child mode of verify_isolated: chart path and format in argv, replay on stdin, result JSON on stdout.
+/// Child mode of verify_isolated: format and chart length in argv, chart then replay on stdin,
+/// the chart's name and the result as JSON on stdout.
 fn verify_main(args: &[String]) -> i32 {
-    let (Some(path), Some(format)) = (args.get(2), args.get(3).and_then(|f| f.parse::<u8>().ok()))
-    else {
+    let (Some(format), Some(chart_len)) = (
+        args.get(2).and_then(|f| f.parse::<u8>().ok()),
+        args.get(3).and_then(|n| n.parse::<usize>().ok()),
+    ) else {
         return 2;
     };
-    let Ok(chart) = std::fs::read(Path::new(path)) else {
-        return 2;
-    };
-    let mut replay = Vec::new();
+    let mut upload = Vec::new();
     if std::io::stdin()
-        .take(MAX_REPLAY as u64)
-        .read_to_end(&mut replay)
+        .take((MAX_CHART + MAX_REPLAY) as u64)
+        .read_to_end(&mut upload)
         .is_err()
+        || chart_len > upload.len()
     {
         return 2;
     }
     confine_child();
-    match core::verify(&chart, &replay, format) {
-        Ok(v) => {
-            println!("{}", serde_json::to_string(&v).unwrap_or_default());
+    let (chart, replay) = upload.split_at(chart_len);
+    match core::check_chart(chart, format)
+        .and_then(|info| Ok((info, core::verify(chart, replay, format)?)))
+    {
+        Ok(checked) => {
+            println!("{}", serde_json::to_string(&checked).unwrap_or_default());
             0
         }
         Err(_) => 1,
@@ -993,7 +876,7 @@ fn open_db(path: &Path) -> rusqlite::Result<Connection> {
 
 fn initialize(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(SCHEMA)?;
-    // A database from before the storage limit: its charts count as size 0, and format comes with each score now.
+    // Older databases: format comes with each score, and charts are no longer stored, so nothing has an owner or a size.
     let has_column = |name: &str| {
         db.query_row(
             "SELECT 1 FROM pragma_table_info('chart') WHERE name=?1",
@@ -1003,16 +886,15 @@ fn initialize(db: &Connection) -> rusqlite::Result<()> {
         .optional()
         .map(|row| row.is_some())
     };
-    if !has_column("size")? {
-        db.execute_batch("ALTER TABLE chart ADD COLUMN size INTEGER NOT NULL DEFAULT 0")?;
-    }
     if !has_column("title")? {
         db.execute_batch(
             "ALTER TABLE chart ADD COLUMN title TEXT NOT NULL DEFAULT ''; ALTER TABLE chart ADD COLUMN artist TEXT NOT NULL DEFAULT ''",
         )?;
     }
-    if has_column("format")? {
-        db.execute_batch("ALTER TABLE chart DROP COLUMN format")?;
+    for old in ["format", "owner", "size"] {
+        if has_column(old)? {
+            db.execute_batch(&format!("ALTER TABLE chart DROP COLUMN {old}"))?;
+        }
     }
     Ok(())
 }
@@ -1021,9 +903,6 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--verify") {
         std::process::exit(verify_main(&args));
-    }
-    if args.get(1).map(String::as_str) == Some("--check-chart") {
-        std::process::exit(check_chart_main(&args));
     }
     let addr = args
         .get(1)
@@ -1034,12 +913,11 @@ fn main() {
             .cloned()
             .unwrap_or_else(|| "ir-data".to_string()),
     );
-    std::fs::create_dir_all(data.join("charts")).expect("create data directory");
+    std::fs::create_dir_all(&data).expect("create data directory");
     let db_path = data.join("ir.db");
     initialize(&open_db(&db_path).expect("open database")).expect("initialize database");
     let server = Arc::new(Server::http(&addr).expect("bind address"));
     let ctx = Arc::new(Ctx {
-        data,
         attempts: Mutex::new(HashMap::new()),
         checks: Mutex::new(HashSet::new()),
         hashes: AtomicUsize::new(0),
@@ -1054,13 +932,6 @@ fn main() {
             std::thread::spawn(move || worker(s, c, db))
         })
         .collect();
-    // Behind the workers: deploy waits for /health, and this can take minutes.
-    let (naming_ctx, naming_db) = (ctx.clone(), open_db(&db_path).expect("open database"));
-    std::thread::spawn(move || {
-        if let Err(e) = name_old_charts(&naming_db, &naming_ctx) {
-            eprintln!("naming old charts failed: {}", e.1);
-        }
-    });
     for t in threads {
         let _ = t.join();
     }
@@ -1151,28 +1022,26 @@ mod tests {
     }
 
     #[test]
-    fn database_before_storage_limit_opens() {
-        let db = Connection::open_in_memory().unwrap();
-        db.execute_batch(
-            "CREATE TABLE chart(sha256 TEXT PRIMARY KEY, format INTEGER NOT NULL, owner INTEGER NOT NULL);
-             INSERT INTO chart VALUES('a',1,7);",
-        )
-        .unwrap();
-        initialize(&db).unwrap();
-        initialize(&db).unwrap();
-        db.execute("INSERT INTO chart(sha256,owner,size) VALUES('b',7,5)", [])
-            .unwrap();
-        let used: i64 = db
-            .query_row("SELECT SUM(size) FROM chart WHERE owner=7", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(used, 5);
+    fn databases_that_stored_charts_open() {
+        for old in [
+            "CREATE TABLE chart(sha256 TEXT PRIMARY KEY, format INTEGER NOT NULL, owner INTEGER NOT NULL); INSERT INTO chart VALUES('a',1,7);",
+            "CREATE TABLE chart(sha256 TEXT PRIMARY KEY, owner INTEGER NOT NULL, size INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '', artist TEXT NOT NULL DEFAULT ''); INSERT INTO chart VALUES('a',7,5,'t','r');",
+        ] {
+            let db = Connection::open_in_memory().unwrap();
+            db.execute_batch(old).unwrap();
+            initialize(&db).unwrap();
+            initialize(&db).unwrap();
+            db.execute("INSERT INTO chart(sha256,title,artist) VALUES('b','t','r')", [])
+                .unwrap();
+            let rows: i64 = db
+                .query_row("SELECT COUNT(*) FROM chart", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(rows, 2, "the old rows stay");
+        }
     }
 
     fn test_ctx() -> Ctx {
         Ctx {
-            data: PathBuf::new(),
             attempts: Mutex::new(HashMap::new()),
             checks: Mutex::new(HashSet::new()),
             hashes: AtomicUsize::new(0),
@@ -1204,32 +1073,6 @@ mod tests {
         assert_eq!(HashSlot::take(&ctx).err().unwrap().0, 503);
         drop(held);
         assert!(HashSlot::take(&ctx).is_ok());
-    }
-
-    #[test]
-    fn chart_storage_is_capped_per_owner_and_overall() {
-        let db = Connection::open_in_memory().unwrap();
-        initialize(&db).unwrap();
-        let store = |sha: &str, owner: i64, size: i64| {
-            db.execute(
-                "INSERT INTO chart(sha256,owner,size) VALUES(?1,?2,?3)",
-                params![sha, owner, size],
-            )
-            .unwrap();
-        };
-        store("a", 1, MAX_OWNER_CHART_BYTES);
-        assert_eq!(chart_room(&db, 1, 1).unwrap_err().0, 429);
-        assert!(chart_room(&db, 2, MAX_OWNER_CHART_BYTES).is_ok());
-        assert_eq!(
-            chart_room(&db, 2, MAX_OWNER_CHART_BYTES + 1).unwrap_err().0,
-            429
-        );
-        store("b", 3, MAX_TOTAL_CHART_BYTES - MAX_OWNER_CHART_BYTES);
-        assert_eq!(
-            chart_room(&db, 2, 1).unwrap_err().0,
-            429,
-            "the server's total counts everyone"
-        );
     }
 
     #[test]
