@@ -13,7 +13,7 @@ actuon is GPLv3 (`LICENSE`). Everything it links or bundles is compatible with t
 | sokol_gfx | zlib | rendering, bundled in `third_party/` |
 | stb_vorbis, stb_image, dr_wav, dr_flac, dr_mp3 | public domain or MIT | decoding, bundled in `third_party/` |
 | argon2, getrandom, rusqlite, serde, serde_json, sha2, tiny_http | MIT or Apache-2.0 (Apache-2.0 is GPLv3 compatible) | IR server |
-| leptos, serde, tiny_http, ureq | MIT or Apache-2.0 | IR web page |
+| serde, tiny_http, ureq | MIT or Apache-2.0 | IR web page |
 | FSRCNNX | LGPL 3 | BGA upscaling shaders, generated from `third_party/fsrcnnx` |
 | ASIO SDK | GPLv3 option from Steinberg | ASIO output on Windows, through the MSYS2 `portaudio-asio` package |
 

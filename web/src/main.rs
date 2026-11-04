@@ -1,7 +1,6 @@
 //! The public IR page: server-rendered HTML over the IR server's JSON, with no script in the browser.
 //! Usage: actuon-web ADDR IR_URL
 
-use leptos::prelude::*;
 use serde::{de::DeserializeOwned, Deserialize};
 use std::{sync::Arc, thread, time::Duration};
 use tiny_http::{Header, Method, Request, Response, Server};
@@ -91,161 +90,144 @@ fn utc_date(unix: i64) -> String {
     format!("{year}-{month:02}-{:02}", doy - (153 * mp + 2) / 5 + 1)
 }
 
+/// Every string from the IR passes through here; the templates below are literals and numbers.
+fn esc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// The cabinet's fixed digit cells: leading zeros stay, dimmed.
-fn digits(n: u32, cells: usize) -> impl IntoView {
+fn digits(n: u32, cells: usize) -> String {
     let text = format!("{n:0cells$}");
     let lit = text.trim_start_matches('0');
-    let lit = if lit.is_empty() { "0" } else { lit }.to_string();
-    let off = text[..text.len() - lit.len()].to_string();
-    view! { <span class="digits"><span class="off">{off}</span>{lit}</span> }
+    let lit = if lit.is_empty() { "0" } else { lit };
+    let off = &text[..text.len() - lit.len()];
+    format!(r#"<span class="digits"><span class="off">{off}</span>{lit}</span>"#)
 }
 
-fn lamp(clear: usize) -> impl IntoView {
+fn lamp(clear: usize) -> String {
     let known = clear.min(CLEAR_NAMES.len() - 1);
-    view! {
-        <span class=format!("lamp lamp-{known}")>
-            <i></i>
-            {CLEAR_NAMES[known]}
-        </span>
-    }
+    format!(
+        r#"<span class="lamp lamp-{known}"><i></i>{}</span>"#,
+        CLEAR_NAMES[known]
+    )
 }
 
-fn notice(text: &'static str) -> impl IntoView {
-    view! { <p class="notice">{text}</p> }
+fn notice(text: &str) -> String {
+    format!(r#"<p class="notice">{text}</p>"#)
 }
 
-fn lookup(refused: bool) -> impl IntoView {
-    view! {
-        <form class="lookup" action="/" method="get">
-            <label for="chart">"CHART SHA-256"</label>
-            <input id="chart" name="chart" required maxlength="64" autocomplete="off" spellcheck="false" />
-            <button>"Open"</button>
-            {refused.then(|| view! { <p class="refused" role="alert">"Not a SHA-256 hash"</p> })}
-        </form>
-    }
+fn lookup(refused: bool) -> String {
+    let alert = if refused {
+        r#"<p class="refused" role="alert">Not a SHA-256 hash</p>"#
+    } else {
+        ""
+    };
+    format!(
+        r#"<form action="/" method="get" class="lookup"><label for="chart">CHART SHA-256</label><input id="chart" name="chart" required maxlength="64" autocomplete="off" spellcheck="false"><button>Open</button>{alert}</form>"#
+    )
 }
 
 /// A chart the server could not name still needs a link to click.
 fn chart_name(title: &str, sha: &str) -> String {
-    if title.is_empty() { &sha[..16] } else { title }.to_string()
+    esc(if title.is_empty() { &sha[..16] } else { title })
 }
 
-fn recent_rows(scores: Vec<RecentScore>) -> impl IntoView {
-    view! {
-        <table>
-            <thead><tr>
-                <th>"CHART"</th><th>"PLAYER"</th><th class="lamp-col">"LAMP"</th><th class="num ex">"EX SCORE"</th>
-                <th class="num wide">"BP"</th><th class="num wide">"DATE"</th>
-            </tr></thead>
-            <tbody>
-                {scores.into_iter().map(|s| view! {
-                    <tr>
-                        <td class="clip"><a href=format!("/charts/{}", s.sha256)>{chart_name(&s.title, &s.sha256)}</a></td>
-                        <td class="clip">{s.name}</td>
-                        <td>{lamp(s.clear)}</td>
-                        <td class="num">{digits(s.ex, 5)}</td>
-                        <td class="num wide">{s.miss}</td>
-                        <td class="num wide dim">{utc_date(s.date)}</td>
-                    </tr>
-                }).collect_view()}
-            </tbody>
-        </table>
-    }
+fn recent_rows(scores: Vec<RecentScore>) -> String {
+    let rows: String = scores
+        .iter()
+        .map(|s| {
+            format!(
+                r#"<tr><td class="clip"><a href="/charts/{}">{}</a></td><td class="clip">{}</td><td>{}</td><td class="num">{}</td><td class="num wide">{}</td><td class="num wide dim">{}</td></tr>"#,
+                esc(&s.sha256), chart_name(&s.title, &s.sha256), esc(&s.name), lamp(s.clear), digits(s.ex, 5), s.miss, utc_date(s.date)
+            )
+        })
+        .collect();
+    format!(
+        r#"<table><thead><tr><th>CHART</th><th>PLAYER</th><th class="lamp-col">LAMP</th><th class="num ex">EX SCORE</th><th class="num wide">BP</th><th class="num wide">DATE</th></tr></thead><tbody>{rows}</tbody></table>"#
+    )
 }
 
-fn home(recent: Option<Recent>, refused: bool) -> impl IntoView {
-    view! {
-        {lookup(refused)}
-        <section class="panel">
-            <h1>"RECENT VERIFIED SCORES"</h1>
-            {match recent {
-                None => notice("Could not reach the IR server").into_any(),
-                Some(r) if r.scores.is_empty() => notice("No verified scores yet.").into_any(),
-                Some(r) => recent_rows(r.scores).into_any(),
-            }}
-        </section>
-    }
+fn home(recent: Option<Recent>, refused: bool) -> String {
+    let body = match recent {
+        None => notice("Could not reach the IR server"),
+        Some(r) if r.scores.is_empty() => notice("No verified scores yet."),
+        Some(r) => recent_rows(r.scores),
+    };
+    format!(
+        r#"{}<section class="panel"><h1>RECENT VERIFIED SCORES</h1>{body}</section>"#,
+        lookup(refused)
+    )
 }
 
-fn readout(label: &'static str, n: u32) -> impl IntoView {
-    view! { <div class="panel readout"><span>{label}</span>{digits(n, 5)}</div> }
+fn readout(label: &str, n: u32) -> String {
+    format!(
+        r#"<div class="panel readout"><span>{label}</span>{}</div>"#,
+        digits(n, 5)
+    )
 }
 
-fn ranking_rows(scores: Vec<RankedScore>) -> impl IntoView {
-    view! {
-        <table>
-            <thead><tr>
-                <th class="num rank">"RANK"</th><th>"PLAYER"</th><th class="lamp-col">"LAMP"</th><th class="num ex">"EX SCORE"</th>
-                <th class="num wide">"BP"</th><th class="num wide">"MAX COMBO"</th><th class="num wide">"DATE"</th>
-            </tr></thead>
-            <tbody>
-                {scores.into_iter().enumerate().map(|(i, s)| view! {
-                    <tr>
-                        <td class="num">{i + 1}</td>
-                        <td class="clip">{s.name}{(!s.verified).then(|| view! { <span class="claim">"UNVERIFIED"</span> })}</td>
-                        <td>{lamp(s.clear)}</td>
-                        <td class="num">{digits(s.ex, 5)}</td>
-                        <td class="num wide">{s.miss}</td>
-                        <td class="num wide">{s.max_combo}</td>
-                        <td class="num wide dim">{utc_date(s.date)}</td>
-                    </tr>
-                }).collect_view()}
-            </tbody>
-        </table>
-    }
+fn ranking_rows(scores: Vec<RankedScore>) -> String {
+    let rows: String = scores
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let claim = if s.verified { "" } else { r#"<span class="claim">UNVERIFIED</span>"# };
+            format!(
+                r#"<tr><td class="num">{}</td><td class="clip">{}{claim}</td><td>{}</td><td class="num">{}</td><td class="num wide">{}</td><td class="num wide">{}</td><td class="num wide dim">{}</td></tr>"#,
+                i + 1, esc(&s.name), lamp(s.clear), digits(s.ex, 5), s.miss, s.max_combo, utc_date(s.date)
+            )
+        })
+        .collect();
+    format!(
+        r#"<table><thead><tr><th class="num rank">RANK</th><th>PLAYER</th><th class="lamp-col">LAMP</th><th class="num ex">EX SCORE</th><th class="num wide">BP</th><th class="num wide">MAX COMBO</th><th class="num wide">DATE</th></tr></thead><tbody>{rows}</tbody></table>"#
+    )
 }
 
-fn chart(sha: &str, ranking: Option<Ranking>) -> impl IntoView {
-    let sha = sha.to_string();
+fn chart(sha: &str, ranking: Option<Ranking>) -> String {
     let (title, artist) = ranking.as_ref().map_or_else(
-        || (sha.clone(), String::new()),
-        |r| (chart_name(&r.title, &sha), r.artist.clone()),
+        || (esc(sha), String::new()),
+        |r| (chart_name(&r.title, sha), esc(&r.artist)),
     );
-    view! {
-        <div class="chart-head">
-            <h1 class="title">{title}</h1>
-            <p class="artist">{artist}</p>
-            <p class="sha">{sha}</p>
-        </div>
-        {match ranking {
-            None => notice("Could not reach the IR server").into_any(),
-            Some(r) => view! {
-                <div class="readouts">{readout("PLAYERS", r.total)}{readout("CLEARS", r.clears[FIRST_CLEAR..].iter().sum())}</div>
-                <section class="panel">
-                    <h1>"RANKING"</h1>
-                    {if r.scores.is_empty() {
-                        notice("No scores on this chart.").into_any()
-                    } else {
-                        ranking_rows(r.scores).into_any()
-                    }}
-                </section>
-            }.into_any(),
-        }}
-    }
+    let body = match ranking {
+        None => notice("Could not reach the IR server"),
+        Some(r) => {
+            let list = if r.scores.is_empty() {
+                notice("No scores on this chart.")
+            } else {
+                ranking_rows(r.scores)
+            };
+            format!(
+                r#"<div class="readouts">{}{}</div><section class="panel"><h1>RANKING</h1>{list}</section>"#,
+                readout("PLAYERS", r.total),
+                readout("CLEARS", r.clears[FIRST_CLEAR..].iter().sum())
+            )
+        }
+    };
+    format!(
+        r#"<div class="chart-head"><h1 class="title">{title}</h1><p class="artist">{artist}</p><p class="sha">{}</p></div>{body}"#,
+        esc(sha)
+    )
 }
 
-fn not_found() -> impl IntoView {
+fn not_found() -> String {
     notice("Nothing here.")
 }
 
-fn document(title: &str, main: impl IntoView + 'static) -> String {
-    let title = format!("{title} - actuon IR");
-    let body = view! {
-        <html lang="en">
-            <head>
-                <meta charset="utf-8" />
-                <meta name="viewport" content="width=device-width, initial-scale=1" />
-                <title>{title}</title>
-                <link rel="stylesheet" href="/style.css" />
-                <link rel="icon" href="/icon.svg" />
-            </head>
-            <body>
-                <header><a href="https://actuon.app"><img src="/logo.svg" alt="actuon" /></a></header>
-                <main>{main}</main>
-            </body>
-        </html>
-    };
-    format!("<!doctype html>{}", body.to_html())
+fn document(title: &str, main: String) -> String {
+    format!(
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{title} - actuon IR</title><link rel="stylesheet" href="/style.css"><link rel="icon" href="/icon.svg"></head><body><header><a href="https://actuon.app"><img src="/logo.svg" alt="actuon"></a></header><main>{main}</main></body></html>"#
+    )
 }
 
 fn html(status: u16, body: String) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -378,8 +360,8 @@ mod tests {
 
     #[test]
     fn digits_dim_only_leading_zeros() {
-        assert!(digits(1842, 5).to_html().contains(">0</span>1842"));
-        assert!(digits(0, 5).to_html().contains(">0000</span>0"));
+        assert!(digits(1842, 5).contains(">0</span>1842"));
+        assert!(digits(0, 5).contains(">0000</span>0"));
     }
 
     #[test]
@@ -406,6 +388,23 @@ mod tests {
             page.contains("UNVERIFIED") && page.contains("MAX"),
             "an unknown lamp clamps"
         );
+        // The chart's title and artist come from uploads too, and a quote must not end an attribute.
+        let r: Ranking = serde_json_from(
+            r#"{"title":"<b>t</b>","artist":"a\"<i>","clears":[0,0,0,0,0,0,0,0,0,0,0],"total":0,"scores":[]}"#,
+        );
+        let head = chart(&"a0".repeat(32), Some(r));
+        assert!(!head.contains("<b>") && !head.contains("<i>"));
+        assert!(head.contains(r#"<p class="artist">a&quot;&lt;i&gt;</p>"#));
+        let recent = recent_rows(vec![RecentScore {
+            sha256: "a0".repeat(32),
+            name: "n".into(),
+            ex: 0,
+            clear: 0,
+            miss: 0,
+            date: 0,
+            title: "<script>".into(),
+        }]);
+        assert!(!recent.contains("<script>"));
     }
 
     #[test]
