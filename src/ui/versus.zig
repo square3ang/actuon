@@ -89,6 +89,7 @@ pub fn openScreen(a: *App) void {
         a.sel.status = tr("Sign in to IR first");
         return;
     }
+    a.sfx(.confirm);
     a.scene = .versus;
     v.picking = false;
     const r = v.room orelse return;
@@ -107,6 +108,7 @@ fn startPicking(a: *App) void {
 pub fn pickChart(a: *App, song: db_mod.Song) void {
     const v = &a.versus;
     if (v.room) |r| if (v.view.host and !std.mem.eql(u8, song.sha256, &v.view.sha256)) r.setChart(song.sha256, song.title);
+    a.sfx(.confirm);
     stopPicking(a);
 }
 
@@ -118,6 +120,14 @@ pub fn stopPicking(a: *App) void {
 
 pub fn key(a: *App, sc: u32) void {
     const v = &a.versus;
+    const in_room = v.room != null and v.view.status == .joined;
+    switch (sc) {
+        c.SDL_SCANCODE_ESCAPE => a.sfx(.back),
+        c.SDL_SCANCODE_RETURN => if (v.room == null or (in_room and v.view.host)) a.sfx(.confirm),
+        c.SDL_SCANCODE_TAB => if (in_room and v.view.host) a.sfx(.confirm),
+        c.SDL_SCANCODE_L => if (in_room) a.sfx(.adjust),
+        else => {},
+    }
     if (v.joining) {
         switch (sc) {
             c.SDL_SCANCODE_RETURN => joinRoom(a),
