@@ -89,6 +89,9 @@ pub fn nextSlot(slot: *u8) u8 {
     return now;
 }
 
+/// Far past the few dozen sounds a skin names.
+const max_entries = 256;
+
 pub const Player = struct {
     gpa: std.mem.Allocator,
     engine: *engine_mod.Engine,
@@ -98,6 +101,8 @@ pub const Player = struct {
     /// shortcut: one thread per new file, fine for a skin's few dozen; a worker queue if a skin floods this.
     pub fn entry(p: *Player, path: []const u8) ?*Entry {
         for (p.entries.items) |e| if (std.mem.eql(u8, e.path, path)) return e;
+        // A script naming a new file each frame would start a thread and grow this list every time.
+        if (p.entries.items.len >= max_entries) return null;
         const owned = p.gpa.dupe(u8, path) catch return null;
         const e = p.gpa.create(Entry) catch {
             p.gpa.free(owned);
@@ -162,4 +167,17 @@ test "one-shot slots skip the music's slots" {
     var slot: u8 = engine_mod.ui_slots - 1;
     try std.testing.expectEqual(engine_mod.ui_slots - 1, nextSlot(&slot));
     try std.testing.expectEqual(@as(u8, engine_mod.first_oneshot_slot), nextSlot(&slot));
+}
+
+test "a script naming a new sound every frame stops adding them" {
+    fs.io = std.testing.io;
+    var eng: engine_mod.Engine = undefined;
+    eng.rate = 48000;
+    var slot: u8 = engine_mod.first_oneshot_slot;
+    var p: Player = .{ .gpa = std.testing.allocator, .engine = &eng, .slot = &slot };
+    defer p.deinit();
+    var buf: [32]u8 = undefined;
+    for (0..max_entries + 10) |i| p.request(try std.fmt.bufPrint(&buf, "missing/{d}.ogg", .{i}), .cache, 1);
+    try std.testing.expectEqual(@as(usize, max_entries), p.entries.items.len);
+    try std.testing.expect(p.entry("missing/0.ogg") != null);
 }

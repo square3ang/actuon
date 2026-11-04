@@ -8,9 +8,23 @@ pub const VerifyInput = extern struct {
     chart_len: usize,
     replay: [*]const u8,
     replay_len: usize,
-    /// 0 = decide by content, 1 = BMS, 2 = PMS, 3 = BMSON
+    /// 1 = BMS, 2 = PMS, 3 = BMSON; anything else reads as BMS
     format: u8,
 };
+
+fn formatOf(n: u8) core.Format {
+    return if (n == 2) .pms else if (n == 3) .bmson else .bms;
+}
+
+/// The judge steps every millisecond to the chart's end, so a longer chart could hold a check slot for its whole time limit.
+/// A real chart is far shorter; one hour simulates in about 0.1 s.
+const max_song_us: i64 = 3600 * std.time.us_per_s;
+/// Keys still held on the result screen come after the end, but nothing that late can change a score.
+const max_overrun_us: i64 = 600 * std.time.us_per_s;
+
+fn tooLong(chart: *const core.types.Chart) bool {
+    return chart.last_time_us > max_song_us;
+}
 
 /// Returns 0 on success; negative codes: -1 malformed replay, -2 malformed chart or one PMS parsing cuts notes from, -3 hash mismatch.
 export fn actuon_verify(input: *const VerifyInput, out: *replay.Result) callconv(.c) i32 {
@@ -22,17 +36,16 @@ export fn actuon_verify(input: *const VerifyInput, out: *replay.Result) callconv
     const r = replay.decode(a, input.replay[0..input.replay_len]) catch return -1;
     // A CN or HCN play changes the note count, so it cannot rank against the chart's own board.
     if (r.ln_mode != .ln) return -1;
-    var chart = (if (input.format == 3)
-        core.bmson.parse(gpa, chart_bytes)
-    else
-        core.bms.parse(gpa, chart_bytes, .{ .is_pms = input.format == 2, .selected_random = r.bms_random })) catch return -2;
+    const format = formatOf(input.format);
+    var chart = core.parse(gpa, format, chart_bytes, .{ .selected_random = r.bms_random }) catch return -2;
     defer chart.deinit();
     if (!std.mem.eql(u8, &chart.sha256, &r.sha256)) return -3;
     // HARD and EXHARD start full, so a play with nothing to hit would still clear as MAX.
-    if (chart.total_notes == 0) return -2;
+    if (chart.total_notes == 0 or tooLong(&chart)) return -2;
+    if (r.events.len > 0 and r.events[r.events.len - 1].time_us > chart.last_time_us + max_overrun_us) return -1;
     // PMS drops channels it has no lane for, so a client naming PMS for a BMS chart could score a MAX on what is left.
     // A real PMS chart loses nothing when read as BMS. Parsed here because #RANDOM changes a chart's note count per replay.
-    if (input.format == 2) {
+    if (format == .pms) {
         var whole = core.bms.parse(gpa, chart_bytes, .{ .selected_random = r.bms_random }) catch return -2;
         defer whole.deinit();
         if (whole.total_notes != chart.total_notes) return -2;
@@ -57,9 +70,9 @@ fn copyText(out: *[256]u8, text: []const u8) void {
 export fn actuon_check_chart(data: [*]const u8, len: usize, format: u8, info: *ChartInfo) callconv(.c) i32 {
     const gpa = std.heap.c_allocator;
     const bytes = data[0..len];
-    var chart = (if (format == 3) core.bmson.parse(gpa, bytes) else core.bms.parse(gpa, bytes, .{ .is_pms = format == 2 })) catch return -2;
+    var chart = core.parse(gpa, formatOf(format), bytes, .{}) catch return -2;
     defer chart.deinit();
-    if (chart.total_notes == 0) return -2;
+    if (chart.total_notes == 0 or tooLong(&chart)) return -2;
     copyText(&info.title, chart.title);
     copyText(&info.artist, chart.artist);
     return 0;

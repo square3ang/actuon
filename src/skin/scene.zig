@@ -516,7 +516,7 @@ pub const State = struct {
             91 => @intFromFloat(st.min_bpm),
             160 => @intFromFloat(st.bpm),
             96 => st.playlevel,
-            100 => if (n > 0) @divTrunc(sc.exScore() * 200000 + n, n * 2) else 0,
+            100 => if (n > 0) @divTrunc(@as(i64, sc.exScore()) * 200000 + n, n * 2) else 0,
             102, 155 => @divTrunc(rate10k, 100),
             103, 156 => @mod(rate10k, 100),
             107 => @intFromFloat(sn.gauge),
@@ -753,7 +753,7 @@ fn drawNotesGraph(g: *gfx.Gfx, st: *const State, d: c.SDL_FRect, now_us: i64) vo
     for (st.notes) |note| {
         if (note.kind == .ln_end or note.kind == .mine) continue;
         const at = st.binOf(note.time_us);
-        totals[at] += 1;
+        totals[at] +|= 1;
         most = @max(most, totals[at]);
     }
     const bw = d.w / @as(f32, @floatFromInt(n));
@@ -1069,6 +1069,13 @@ test "song select tells the skin its panel and options" {
     st.select.?.mode_index = 2;
     try std.testing.expectEqual(@as(?i64, 5), State.num(&st, m.button_index + 12));
     try std.testing.expectEqual(@as(?i64, 2), State.num(&st, m.button_index + 11));
+}
+
+test "the LR2 score holds an EX past what u32 times 200000 fits" {
+    var st: State = .{ .total_notes = 20_000 };
+    st.snap.score.counts[0] = .{ 10_000, 0 };
+    st.snap.score.counts[1] = .{ 1_475, 0 };
+    try std.testing.expectEqual(@as(?i64, 107_375), State.num(&st, 100));
 }
 
 test "rank index follows ninths" {

@@ -343,10 +343,16 @@ pub var set_aside = false;
 /// The defaults are saved on exit: keep the player's settings out of their way.
 fn setAside(a: std.mem.Allocator, p: []const u8, why: anyerror) void {
     std.log.warn("config unreadable: {t}", .{why});
-    set_aside = true;
+    // Until it has moved, saving defaults would write over the only copy of the player's settings.
+    stuck = true;
     const bad = std.fmt.allocPrint(a, "{s}.bad", .{p}) catch return;
-    fs.rename(p, bad) catch |e| std.log.warn("could not move {s}: {t}", .{ p, e });
+    fs.rename(p, bad) catch |e| return std.log.warn("could not move {s}: {t}", .{ p, e });
+    stuck = false;
+    set_aside = true;
 }
+
+/// Set when the unreadable file could not be moved: `save` then leaves it alone.
+pub var stuck = false;
 
 pub fn load(a: std.mem.Allocator) Config {
     const p = path(a) catch return .{};
@@ -383,12 +389,13 @@ fn migrateDownloadUrl(url: []const u8) []const u8 {
     return url;
 }
 
-pub fn save(gpa: std.mem.Allocator, cfg: Config) void {
-    const p = path(gpa) catch return;
+pub fn save(gpa: std.mem.Allocator, cfg: Config) !void {
+    if (stuck) return error.ConfigUnreadable;
+    const p = try path(gpa);
     defer gpa.free(p);
-    const text = std.json.Stringify.valueAlloc(gpa, cfg, .{ .whitespace = .indent_2, .emit_null_optional_fields = false }) catch return;
+    const text = try std.json.Stringify.valueAlloc(gpa, cfg, .{ .whitespace = .indent_2, .emit_null_optional_fields = false });
     defer gpa.free(text);
-    fs.writeAtomic(gpa, p, text) catch |e| std.log.err("config save failed: {t}", .{e});
+    try fs.writeAtomic(gpa, p, text);
 }
 
 pub const Binding = struct { lane: u8, key: u8 };
@@ -460,6 +467,25 @@ test "a broken config is kept aside instead of being overwritten" {
     try std.testing.expect(set_aside);
     try std.testing.expect(!fs.exists(p));
     try std.testing.expectEqualStrings("{ not json", try fs.readAlloc(a, bad, 64));
+}
+
+test "an unreadable config that cannot be moved is never written over" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try fs.mkdirs(fs.test_data_dir);
+    const p = try path(a);
+    const bad = try std.fmt.allocPrint(a, "{s}.bad", .{p});
+    // A folder in the way makes the move fail.
+    try fs.mkdirs(try std.fmt.allocPrint(a, "{s}/x", .{bad}));
+    defer fs.removeTree(bad);
+    defer fs.remove(p);
+    defer stuck = false;
+    try fs.write(p, "{ not json");
+    _ = load(a);
+    try std.testing.expect(stuck and !set_aside);
+    try std.testing.expectError(error.ConfigUnreadable, save(a, .{}));
+    try std.testing.expectEqualStrings("{ not json", try fs.readAlloc(a, p, 64));
 }
 
 test "the dead download default is replaced, custom ones stay" {

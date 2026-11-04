@@ -41,7 +41,7 @@ pub const Src = struct {
     solid: ?[3]u8 = null,
 };
 
-pub const Kind = enum { songlist, image, number, text, graph, slider, gauge, notes, judge, bga, line, notes_graph, bpm_graph, timing, stagefile, backbmp, banner, hidden_cover, lift_cover };
+pub const Kind = enum { songlist, image, number, text, graph, slider, gauge, notes, judge, bga, notes_graph, bpm_graph, timing, stagefile, backbmp, banner, hidden_cover, lift_cover };
 
 /// beatoraja's song bars. Every list but `on` and `off` is placed relative to its bar and indexed
 /// by the row's state; `on` and `off` have one bar per place, `center` being the selected one.
@@ -652,7 +652,7 @@ pub const Renderer = struct {
                 }
                 r.blit(&o.src, r.frameOf(&o.src), kk, o.blend, o.center, null);
             },
-            .songlist, .judge, .notes, .bga, .line, .notes_graph, .bpm_graph, .timing, .stagefile, .backbmp, .banner => {},
+            .songlist, .judge, .notes, .bga, .notes_graph, .bpm_graph, .timing, .stagefile, .backbmp, .banner => {},
             .hidden_cover, .lift_cover => r.drawCover(o, k),
         }
     }

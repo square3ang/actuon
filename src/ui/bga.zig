@@ -152,8 +152,14 @@ pub const Video = struct {
         return .{ .graph = graph.?, .src = src.?, .sink = sink.? };
     }
 
+    /// Song time of a stream timestamp, within a day either way, so the sums in `decodeLoop` cannot overflow.
+    fn frameUs(ts: i64, tb: f64) i64 {
+        const day: f64 = 86_400e6;
+        return std.math.lossyCast(i64, std.math.clamp(@as(f64, @floatFromInt(ts)) * tb * 1e6, -day, day));
+    }
+
     fn seekTo(v: *Video, us: i64) void {
-        const ts: i64 = @intFromFloat(@as(f64, @floatFromInt(us)) / 1e6 / v.tb);
+        const ts: i64 = std.math.lossyCast(i64, @as(f64, @floatFromInt(us)) / 1e6 / v.tb);
         _ = c.av_seek_frame(v.fmt, v.stream, ts, c.AVSEEK_FLAG_BACKWARD);
         c.avcodec_flush_buffers(v.dec);
     }
@@ -192,7 +198,8 @@ pub const Video = struct {
                 continue;
             }
             defer c.av_frame_unref(frame);
-            pts = @intFromFloat(@as(f64, @floatFromInt(frame.best_effort_timestamp)) * v.tb * 1e6);
+            // A frame without a time keeps the last one, and a file's wild times must not overflow the sums here.
+            if (frame.best_effort_timestamp != c.AV_NOPTS_VALUE) pts = frameUs(frame.best_effort_timestamp, v.tb);
             if (pts + 50_000 < clock) continue; // late: drop without paying for the conversion
             var dst = [4]?[*]u8{ v.back.ptr, null, null, null };
             var stride = [4]c_int{ v.w * 4, 0, 0, 0 };
@@ -282,6 +289,12 @@ pub fn fit(stretch: i32, w: f32, h: f32, box: c.SDL_FRect) Fitted {
     return out;
 }
 
+test "wild frame times stay within a day" {
+    try std.testing.expectEqual(@as(i64, 1_000_000), Video.frameUs(90_000, 1.0 / 90_000.0));
+    try std.testing.expectEqual(@as(i64, 86_400_000_000), Video.frameUs(std.math.maxInt(i64), 1.0));
+    try std.testing.expectEqual(@as(i64, -86_400_000_000), Video.frameUs(c.AV_NOPTS_VALUE, 1.0 / 90_000.0));
+}
+
 test "fitting keeps the shape or crops to it" {
     const box: c.SDL_FRect = .{ .x = 0, .y = 0, .w = 1280, .h = 720 };
     const inner = fit(1, 256, 256, box);
@@ -302,6 +315,7 @@ pub const Bga = struct {
 
     /// Black is transparent on layer images, as in LR2, and the base draws over black anyway.
     fn loadImage(g: *gfx.Gfx, bytes: []const u8) ?*gfx.Texture {
+        if (!gfx.imageFits(bytes, gfx.max_chart_image_px)) return null;
         var w: c_int = 0;
         var h: c_int = 0;
         var n: c_int = 0;

@@ -296,8 +296,8 @@ const rows = [_]Row{
     .{ "Type a number from {d} to {d}", "{d}~{d} 사이 숫자를 입력하세요", "{d} から {d} までの数字を入力してください", "请输入 {d} 到 {d} 的数字" },
 
     // IR account answers and the place on a chart's board.
-    .{ "Name must be 1-32 characters", "이름은 1~32자로 해 주세요", "名前は1~32文字にしてください", "名称须为 1~32 个字符" },
-    .{ "Name must be 1-32 characters and password at least 8", "이름은 1~32자, 비밀번호는 8자 이상으로 해 주세요", "名前は1~32文字、パスワードは8文字以上にしてください", "名称须为 1~32 个字符，密码至少 8 个字符" },
+    .{ "Name must be 1-32 letters, digits or _ - . /", "이름은 글자, 숫자, _ - . / 로 1~32자로 해 주세요", "名前は文字、数字、_ - . / で1~32文字にしてください", "名称须为 1~32 个字母、数字或 _ - . /" },
+    .{ "Name must be 1-32 letters, digits or _ - . /, and password at least 8", "이름은 글자, 숫자, _ - . / 로 1~32자, 비밀번호는 8자 이상으로 해 주세요", "名前は文字、数字、_ - . / で1~32文字、パスワードは8文字以上にしてください", "名称须为 1~32 个字母、数字或 _ - . /，密码至少 8 个字符" },
     .{ "Sign in again first", "다시 로그인해 주세요", "先にログインし直してください", "请先重新登录" },
     .{ "Wrong name or password", "이름이나 비밀번호가 틀렸어요", "名前またはパスワードが違います", "名称或密码错误" },
     .{ "That name is taken", "이미 있는 이름이에요", "その名前は使われています", "该名称已被占用" },
@@ -422,6 +422,7 @@ const rows = [_]Row{
     .{ "NOT RECORDED: PAUSED", "기록되지 않음: 일시정지", "記録なし: 一時停止", "未记录：已暂停" },
     .{ "NOT RECORDED: SAVE FAILED", "기록되지 않음: 저장 실패", "記録なし: 保存失敗", "未记录：保存失败" },
     .{ "Settings could not be read: moved to config.json.bad", "설정을 읽지 못했어요: config.json.bad로 옮겼어요", "設定を読めませんでした: config.json.bad に移しました", "无法读取设置：已移至 config.json.bad" },
+    .{ "Settings could not be read or moved: changes this run are not saved", "설정을 읽지도 옮기지도 못했어요: 이번에 바꾼 설정은 저장되지 않아요", "設定を読むことも移すこともできませんでした: 今回の変更は保存されません", "无法读取或移动设置：本次的更改不会保存" },
     .{ "{s}: SKIP", "{s}: 건너뛰기", "{s}: スキップ", "{s}：跳过" },
     .{ "{s}: BACK", "{s}: 뒤로", "{s}: 戻る", "{s}：返回" },
     .{ "The last run crashed: see crash-last.txt in the data folder", "지난번에 비정상 종료됐어요. 데이터 폴더의 crash-last.txt를 확인하세요", "前回の実行がクラッシュしました。データフォルダのcrash-last.txtを確認してください", "上次运行崩溃：请查看数据文件夹中的 crash-last.txt" },

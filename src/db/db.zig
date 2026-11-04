@@ -101,8 +101,8 @@ pub const schema =
     \\CREATE TABLE IF NOT EXISTS song(
     \\  path TEXT PRIMARY KEY, folder TEXT NOT NULL, sha256 TEXT NOT NULL, md5 TEXT NOT NULL,
     \\  title TEXT, subtitle TEXT, artist TEXT, subartist TEXT, genre TEXT, level TEXT,
-    \\  difficulty INTEGER, mode INTEGER, notes INTEGER, total REAL, judgerank INTEGER,
-    \\  min_bpm REAL, max_bpm REAL, length_ms INTEGER, has_ln INTEGER, has_mine INTEGER, has_random INTEGER,
+    \\  difficulty INTEGER, mode INTEGER, notes INTEGER,
+    \\  min_bpm REAL, max_bpm REAL, length_ms INTEGER, has_ln INTEGER,
     \\  stagefile TEXT, banner TEXT, preview TEXT, mtime INTEGER, size INTEGER, has_open_ln INTEGER DEFAULT 0);
     \\CREATE INDEX IF NOT EXISTS song_sha ON song(sha256);
     \\CREATE INDEX IF NOT EXISTS song_md5 ON song(md5);
@@ -115,14 +115,15 @@ pub const schema =
     \\CREATE TABLE IF NOT EXISTS replay(id INTEGER PRIMARY KEY, sha256 TEXT, date INTEGER, ex INTEGER, clear INTEGER, data BLOB, ln_mode INTEGER NOT NULL DEFAULT 0);
     \\CREATE INDEX IF NOT EXISTS replay_sha ON replay(sha256);
     \\CREATE TABLE IF NOT EXISTS dir(path TEXT PRIMARY KEY, mtime INTEGER);
-    \\CREATE TABLE IF NOT EXISTS bms_table(url TEXT PRIMARY KEY, name TEXT, symbol TEXT, fetched INTEGER);
-    \\CREATE TABLE IF NOT EXISTS table_song(url TEXT, level TEXT, ord INTEGER, md5 TEXT, sha256 TEXT, title TEXT, artist TEXT, zip_url TEXT, name_diff TEXT);
+    \\CREATE TABLE IF NOT EXISTS unparsed(path TEXT PRIMARY KEY, mtime INTEGER, size INTEGER);
+    \\CREATE TABLE IF NOT EXISTS bms_table(url TEXT PRIMARY KEY, name TEXT, symbol TEXT);
+    \\CREATE TABLE IF NOT EXISTS table_song(url TEXT, level TEXT, ord INTEGER, md5 TEXT, sha256 TEXT, title TEXT, artist TEXT, zip_url TEXT);
     \\CREATE INDEX IF NOT EXISTS table_song_url ON table_song(url, ord);
     \\CREATE INDEX IF NOT EXISTS table_song_md5 ON table_song(md5);
     \\CREATE INDEX IF NOT EXISTS table_song_sha ON table_song(sha256);
     \\CREATE TABLE IF NOT EXISTS course(id INTEGER PRIMARY KEY, table_url TEXT, name TEXT, hashes TEXT, constraints TEXT, UNIQUE(table_url, name));
-    \\CREATE TABLE IF NOT EXISTS course_score(course_id INTEGER, clear INTEGER, ex INTEGER, date INTEGER, PRIMARY KEY(course_id));
-    \\CREATE TABLE IF NOT EXISTS favorite(sha256 TEXT PRIMARY KEY, date INTEGER);
+    \\CREATE TABLE IF NOT EXISTS course_score(course_id INTEGER, clear INTEGER, ex INTEGER, PRIMARY KEY(course_id));
+    \\CREATE TABLE IF NOT EXISTS favorite(sha256 TEXT PRIMARY KEY);
     \\CREATE TEMP TABLE IF NOT EXISTS play_setting(ln_mode INTEGER NOT NULL);
     \\INSERT INTO play_setting SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM play_setting);
 ;
@@ -163,6 +164,23 @@ pub fn initSchema(d: Db) !void {
     try d.exec(schema);
     try migrateLnModes(d);
     try labelReplayModes(d);
+    try dropUnusedColumns(d);
+}
+
+/// Columns older builds wrote and nothing read: chart facts that rescans refill, and timestamps no screen shows.
+/// The score's judge counts and clearcount stay: they are the player's, and no file could give them back.
+fn dropUnusedColumns(d: Db) !void {
+    const gone = [_][2][]const u8{
+        .{ "song", "total" },           .{ "song", "judgerank" },    .{ "song", "has_mine" }, .{ "song", "has_random" },
+        .{ "table_song", "name_diff" }, .{ "bms_table", "fetched" }, .{ "favorite", "date" }, .{ "course_score", "date" },
+    };
+    var buf: [64]u8 = undefined;
+    for (gone) |g| {
+        if (!try hasColumn(d, g[0], g[1])) continue;
+        // DROP COLUMN needs SQLite 3.35; on an older system library the column stays, unread.
+        d.exec(try std.fmt.bufPrintSentinel(&buf, "ALTER TABLE {s} DROP COLUMN {s}", .{ g[0], g[1] }, 0)) catch |e|
+            std.log.warn("left unused column {s}.{s}: {t}", .{ g[0], g[1], e });
+    }
 }
 
 /// Once per database. Old builds kept replays of every LN mode, and a beta filed them all as LN, so each
@@ -205,7 +223,7 @@ fn isChart(name: []const u8) bool {
     return false;
 }
 
-pub const ScanStats = struct { parsed: u32 = 0, removed: u32 = 0, dirs: u32 = 0, failed: u32 = 0 };
+pub const ScanStats = struct { parsed: u32 = 0, removed: u32 = 0, failed: u32 = 0 };
 
 /// Charts parsed at once. It bounds memory, as parsed charts wait in memory for their insert.
 const scan_batch = 256;
@@ -233,10 +251,7 @@ fn scanWorker(ud: ?*anyopaque) callconv(.c) c_int {
         if (i >= w.jobs.len) return 0;
         const job = &w.jobs[i];
         job.bytes = fs.readAlloc(w.gpa, job.path, 1 << 26) catch continue;
-        job.chart = (if (std.ascii.endsWithIgnoreCase(job.path, ".bmson"))
-            core.bmson.parse(w.gpa, job.bytes)
-        else
-            core.bms.parse(w.gpa, job.bytes, .{ .is_pms = std.ascii.endsWithIgnoreCase(job.path, ".pms") })) catch continue;
+        job.chart = core.parse(w.gpa, .of(job.path), job.bytes, .{}) catch continue;
         if (w.progress) |p| _ = p.fetchAdd(1, .monotonic);
     }
 }
@@ -262,8 +277,17 @@ fn insertBatch(gpa: std.mem.Allocator, d: Db, ins: anytype, jobs: []ScanJob, sta
     // Held only for the inserts: a score saved during a long scan must not wait for the scan.
     try d.exec("BEGIN IMMEDIATE");
     errdefer d.exec("ROLLBACK") catch {};
+    const unparsed = try d.prepare("INSERT OR REPLACE INTO unparsed(path,mtime,size) VALUES(?1,?2,?3)");
+    defer unparsed.deinit();
     for (jobs) |*job| {
         const chart = &(job.chart orelse {
+            // Remembered, so the next scan skips it until the file changes, and said once.
+            std.log.warn("not a chart this player can read: {s}", .{job.path});
+            unparsed.bindText(1, job.path);
+            unparsed.bindInt(2, job.mtime);
+            unparsed.bindInt(3, @intCast(job.size));
+            _ = try unparsed.step();
+            unparsed.reset();
             stats.failed += 1;
             continue;
         });
@@ -280,20 +304,16 @@ fn insertBatch(gpa: std.mem.Allocator, d: Db, ins: anytype, jobs: []ScanJob, sta
         ins.bindInt(11, chart.difficulty);
         ins.bindInt(12, @backingInt(chart.mode));
         ins.bindInt(13, chart.total_notes);
-        ins.bindFloat(14, chart.total);
-        ins.bindInt(15, chart.judgerank);
-        ins.bindFloat(16, chart.min_bpm);
-        ins.bindFloat(17, chart.max_bpm);
-        ins.bindInt(18, @divTrunc(chart.last_time_us, 1000));
-        ins.bindInt(19, @intFromBool(chart.has_ln));
-        ins.bindInt(20, @intFromBool(chart.has_mine));
-        ins.bindInt(21, @intFromBool(chart.has_random));
-        ins.bindText(22, chart.stagefile);
-        ins.bindText(23, chart.banner);
-        ins.bindText(24, chart.preview);
-        ins.bindInt(25, job.mtime);
-        ins.bindInt(26, @intCast(job.size));
-        ins.bindInt(27, @intFromBool(hasOpenLn(chart)));
+        ins.bindFloat(14, chart.min_bpm);
+        ins.bindFloat(15, chart.max_bpm);
+        ins.bindInt(16, @divTrunc(chart.last_time_us, 1000));
+        ins.bindInt(17, @intFromBool(chart.has_ln));
+        ins.bindText(18, chart.stagefile);
+        ins.bindText(19, chart.banner);
+        ins.bindText(20, chart.preview);
+        ins.bindInt(21, job.mtime);
+        ins.bindInt(22, @intCast(job.size));
+        ins.bindInt(23, @intFromBool(hasOpenLn(chart)));
         _ = try ins.step();
         ins.reset();
         stats.parsed += 1;
@@ -308,11 +328,11 @@ pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: 
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
-    const known = try d.prepare("SELECT mtime, size FROM song WHERE path=?1");
+    const known = try d.prepare("SELECT mtime, size FROM song WHERE path=?1 UNION ALL SELECT mtime, size FROM unparsed WHERE path=?1 LIMIT 1");
     defer known.deinit();
     const ins = try d.prepare(
-        \\INSERT OR REPLACE INTO song(path,folder,sha256,md5,title,subtitle,artist,subartist,genre,level,difficulty,mode,notes,total,judgerank,min_bpm,max_bpm,length_ms,has_ln,has_mine,has_random,stagefile,banner,preview,mtime,size,has_open_ln)
-        \\VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)
+        \\INSERT OR REPLACE INTO song(path,folder,sha256,md5,title,subtitle,artist,subartist,genre,level,difficulty,mode,notes,min_bpm,max_bpm,length_ms,has_ln,stagefile,banner,preview,mtime,size,has_open_ln)
+        \\VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)
     );
     defer ins.deinit();
 
@@ -330,7 +350,6 @@ pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: 
         var it = std.heap.ArenaAllocator.init(gpa);
         defer it.deinit();
         const a = it.allocator();
-        stats.dirs += 1;
         const entries = fs.listChecked(a, dir) catch |e| {
             std.log.warn("cannot read {s}: {t}", .{ dir, e });
             try unread.append(arena.allocator(), dir);
@@ -363,10 +382,12 @@ pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: 
     // Drop rows only under the scanned roots: an unplugged library must not vanish because
     // its root is gone, so a folder that could not be read keeps its rows.
     for (outer) |r| {
-        const sel = try d.prepare("SELECT path FROM song WHERE path LIKE ?1 ESCAPE '\\'");
+        const sel = try d.prepare("SELECT path, 0 FROM song WHERE path LIKE ?1 ESCAPE '\\' UNION ALL SELECT path, 1 FROM unparsed WHERE path LIKE ?1 ESCAPE '\\'");
         defer sel.deinit();
         const del = try d.prepare("DELETE FROM song WHERE path=?1");
         defer del.deinit();
+        const forget = try d.prepare("DELETE FROM unparsed WHERE path=?1");
+        defer forget.deinit();
         const pat = try likePrefix(arena.allocator(), r);
         sel.bindText(1, pat);
         while (try sel.step()) {
@@ -375,10 +396,12 @@ pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: 
             for (unread.items) |dir| {
                 if (isUnder(path, dir)) break;
             } else {
-                del.bindText(1, path);
-                _ = try del.step();
-                del.reset();
-                stats.removed += 1;
+                const chart = sel.int(1) == 0;
+                const st = if (chart) del else forget;
+                st.bindText(1, path);
+                _ = try st.step();
+                st.reset();
+                if (chart) stats.removed += 1;
             }
         }
     }
@@ -494,7 +517,8 @@ pub fn readSong(a: std.mem.Allocator, st: Stmt) !Song {
         .clear = @intCast(st.int(19)),
         .ex = @intCast(st.int(20)),
         .miss = st.int(21),
-        .played = @intCast(st.int(22)),
+        // Imports clamp each count, but later plays and imports add to it past u32.
+        .played = std.math.lossyCast(u32, st.int(22)),
         .table_level = try dup(a, st, 23),
         .has_open_ln = st.int(24) != 0,
         .favorite = st.int(25) != 0,
@@ -502,16 +526,15 @@ pub fn readSong(a: std.mem.Allocator, st: Stmt) !Song {
 }
 
 /// By chart hash, so a favorite survives moving the files. Returns whether it is one now.
-pub fn toggleFavorite(d: Db, sha256: []const u8, date: i64) !bool {
+pub fn toggleFavorite(d: Db, sha256: []const u8) !bool {
     const del = try d.prepare("DELETE FROM favorite WHERE sha256=?1");
     defer del.deinit();
     del.bindText(1, sha256);
     _ = try del.step();
     if (c.sqlite3_changes(d.h) > 0) return false;
-    const ins = try d.prepare("INSERT INTO favorite(sha256,date) VALUES(?1,?2)");
+    const ins = try d.prepare("INSERT INTO favorite(sha256) VALUES(?1)");
     defer ins.deinit();
     ins.bindText(1, sha256);
-    ins.bindInt(2, date);
     _ = try ins.step();
     return true;
 }
@@ -519,12 +542,13 @@ pub fn toggleFavorite(d: Db, sha256: []const u8, date: i64) !bool {
 /// Replays offered per chart, as beatoraja's slots.
 pub const max_replays = 4;
 
-/// Drops replays nothing can reach: the song select's newest ones, and the best one IR sync uploads.
+/// Drops replays nothing can reach: the song select's newest ones, and the best EX and best lamp IR sync uploads.
 pub fn pruneReplays(d: Db, sha256: []const u8, ln_mode: u8) !void {
     const st = try d.prepare(
         \\DELETE FROM replay WHERE sha256=?1 AND ln_mode=?3
         \\ AND id NOT IN (SELECT id FROM replay WHERE sha256=?1 AND ln_mode=?3 ORDER BY date DESC, id DESC LIMIT ?2)
         \\ AND id NOT IN (SELECT id FROM replay WHERE sha256=?1 AND ln_mode=?3 ORDER BY ex DESC, clear DESC LIMIT 1)
+        \\ AND id NOT IN (SELECT id FROM replay WHERE sha256=?1 AND ln_mode=?3 ORDER BY clear DESC, ex DESC LIMIT 1)
     );
     defer st.deinit();
     st.bindText(1, sha256);
@@ -647,7 +671,8 @@ pub fn importLr2(gpa: std.mem.Allocator, d: Db, path: []const u8) !ImportStats {
         }
     };
     var stats: ImportStats = .{};
-    try d.exec("BEGIN");
+    // IMMEDIATE: it reads before it writes, and SQLite will not wait to turn a read into a write.
+    try d.exec("BEGIN IMMEDIATE");
     errdefer d.exec("ROLLBACK") catch {};
     while (try st.step()) {
         look.bindText(1, col.hash(st));
@@ -764,6 +789,52 @@ test "a scan drops gone charts only in folders it could read" {
     defer st.deinit();
     try std.testing.expect(try st.step());
     try std.testing.expectEqual(@as(i64, 2), st.int(0));
+}
+
+test "an old database drops the columns nothing reads and keeps its rows" {
+    const d = try Db.open(":memory:", std.testing.allocator, false);
+    defer d.close();
+    try d.exec(
+        \\CREATE TABLE song(path TEXT PRIMARY KEY, folder TEXT NOT NULL, sha256 TEXT NOT NULL, md5 TEXT NOT NULL, title TEXT, total REAL, judgerank INTEGER, has_mine INTEGER, has_random INTEGER);
+        \\CREATE TABLE table_song(url TEXT, level TEXT, ord INTEGER, md5 TEXT, sha256 TEXT, title TEXT, artist TEXT, zip_url TEXT, name_diff TEXT);
+        \\INSERT INTO song(path,folder,sha256,md5,title,total) VALUES('p','f','s','m','kept',300);
+        \\INSERT INTO table_song(url,title,name_diff) VALUES('u','kept','x');
+        \\CREATE TABLE favorite(sha256 TEXT PRIMARY KEY, date INTEGER);
+        \\INSERT INTO favorite VALUES('s', 5);
+    );
+    try initSchema(d);
+    for ([_][2][]const u8{ .{ "song", "total" }, .{ "song", "has_random" }, .{ "table_song", "name_diff" }, .{ "favorite", "date" } }) |g| try std.testing.expect(!try hasColumn(d, g[0], g[1]));
+    try std.testing.expect(try hasColumn(d, "song", "title"));
+    try std.testing.expect(try hasColumn(d, "score", "clearcount"));
+    try std.testing.expect(try hasColumn(d, "score", "pg"));
+    try std.testing.expect(!try toggleFavorite(d, "s")); // still a favorite, so this takes it off
+    const st = try d.prepare("SELECT (SELECT title FROM song) || (SELECT title FROM table_song)");
+    defer st.deinit();
+    try std.testing.expect(try st.step());
+    try std.testing.expectEqualStrings("keptkept", st.text(0));
+}
+
+test "a chart that fails to parse is read once, then again only when it changes, and forgotten when gone" {
+    const gpa = std.testing.allocator;
+    fs.io = std.testing.io;
+    const root = "actuon_test_unparsed";
+    fs.removeTree(root);
+    defer fs.removeTree(root);
+    try fs.mkdirs(root);
+    try fs.write(root ++ "/broken.bmson", "{");
+    const d = try Db.open(":memory:", gpa, false);
+    defer d.close();
+    try initSchema(d);
+    try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, d, &.{root}, null)).failed);
+    try std.testing.expectEqual(@as(u32, 0), (try scan(gpa, d, &.{root}, null)).failed);
+    try fs.write(root ++ "/broken.bmson", "{\"");
+    try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, d, &.{root}, null)).failed);
+    fs.remove(root ++ "/broken.bmson");
+    _ = try scan(gpa, d, &.{root}, null);
+    const st = try d.prepare("SELECT COUNT(*) FROM unparsed");
+    defer st.deinit();
+    try std.testing.expect(try st.step());
+    try std.testing.expectEqual(@as(i64, 0), st.int(0));
 }
 
 test "a scan through links back to the root ends and stores each chart once" {
@@ -931,14 +1002,14 @@ test "a favorite toggles and shows in the song list" {
     defer d.close();
     try initSchema(d);
     try d.exec("INSERT INTO song(path,folder,sha256,md5) VALUES('p','f','a','')");
-    try std.testing.expect(try toggleFavorite(d, "a", 1));
+    try std.testing.expect(try toggleFavorite(d, "a"));
     {
         const st = try d.prepare(song_select);
         defer st.deinit();
         try std.testing.expect(try st.step());
         try std.testing.expectEqual(@as(i64, 1), st.int(25));
     }
-    try std.testing.expect(!try toggleFavorite(d, "a", 2));
+    try std.testing.expect(!try toggleFavorite(d, "a"));
     const st = try d.prepare(song_select);
     defer st.deinit();
     try std.testing.expect(try st.step());
@@ -949,12 +1020,26 @@ test "pruning keeps the newest replays and the best one" {
     const d = try Db.open(":memory:", std.testing.allocator, false);
     defer d.close();
     try initSchema(d);
-    try d.exec("INSERT INTO replay(id,sha256,date,ex,clear) VALUES(1,'a',1,1,1),(2,'a',2,99,1),(3,'a',3,1,1),(4,'a',4,1,1),(5,'a',5,1,1),(6,'a',6,1,1),(7,'a',7,1,1),(8,'b',1,1,1)");
+    // 1 holds the best lamp, 2 the best EX: IR sync wants either.
+    try d.exec("INSERT INTO replay(id,sha256,date,ex,clear) VALUES(1,'a',1,1,6),(2,'a',2,99,1),(3,'a',3,1,1),(4,'a',4,1,1),(5,'a',5,1,1),(6,'a',6,1,1),(7,'a',7,1,1),(8,'b',1,1,1)");
     try pruneReplays(d, "a", 0);
     const st = try d.prepare("SELECT group_concat(id) FROM (SELECT id FROM replay ORDER BY id)");
     defer st.deinit();
     try std.testing.expect(try st.step());
-    try std.testing.expectEqualStrings("2,4,5,6,7,8", st.text(0));
+    try std.testing.expectEqualStrings("1,2,4,5,6,7,8", st.text(0));
+}
+
+test "a play count past u32 still lists its chart" {
+    const d = try Db.open(":memory:", std.testing.allocator, false);
+    defer d.close();
+    try initSchema(d);
+    try d.exec("INSERT INTO song(path,folder,sha256,md5) VALUES('p','f','a',''); INSERT INTO score(sha256,mode,playcount) VALUES('a',0,8589934590)");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const st = try d.prepare(song_select);
+    defer st.deinit();
+    try std.testing.expect(try st.step());
+    try std.testing.expectEqual(@as(u32, std.math.maxInt(u32)), (try readSong(arena.allocator(), st)).played);
 }
 
 test "a scan leaves the database free for other writers between batches" {

@@ -1,0 +1,35 @@
+{
+  "version": "1.0.0",
+  "info": {
+    "title": "Fuzz seed", "subtitle": "every field", "artist": "actuon", "subartists": ["a", "b"],
+    "genre": "test", "mode_hint": "beat-7k", "chart_name": "HYPER", "level": 7,
+    "init_bpm": 150, "judge_rank": 100, "total": 300, "back_image": "back.png",
+    "eyecatch_image": "eye.png", "banner_image": "banner.png", "preview_music": "pre.ogg",
+    "resolution": 240, "ln_type": 1
+  },
+  "lines": [{ "y": 0 }, { "y": 960 }, { "y": 1920 }, { "y": 2880 }, { "y": 3840 }],
+  "bpm_events": [{ "y": 960, "bpm": 300 }, { "y": 1920, "bpm": 75 }],
+  "stop_events": [{ "y": 1440, "duration": 240 }],
+  "scroll_events": [{ "y": 2400, "rate": 0.5 }],
+  "sound_channels": [
+    { "name": "a.wav", "notes": [
+      { "x": 1, "y": 0, "l": 0, "c": false },
+      { "x": 2, "y": 240, "l": 480, "c": false, "t": 2 },
+      { "x": 8, "y": 480, "l": 0, "c": true, "up": true },
+      { "x": 0, "y": 720, "l": 0, "c": false }
+    ] },
+    { "name": "b.ogg", "notes": [
+      { "x": 3, "y": 960, "l": 960, "c": false },
+      { "x": 3, "y": 1440, "l": 0, "c": true },
+      { "x": 7, "y": 2880, "l": 0, "c": false }
+    ] }
+  ],
+  "key_channels": [{ "name": "c.wav", "notes": [{ "x": 4, "y": 1200 }] }],
+  "mine_channels": [{ "name": "d.wav", "notes": [{ "x": 5, "y": 1680, "damage": 10 }] }],
+  "bga": {
+    "bga_header": [{ "id": 1, "name": "bga.mp4" }, { "id": 2, "name": "poor.png" }],
+    "bga_events": [{ "y": 0, "id": 1 }],
+    "layer_events": [{ "y": 960, "id": 2 }],
+    "poor_events": [{ "y": 0, "id": 2 }]
+  }
+}

@@ -1150,9 +1150,24 @@ pub const Gfx = struct {
     }
 };
 
+/// Pixels a chart's own image may have: its decode can run on the main thread, and no chart needs more.
+pub const max_chart_image_px = 1 << 24;
+/// Pixels a skin image may have: an 8192 square sheet, 256 MB once decoded.
+const max_skin_image_px = 1 << 26;
+
+/// A small file can claim a huge image, so the header is read before anything is decoded.
+pub fn imageFits(bytes: []const u8, max_px: i64) bool {
+    var w: c_int = 0;
+    var h: c_int = 0;
+    var n: c_int = 0;
+    if (c.stbi_info_from_memory(bytes.ptr, @intCast(bytes.len), &w, &h, &n) == 0) return false;
+    return @as(i64, w) * h <= max_px;
+}
+
 /// Loads an image file into a texture with stb_image.
 pub fn loadTexture(g: *Gfx, path: []const u8, bytes: []const u8) ?*Texture {
     _ = path;
+    if (!imageFits(bytes, max_skin_image_px)) return null;
     var w: c_int = 0;
     var h: c_int = 0;
     var n: c_int = 0;

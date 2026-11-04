@@ -468,7 +468,7 @@ fn tableRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
 
 fn levelRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
     const s = &a.sel;
-    const st = try a.db.prepare("SELECT md5,sha256,title,artist,zip_url FROM table_song WHERE url=?1 AND level=?2 ORDER BY ord");
+    const st = try a.db.prepare("SELECT md5,sha256,title,zip_url FROM table_song WHERE url=?1 AND level=?2 ORDER BY ord");
     defer st.deinit();
     st.bindText(1, s.table_url);
     st.bindText(2, s.level);
@@ -492,7 +492,7 @@ fn levelRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
                 .label = try std.fmt.allocPrint(al, "{s}", .{st.text(2)}),
                 .kind = .missing,
                 .target = try al.dupe(u8, st.text(0)),
-                .extra = try al.dupe(u8, st.text(4)),
+                .extra = try al.dupe(u8, st.text(3)),
             });
         }
     }
@@ -590,6 +590,7 @@ const JacketJob = struct {
         const al = arena.allocator();
         const path = (fs.resolveAsset(al, j.dir, j.stagefile, &.{ "png", "jpg", "jpeg", "bmp", "gif", "tga" }) catch null) orelse return 0;
         const bytes = fs.readAlloc(al, path, 32 << 20) catch return 0;
+        if (!gfx.imageFits(bytes, gfx.max_chart_image_px)) return 0;
         var n: c_int = 0;
         j.px = c.stbi_load_from_memory(bytes.ptr, @intCast(bytes.len), &j.w, &j.h, &n, 4);
         if (j.px != null and j.max_w > 0) {
@@ -1677,9 +1678,7 @@ fn startSongWith(a: *App, song: db_mod.Song, replay: ?core.replay.Replay, sectio
 }
 
 fn toggleFavorite(a: *App, song: db_mod.Song) void {
-    var ms: c.SDL_Time = 0;
-    _ = c.SDL_GetCurrentTime(&ms);
-    a.sel.status = if (db_mod.toggleFavorite(a.db, song.sha256, @divTrunc(ms, std.time.ns_per_s))) |on|
+    a.sel.status = if (db_mod.toggleFavorite(a.db, song.sha256)) |on|
         (if (on) tr("Added to favorites") else tr("Removed from favorites"))
     else |e| blk: {
         std.log.err("favorite not saved: {t}", .{e});

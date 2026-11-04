@@ -11,7 +11,6 @@ const Parser = struct {
     skin: *m.Skin,
     mode: core.types.Mode,
     root: []const u8,
-    dir: []const u8,
     images: std.ArrayList(?[]const u8) = .empty,
     /// #LR2FONT in file order, null where one would not load: SRC_TEXT counts them.
     fonts: std.ArrayList(?*bitfont.BitmapFont) = .empty,
@@ -23,10 +22,8 @@ const Parser = struct {
     judge_cur: [6]?usize = @splat(null),
     skip: bool = false,
     taken: bool = false,
-    in_if: bool = false,
     depth: u32 = 0,
     includes: u32 = 0,
-    files: std.StringHashMapUnmanaged([]const u8) = .empty,
     resolver: *const fn (i32) bool,
     conf: jsonskin.Conf = .{},
     judge_imgs: [6]m.Object = @splat(.{}),
@@ -222,7 +219,6 @@ fn line(p: *Parser, raw: []const u8) anyerror!void {
     const cmd = str[0][1..];
     const eq = std.ascii.eqlIgnoreCase;
     if (eq(cmd, "IF")) {
-        p.in_if = true;
         p.taken = condition(p, str);
         p.skip = !p.taken;
         return;
@@ -241,7 +237,6 @@ fn line(p: *Parser, raw: []const u8) anyerror!void {
         return;
     }
     if (eq(cmd, "ENDIF")) {
-        p.in_if = false;
         p.skip = false;
         return;
     }
@@ -412,7 +407,7 @@ pub fn skinRoot(path: []const u8) []const u8 {
 
 pub fn load(skin: *m.Skin, path: []const u8, mode: core.types.Mode, resolver: *const fn (i32) bool, conf: jsonskin.Conf) ![]const ?[]const u8 {
     const a = skin.arena.allocator();
-    var p: Parser = .{ .a = a, .skin = skin, .mode = mode, .root = skinRoot(path), .dir = std.fs.path.dirname(path) orelse ".", .resolver = resolver, .conf = conf };
+    var p: Parser = .{ .a = a, .skin = skin, .mode = mode, .root = skinRoot(path), .resolver = resolver, .conf = conf };
     try runFile(&p, path);
     for (p.objects.items, p.keys.items) |*o, k| o.keys = k.items;
     if (p.has_judge) {

@@ -156,8 +156,8 @@ fn save(a: *App, id: i64, ex: u32) !void {
         }
     }
     const st = try a.db.prepare(
-        \\INSERT INTO course_score(course_id,clear,ex,date) VALUES(?1,?2,?3,strftime('%s','now'))
-        \\ON CONFLICT(course_id) DO UPDATE SET clear=MAX(clear,excluded.clear), ex=MAX(ex,excluded.ex), date=excluded.date
+        \\INSERT INTO course_score(course_id,clear,ex) VALUES(?1,?2,?3)
+        \\ON CONFLICT(course_id) DO UPDATE SET clear=MAX(clear,excluded.clear), ex=MAX(ex,excluded.ex)
     );
     defer st.deinit();
     st.bindInt(1, id);

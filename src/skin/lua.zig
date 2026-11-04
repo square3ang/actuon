@@ -263,6 +263,11 @@ const prelude =
     \\-- Strings index `string`, so this covers s:find too.
     \\string.find, string.match = bounded(find, 2), bounded(string.match)
     \\string.gmatch, string.gsub = bounded(string.gmatch), bounded(gsub)
+    \\-- Both loop in C once per count, and an empty string or table costs no memory to repeat.
+    \\local rep, move, tonumber = string.rep, table.move, tonumber
+    \\local function counted(n) if (tonumber(n) or 0) > 1e7 then error("count too large for a skin", 3) end end
+    \\function string.rep(s, n, ...) counted(n) return rep(s, n, ...) end
+    \\function table.move(a, f, e, ...) counted((tonumber(e) or 0) - (tonumber(f) or 0)) return move(a, f, e, ...) end
     \\local module_path, raw_searchpath = package.path, package.searchpath
     \\package.searchpath = nil
     \\-- skin_config.get_path hands out paths under skin_dir; anything else is relative to it.
@@ -622,6 +627,9 @@ test "a script cannot allocate past the cap" {
     try std.testing.expectEqual(c.LUA_OK, c.luaL_loadstring(l,
         \\assert(not pcall(string.rep, "x", 1 << 34))
         \\assert(#string.rep("x", 1 << 20) == 1 << 20)
+        \\assert(not pcall(string.rep, "", 1e15))
+        \\assert(not pcall(table.move, {}, 1, 1e15, 1))
+        \\assert(table.move({ 1, 2 }, 1, 2, 2)[3] == 2)
     ));
     try std.testing.expectEqual(c.LUA_OK, protectedCall(l, 0, 0, call_steps));
 }

@@ -20,11 +20,7 @@ pub fn main(init: std.process.Init) !void {
     while (it.next()) |path| {
         const data = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 28));
         defer gpa.free(data);
-        const low = std.ascii.endsWithIgnoreCase(path, ".pms");
-        var chart = (if (std.ascii.endsWithIgnoreCase(path, ".bmson"))
-            core.bmson.parse(gpa, data)
-        else
-            core.bms.parse(gpa, data, .{ .is_pms = low, .selected_random = &ones })) catch |e| {
+        var chart = core.parse(gpa, .of(path), data, .{ .selected_random = &ones }) catch |e| {
             try w.print("{s}\tFAILED {t}\n", .{ path, e });
             continue;
         };

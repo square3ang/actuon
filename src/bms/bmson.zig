@@ -83,6 +83,31 @@ const Timelines = struct {
         try self.items.insert(self.gpa, i, tl);
         return tl;
     }
+
+    /// Adds a point for every y at once. One `get` per y would shift the list on each out-of-order insert,
+    /// which takes minutes on a hostile file of reversed positions.
+    fn addAll(self: *Timelines, ys: []i64) !void {
+        std.mem.sort(i64, ys, {}, std.sort.asc(i64));
+        const old = self.items.items;
+        var merged: std.ArrayList(*Tl) = try .initCapacity(self.gpa, old.len + ys.len);
+        // The first point is y 0, below every point `get` makes.
+        merged.appendAssumeCapacity(old[0]);
+        var i: usize = 1;
+        for (ys) |y| {
+            while (i < old.len and old[i].y <= y) : (i += 1) merged.appendAssumeCapacity(old[i]);
+            const lo = merged.items[merged.items.len - 1];
+            // Negative y has no point of its own, as in `get`; duplicates land on the point already there.
+            if (lo.y >= y) continue;
+            const stop_part: f64 = @floatFromInt(lo.stop);
+            const dy: f64 = @floatFromInt(y - lo.y);
+            const time = lo.time + stop_part + (240000.0 * 1000.0 * (dy / self.res)) / lo.bpm;
+            const tl = try self.gpa.create(Tl);
+            tl.* = .{ .y = y, .time = time, .micro = micro(time), .bpm = lo.bpm, .scroll = lo.scroll };
+            merged.appendAssumeCapacity(tl);
+        }
+        merged.appendSliceAssumeCapacity(old[i..]);
+        self.items = merged;
+    }
 };
 
 fn micro(t: f64) i64 {
@@ -187,6 +212,17 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
             }
             ist += 1;
         }
+    }
+    {
+        var ys: std.ArrayList(i64) = .empty;
+        for (root.lines) |l| try ys.append(a, l.y);
+        for (root.sound_channels) |sc| for (sc.notes) |n| {
+            const end = std.math.add(i64, n.y, n.l) catch continue;
+            try ys.appendSlice(a, &.{ n.y, end });
+        };
+        for ([_][]const JMineCh{ root.key_channels, root.mine_channels }) |chs| for (chs) |ch| for (ch.notes) |n| try ys.append(a, n.y);
+        for ([_][]const JBgaEvent{ root.bga.bga_events, root.bga.layer_events, root.bga.poor_events }) |evs| for (evs) |ev| try ys.append(a, ev.y);
+        try tls.addAll(ys.items);
     }
     for (root.lines) |l| (try tls.get(l.y)).bar = true;
 
@@ -480,6 +516,23 @@ test "keysound offsets past i64 saturate instead of overflowing" {
     );
     defer c.deinit();
     try std.testing.expectEqual(@as(usize, 3), c.bg.len);
+}
+
+test "points given in any order land at their own times" {
+    var c = try parse(std.testing.allocator,
+        \\{"info":{"init_bpm":120,"resolution":240},"lines":[{"y":1920},{"y":960},{"y":-5},{"y":960}],
+        \\ "bpm_events":[{"y":960,"bpm":240}],
+        \\ "sound_channels":[{"name":"a","notes":[{"x":1,"y":1920},{"x":2,"y":480,"l":960}]}]}
+    );
+    defer c.deinit();
+    var bars: usize = 0;
+    for (c.timelines, 1..) |tl, i| {
+        if (tl.bar) bars += 1;
+        if (i < c.timelines.len) try std.testing.expect(tl.y <= c.timelines[i].y);
+    }
+    try std.testing.expectEqual(@as(usize, 3), bars);
+    // 120 BPM for a measure (2 s), then 240 BPM for the next (1 s).
+    try std.testing.expectEqual(@as(i64, 3_000_000), c.notes[c.notes.len - 1].time_us);
 }
 
 test "bmson basic" {

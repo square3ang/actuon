@@ -196,10 +196,9 @@ pub const App = struct {
     /// Lua's audio calls, kept to files inside the skin.
     fn skinAudio(ud: *anyopaque, path: []const u8, op: skin_sound.Op, gain: f32) void {
         const a: *App = @ptrCast(@alignCast(ud));
-        if (std.mem.indexOf(u8, path, "..") != null) return;
+        if (fs.climbs(path)) return;
         const inside = for (std.enums.values(config.SkinSlot)) |slot| {
-            const dir = a.skinDir(slot);
-            if (dir.len > 0 and std.mem.startsWith(u8, path, dir)) break true;
+            if (db_mod.isUnder(path, a.skinDir(slot))) break true;
         } else false;
         if (!inside) return;
         a.sounds.request(path, op, gain * a.cfg.sfx_volume);
@@ -474,7 +473,7 @@ pub const App = struct {
             if (img[0].len == 0) continue;
             const path = (fs.resolveAsset(al, dir, img[0], &.{ "png", "jpg", "jpeg", "bmp", "gif", "tga" }) catch null) orelse continue;
             const bytes = fs.readAlloc(al, path, 1 << 26) catch continue;
-            if (!chartImageFits(bytes)) continue;
+            if (!gfx.imageFits(bytes, gfx.max_chart_image_px)) continue;
             img[1].* = gfx.loadTexture(&a.g, path, bytes);
         }
     }
@@ -484,6 +483,7 @@ pub const App = struct {
         defer a.stagefile_done.store(true, .release);
         const bytes = fs.readAlloc(a.gpa, a.stagefile_path, 1 << 26) catch return 0;
         defer a.gpa.free(bytes);
+        if (!gfx.imageFits(bytes, gfx.max_chart_image_px)) return 0;
         var n: c_int = 0;
         a.stagefile_px = c.stbi_load_from_memory(bytes.ptr, @intCast(bytes.len), &a.stagefile_w, &a.stagefile_h, &n, 4);
         return 0;
@@ -986,7 +986,7 @@ pub const App = struct {
     }
 
     pub fn saveConfig(a: *App) void {
-        config.save(a.gpa, a.cfg);
+        config.save(a.gpa, a.cfg) catch |e| std.log.err("config save failed: {t}", .{e});
     }
 
     fn pressShotKey(a: *App) void {
@@ -1209,6 +1209,8 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
         .sel = .{},
     };
     defer app.db.close();
+    // Once a start, as this build may read charts the last one could not.
+    app.db.exec("DELETE FROM unparsed") catch |e| std.log.err("broken charts not retried: {t}", .{e});
     db_mod.setLnMode(app.db, app.cfg.ln_mode) catch |e| std.log.err("LN mode not applied to scores: {t}", .{e});
     defer app.g.deinit();
     defer app.text.deinit(gpa);
@@ -1252,6 +1254,7 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
         app.sel.status = tr("Reading /dev/input needs the input group: run sudo usermod -aG input $USER, then log in again.");
     }
     if (config.set_aside) app.sel.status = tr("Settings could not be read: moved to config.json.bad");
+    if (config.stuck) app.sel.status = tr("Settings could not be read or moved: changes this run are not saved");
     if (crash.takePrevious(arena.allocator())) app.sel.status = tr("The last run crashed: see crash-last.txt in the data folder");
     if (opts.preview) |cmd| if (!cmd.stop) app.startPreview(cmd.file, cmd.measure);
     // Captures stay offline, so every run draws the same version row.
@@ -1271,15 +1274,6 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
     app.dropStagefile();
 }
 
-/// This decode runs on the main thread, and a small file can claim a huge image. Skins have no use for one.
-fn chartImageFits(bytes: []const u8) bool {
-    var w: c_int = 0;
-    var h: c_int = 0;
-    var n: c_int = 0;
-    if (c.stbi_info_from_memory(bytes.ptr, @intCast(bytes.len), &w, &h, &n) == 0) return false;
-    return @as(i64, w) * h <= 1 << 24;
-}
-
 test "a chart image claiming to be huge is refused before decoding" {
     // A TGA header: 8 bit grey, width and height at bytes 12 to 15.
     var tga: [18]u8 = @splat(0);
@@ -1289,9 +1283,9 @@ test "a chart image claiming to be huge is refused before decoding" {
     tga[13] = 0x3f;
     tga[14] = 0xff;
     tga[15] = 0x3f;
-    try std.testing.expect(!chartImageFits(&tga));
+    try std.testing.expect(!gfx.imageFits(&tga, gfx.max_chart_image_px));
     tga[13] = 0;
     tga[15] = 0;
-    try std.testing.expect(chartImageFits(&tga));
-    try std.testing.expect(!chartImageFits("not an image"));
+    try std.testing.expect(gfx.imageFits(&tga, gfx.max_chart_image_px));
+    try std.testing.expect(!gfx.imageFits("not an image", gfx.max_chart_image_px));
 }

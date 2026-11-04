@@ -9,10 +9,11 @@ It listens on `127.0.0.1:8730` over plain HTTP, so put a TLS proxy in front befo
 that buffers request bodies, as nginx does by default: a worker waits for the whole body, so a few very slow clients could
 otherwise hold all eight.
 
-Registration allows 10 accounts an hour per client address, and login 10 tries a minute per address and name. Each account
+Registration allows 10 accounts a day per client address, and login 10 tries a minute per address and name. Each account
 can store 64 MiB of charts and 50,000 unverified claims, the server 10 GiB of charts, and an upload must parse as a chart
 with notes. Two chart or replay checks run at once, one per player, and four password hashes: the next gets a 503 until
-one ends. Each check runs in a child process with a 1 GiB address space limit, a 30 s CPU limit and no way to open files.
+one ends. A chart longer than an hour, or a replay that runs ten minutes past its chart, is refused, so no check
+runs long. A name is 1 to 32 letters, digits, spaces inside, or `_ - . /`. Each check runs in a child process with a 1 GiB address space limit, a 30 s CPU limit and no way to open files.
 A PMS score is refused when reading the chart as BMS finds more notes, because PMS parsing drops channels it has no lane for.
 
 To run it by hand:
@@ -142,7 +143,7 @@ location /charts/ { proxy_pass http://$ir_charts; proxy_set_header Host $host; p
 ```
 
 Register and login attempts count per client, so the proxy must name the client in `X-Real-IP`. Without it, every player
-shares the proxy's count, and ten signups an hour lock out everyone. Set it in the server block, and again in any location
+shares the proxy's count, and ten signups a day lock out everyone. Set it in the server block, and again in any location
 with its own `proxy_set_header`, because nginx does not inherit into those:
 
 ```nginx

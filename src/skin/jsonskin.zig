@@ -149,6 +149,8 @@ pub fn applyConf(a: std.mem.Allocator, head: J, conf: Conf) !void {
 pub fn wildChoices(a: std.mem.Allocator, dir: []const u8, rel: []const u8) ![]const []const u8 {
     const star = std.mem.indexOfScalar(u8, rel, '*') orelse return &.{};
     const base_end = if (std.mem.lastIndexOfScalar(u8, rel[0..star], '/')) |i| i + 1 else 0;
+    // The choices are file names shown to the player, and a skin lists only its own folder.
+    if (fs.climbs(rel[0..base_end]) or std.fs.path.isAbsolute(rel)) return &.{};
     const seg_end = std.mem.indexOfScalarPos(u8, rel, star, '/') orelse rel.len;
     const tail = rel[star + 1 .. seg_end];
     const ext = tail[0 .. std.mem.indexOfScalar(u8, tail, '|') orelse tail.len];
@@ -218,7 +220,6 @@ const Loader = struct {
     srcs: std.StringHashMapUnmanaged(m.Src) = .empty,
     protos: std.StringHashMapUnmanaged(m.Object) = .empty,
     note_id: []const u8 = "notes",
-    files: std.StringHashMapUnmanaged([]const u8) = .empty,
     includes: u32 = 0,
 
     /// std.json parses any nesting without recursion, so this bounds its own.
@@ -759,4 +760,7 @@ test "wildcards resolve to the default, or the closest name" {
     try std.testing.expectEqualStrings("s/FHD_default_Left.lua", try resolveWild(a, dir, &files, "s/*.lua"));
     try std.testing.expectEqualStrings("b/y/BOMB.png", try resolveWild(a, dir, &files, "b/*|2|/BOMB.png"));
     try std.testing.expectEqualStrings("b/x/BOMB.png", try resolveWild(a, dir, &files, "b/*|9|/BOMB.png"));
+    try std.testing.expect((try wildChoices(a, dir, "s/*.lua")).len > 0);
+    try std.testing.expectEqual(@as(usize, 0), (try wildChoices(a, dir, "s/../*")).len);
+    try std.testing.expectEqual(@as(usize, 0), (try wildChoices(a, dir, "/*")).len);
 }

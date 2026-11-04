@@ -3,6 +3,7 @@ const std = @import("std");
 const i18n = @import("../ui/i18n.zig");
 const tr = i18n.tr;
 const c = @import("c");
+const core = @import("actuon_core");
 const http = @import("../platform/http.zig");
 const fs = @import("../platform/fs.zig");
 const db_mod = @import("../db/db.zig");
@@ -167,12 +168,6 @@ fn fillBoard(b: *Board, s: Standing) void {
     }
 }
 
-pub fn chartFormat(path: []const u8) u8 {
-    if (std.ascii.endsWithIgnoreCase(path, ".bmson")) return 3;
-    if (std.ascii.endsWithIgnoreCase(path, ".pms")) return 2;
-    return 1;
-}
-
 fn bearer(a: std.mem.Allocator, token: []const u8) ![]const std.http.Header {
     const hs = try a.alloc(std.http.Header, 1);
     hs[0] = .{ .name = "Authorization", .value = try std.fmt.allocPrint(a, "Bearer {s}", .{token}) };
@@ -202,7 +197,7 @@ pub fn submit(gpa: std.mem.Allocator, client: *std.http.Client, base: []const u8
     defer arena.deinit();
     const a = arena.allocator();
     const hs = try bearer(a, token);
-    const format = chartFormat(chart_path);
+    const format = @backingInt(core.Format.of(chart_path));
     const url = try std.fmt.allocPrint(a, "{s}/scores/{s}?format={d}{s}{s}", .{ base, sha, format, if (room.len > 0) "&room=" else "", room });
     var r = try sendScore(client, a, url, replay, hs, room);
     if (r.status == 428) {
@@ -439,7 +434,8 @@ fn mergeMine(d: db_mod.Db, scores: []const MyScore) !u32 {
             .miss = s.miss,
             .played = 0,
             .date = s.date,
-            .source = "IR",
+            // No source: it brings no counts, and naming one would make the next import look new and add its totals again.
+            .source = "",
         });
         merged += 1;
     }
@@ -676,7 +672,7 @@ pub const AccountAction = enum { register, login, rename };
 
 pub fn accountRefusal(status: u16, action: AccountAction) []const u8 {
     return switch (status) {
-        400 => if (action == .rename) tr("Name must be 1-32 characters") else tr("Name must be 1-32 characters and password at least 8"),
+        400 => if (action == .rename) tr("Name must be 1-32 letters, digits or _ - . /") else tr("Name must be 1-32 letters, digits or _ - . /, and password at least 8"),
         401 => if (action == .rename) tr("Sign in again first") else tr("Wrong name or password"),
         409 => tr("That name is taken"),
         429 => tr("Too many attempts, try again later"),
@@ -982,10 +978,10 @@ test "the list opens on a player far down it" {
     try std.testing.expectEqual(@as(?i64, 20), b.number(394));
 }
 
-test "format selection" {
-    try std.testing.expectEqual(@as(u8, 3), chartFormat("a.BMSON"));
-    try std.testing.expectEqual(@as(u8, 2), chartFormat("a.pms"));
-    try std.testing.expectEqual(@as(u8, 1), chartFormat("a.bme"));
+test "the format numbers sent to the IR stay what the server reads" {
+    try std.testing.expectEqual(@as(u8, 3), @backingInt(core.Format.of("a.BMSON")));
+    try std.testing.expectEqual(@as(u8, 2), @backingInt(core.Format.of("a.pms")));
+    try std.testing.expectEqual(@as(u8, 1), @backingInt(core.Format.of("a.bme")));
 }
 
 test "rows" {

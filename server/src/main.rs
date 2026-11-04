@@ -26,7 +26,8 @@ const MAX_JSON: usize = 1 << 20;
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(30);
 const LOGIN_WINDOW_SECS: u64 = 60;
 const LOGIN_ATTEMPTS: u32 = 10;
-const REGISTER_WINDOW_SECS: u64 = 3600;
+/// A day, not an hour: every per-account limit multiplies by the accounts one address can make.
+const REGISTER_WINDOW_SECS: u64 = 24 * 3600;
 const REGISTER_ATTEMPTS: u32 = 10;
 /// A chart another player already stored costs nothing, so this only counts charts new to the server.
 const MAX_OWNER_CHART_BYTES: i64 = 64 << 20;
@@ -194,11 +195,7 @@ fn read_body(req: &mut Request, limit: usize) -> Result<Vec<u8>, ApiError> {
 }
 
 fn auth(req: &Request, db: &Connection) -> Result<i64, ApiError> {
-    let header = req
-        .headers()
-        .iter()
-        .find(|h| h.field.equiv("Authorization"))
-        .map(|h| h.value.as_str().to_string());
+    let header = header_of(req, "Authorization");
     let token = header
         .as_deref()
         .and_then(|v| v.strip_prefix("Bearer "))
@@ -220,12 +217,10 @@ fn client_key(real_ip: Option<&str>, peer: Option<IpAddr>) -> String {
 }
 
 fn client_of(req: &Request) -> String {
-    let real_ip = req
-        .headers()
-        .iter()
-        .find(|h| h.field.equiv("X-Real-IP"))
-        .map(|h| h.value.as_str());
-    client_key(real_ip, req.remote_addr().map(|a| a.ip()))
+    client_key(
+        header_of(req, "X-Real-IP").as_deref(),
+        req.remote_addr().map(|a| a.ip()),
+    )
 }
 
 fn query_of(url: &str) -> HashMap<String, String> {
@@ -264,8 +259,12 @@ struct Credentials {
     password: String,
 }
 
+/// Letters of any script, digits and a few marks: invisible or direction-changing characters and edge spaces
+/// would let one name pass for another in rankings.
 fn valid_name(n: &str) -> bool {
-    (1..=32).contains(&n.chars().count()) && !n.chars().any(char::is_control)
+    (1..=32).contains(&n.chars().count())
+        && n.trim() == n
+        && n.chars().all(|c| c.is_alphanumeric() || "_-./ ".contains(c))
 }
 
 fn register(req: &mut Request, db: &Connection, ctx: &Ctx) -> ApiResult {
@@ -274,7 +273,7 @@ fn register(req: &mut Request, db: &Connection, ctx: &Ctx) -> ApiResult {
     if !valid_name(&c.name) || c.password.len() < 8 || c.password.len() > 1024 {
         return Err(ApiError::new(
             400,
-            "name must be 1-32 characters and password at least 8",
+            "name must be 1-32 letters, digits or _ - . /, and password at least 8",
         ));
     }
     throttle(
@@ -321,7 +320,7 @@ fn rename(req: &mut Request, db: &Connection) -> ApiResult {
     let q: NewName = serde_json::from_slice(&read_body(req, MAX_JSON)?)
         .map_err(|_| ApiError::new(400, "bad json"))?;
     if !valid_name(&q.name) {
-        return Err(ApiError::new(400, "name must be 1-32 characters"));
+        return Err(ApiError::new(400, "name must be 1-32 letters, digits or _ - . /"));
     }
     db.execute("UPDATE user SET name=?1 WHERE id=?2", params![q.name, user])
         .map_err(name_conflict)?;
@@ -1102,6 +1101,44 @@ mod tests {
             core::check_chart(long.as_bytes(), 1).unwrap().title.len(),
             255
         );
+        // Five measures at 0.001 BPM: a check of it would take minutes.
+        assert!(core::check_chart(b"#BPM 0.001\n#WAV01 a.wav\n#00511:01\n", 1).is_err());
+    }
+
+    /// A version 2 replay of plain options with one key press at `time_us`.
+    fn replay_with_press(chart: &[u8], time_us: u64) -> Vec<u8> {
+        let mut out = b"ACTR\x02".to_vec();
+        out.extend_from_slice(core::chart_sha256(chart).as_bytes());
+        // gauge NORMAL, then random, gauge shift, 2P side, algorithm, seed, #RANDOM count, event count
+        out.extend_from_slice(&[2, 0, 0, 0, 0, 0, 0, 1]);
+        let mut zigzag = time_us << 1;
+        while zigzag >= 0x80 {
+            out.push(zigzag as u8 | 0x80);
+            zigzag >>= 7;
+        }
+        out.push(zigzag as u8);
+        out.push(0x80);
+        out
+    }
+
+    #[test]
+    fn a_replay_running_far_past_the_chart_is_refused() {
+        let chart = b"#BPM 120\n#WAV01 a.wav\n#00111:01\n";
+        assert!(core::verify(chart, &replay_with_press(chart, 2_000_000), 1).is_ok());
+        assert_eq!(
+            core::verify(chart, &replay_with_press(chart, 3_600_000_000), 1).unwrap_err(),
+            -1
+        );
+    }
+
+    #[test]
+    fn a_name_cannot_hide_characters() {
+        assert!(valid_name("square3ang"));
+        assert!(valid_name("\u{D55C}\u{AE00} a_b-c.d/e"));
+        assert!(!valid_name("square3ang\u{200B}"));
+        assert!(!valid_name("\u{202E}gna3erauqs"));
+        assert!(!valid_name("square3ang "));
+        assert!(!valid_name(""));
     }
 
     #[test]

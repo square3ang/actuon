@@ -28,7 +28,7 @@ jobs:
       - run: python3 tests/golden_check.py "$PWD/zig-out/bin/chartdump"
       - name: Parser fuzz
         run: |
-          ls "$PWD"/tests/charts/*.bm? "$PWD"/tests/charts/*.pms > fuzz-seeds.txt
+          ls "$PWD"/tests/charts/*.bm? "$PWD"/tests/charts/*.pms "$PWD"/tests/fuzz/*.bmson > fuzz-seeds.txt
           ./zig-out/bin/fuzz_parser fuzz-seeds.txt 20000 "$GITHUB_RUN_NUMBER"
       - run: zig build core -Doptimize=ReleaseSafe
       - run: cargo test --release

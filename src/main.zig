@@ -111,6 +111,11 @@ fn irAccount(gpa: std.mem.Allocator, io: std.Io, cmd: []const u8, url: []const u
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
+    // As in Settings: the password would go out readable, and the next start signs out of such an IR anyway.
+    if (table.sendsInClear(url)) {
+        std.debug.print("an IR on the internet needs https://\n", .{});
+        return error.PlainHttp;
+    }
     var buf: [1024]u8 = undefined;
     var rd = std.Io.File.stdin().reader(io, &buf);
     const line = rd.interface.takeDelimiterExclusive('\n') catch return error.NoPassword;
@@ -123,7 +128,7 @@ fn irAccount(gpa: std.mem.Allocator, io: std.Io, cmd: []const u8, url: []const u
     var cfg = config.load(a);
     cfg.ir_url = url;
     cfg.ir_token = token;
-    config.save(gpa, cfg);
+    try config.save(gpa, cfg);
     std.debug.print("logged in as {s}; token saved\n", .{name});
 }
 

@@ -136,6 +136,9 @@ pub fn store(gpa: std.mem.Allocator, d: Db, url: []const u8, head_bytes: []const
 
     try d.exec("BEGIN");
     errdefer d.exec("ROLLBACK") catch {};
+    // A new course can reuse a freed id and must not inherit its score. Swept before the inserts too, because
+    // removing a table in settings leaves its courses' scores behind.
+    try d.exec("DELETE FROM course_score WHERE course_id NOT IN (SELECT id FROM course)");
     // Courses keep their rows, because their scores point at the ids. Empty hashes mark the ones to drop.
     for ([_][]const u8{ "DELETE FROM table_song WHERE url=?1", "UPDATE course SET hashes='' WHERE table_url=?1" }) |sql| {
         const del = try d.prepare(sql);
@@ -143,14 +146,14 @@ pub fn store(gpa: std.mem.Allocator, d: Db, url: []const u8, head_bytes: []const
         del.bindText(1, url);
         _ = try del.step();
     }
-    const meta = try d.prepare("INSERT OR REPLACE INTO bms_table(url,name,symbol,fetched) VALUES(?1,?2,?3,strftime('%s','now'))");
+    const meta = try d.prepare("INSERT OR REPLACE INTO bms_table(url,name,symbol) VALUES(?1,?2,?3)");
     defer meta.deinit();
     meta.bindText(1, url);
     meta.bindText(2, str(head.object.get("name")));
     meta.bindText(3, str(head.object.get("symbol")));
     _ = try meta.step();
 
-    const ins = try d.prepare("INSERT INTO table_song(url,level,ord,md5,sha256,title,artist,zip_url,name_diff) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)");
+    const ins = try d.prepare("INSERT INTO table_song(url,level,ord,md5,sha256,title,artist,zip_url) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)");
     defer ins.deinit();
     var songs: u32 = 0;
     for (data.array.items, 0..) |e, i| {
@@ -171,7 +174,6 @@ pub fn store(gpa: std.mem.Allocator, d: Db, url: []const u8, head_bytes: []const
         ins.bindText(7, str(o.get("artist")));
         const zip = str(o.get("url"));
         ins.bindText(8, if (refAllowed(url, zip)) zip else "");
-        ins.bindText(9, str(o.get("url_diff")));
         _ = try ins.step();
         ins.reset();
         songs += 1;
@@ -197,7 +199,6 @@ pub fn store(gpa: std.mem.Allocator, d: Db, url: []const u8, head_bytes: []const
     defer gone.deinit();
     gone.bindText(1, url);
     _ = try gone.step();
-    // A later course can reuse a freed id, and must not inherit this score.
     try d.exec("DELETE FROM course_score WHERE course_id NOT IN (SELECT id FROM course)");
     try d.exec("COMMIT");
     return .{ .songs = songs, .courses = courses };
@@ -364,7 +365,7 @@ test "a table refresh keeps course scores on their courses" {
     ;
     _ = try store(gpa, d, "A", head, "[]");
     _ = try store(gpa, d, "B", "{\"name\":\"B\",\"course\":[{\"name\":\"b1\",\"md5\":[\"x\"]}]}", "[]");
-    try d.exec("INSERT INTO course_score(course_id,clear,ex,date) SELECT id,5,length(name),0 FROM course WHERE table_url='A'");
+    try d.exec("INSERT INTO course_score(course_id,clear,ex) SELECT id,5,length(name) FROM course WHERE table_url='A'");
     _ = try store(gpa, d, "A", reordered, "[]");
     const q = try d.prepare("SELECT c.name,c.hashes,s.ex FROM course c LEFT JOIN course_score s ON s.course_id=c.id WHERE c.table_url='A' ORDER BY c.name");
     defer q.deinit();
@@ -379,4 +380,20 @@ test "a table refresh keeps course scores on their courses" {
     defer left.deinit();
     try std.testing.expect(try left.step());
     try std.testing.expectEqual(@as(i64, 2), left.int(0));
+}
+
+test "a table added after one was removed does not inherit its course scores" {
+    const gpa = std.testing.allocator;
+    const d = try Db.open(":memory:", gpa, false);
+    defer d.close();
+    try db_mod.initSchema(d);
+    _ = try store(gpa, d, "A", "{\"name\":\"A\",\"course\":[{\"name\":\"dan\",\"md5\":[\"a\"]}]}", "[]");
+    try d.exec("INSERT INTO course_score(course_id,clear,ex) SELECT id,5,9 FROM course");
+    // What removing table A in settings does.
+    try d.exec("DELETE FROM course WHERE table_url='A'");
+    _ = try store(gpa, d, "C", "{\"name\":\"C\",\"course\":[{\"name\":\"other\",\"md5\":[\"b\"]}]}", "[]");
+    const q = try d.prepare("SELECT COUNT(*) FROM course c JOIN course_score s ON s.course_id=c.id");
+    defer q.deinit();
+    try std.testing.expect(try q.step());
+    try std.testing.expectEqual(@as(i64, 0), q.int(0));
 }
