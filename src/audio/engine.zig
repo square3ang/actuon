@@ -180,7 +180,7 @@ pub const Engine = struct {
         return true;
     }
 
-    /// Mixes each period only once the device has room for it, as `writeThread` does through PortAudio.
+    /// Mixes each period only once the device has room for it: a block mixed early sits a period in the write.
     fn alsaThread(ud: ?*anyopaque) callconv(.c) c_int {
         const e: *Engine = @ptrCast(@alignCast(ud));
         raiseAudioPriority();
@@ -286,81 +286,44 @@ pub const Engine = struct {
         return e.startStream(ty, &out, rate, frames, false);
     }
 
-    /// Blocking writes, not a callback: some ioplug PCMs, such as sidealsa_pro, accept a callback
-    /// stream and then never run the callback, while writes to them keep real time.
+    /// A callback, not blocking writes: at 32 or 64 frames a period is under 1.5 ms, less than a
+    /// polling thread can count on waking in. Linux ALSA, whose ioplug PCMs may never run a
+    /// callback, has its own writer in `alsaThread`.
     fn startStream(e: *Engine, ty: c.PaHostApiTypeId, out: *c.PaStreamParameters, rate: u32, frames: u32, exclusive: bool) bool {
         var stream: ?*c.PaStream = null;
-        const err = c.Pa_OpenStream(&stream, null, out, @floatFromInt(rate), @min(frames, feed_max), c.paClipOff | c.paDitherOff, null, null);
+        const err = c.Pa_OpenStream(&stream, null, out, @floatFromInt(rate), @min(frames, feed_max), c.paClipOff | c.paDitherOff, paCallback, e);
         if (err != c.paNoError) return false;
-        if (c.Pa_StartStream(stream) != c.paNoError) {
-            _ = c.Pa_CloseStream(stream);
-            return false;
-        }
-        e.stream = stream;
+        // Set before the start: the callback reads the latency from its first buffer.
         e.feed_frames = @min(frames, feed_max);
         const info = c.Pa_GetStreamInfo(stream);
         e.host = .{ .latency_ms = if (info != null) info.*.outputLatency * 1000 else 0, .exclusive = exclusive };
         const n = nameOf(ty);
         @memcpy(e.host.name[0..n.len], n);
-        e.feed_quit.store(false, .release);
-        e.feed_thread = c.SDL_CreateThread(writeThread, "audio-write", e);
+        if (c.Pa_StartStream(stream) != c.paNoError) {
+            _ = c.Pa_CloseStream(stream);
+            e.host = .{};
+            return false;
+        }
+        e.stream = stream;
         return true;
     }
 
-    fn writeThread(ud: ?*anyopaque) callconv(.c) c_int {
+    /// Runs on the host API's audio thread, which already outranks the game's own.
+    fn paCallback(_: ?*const anyopaque, out: ?*anyopaque, count: c_ulong, _: [*c]const c.PaStreamCallbackTimeInfo, _: c.PaStreamCallbackFlags, ud: ?*anyopaque) callconv(.c) c_int {
         const e: *Engine = @ptrCast(@alignCast(ud));
-        raiseAudioPriority();
-        var buf: [feed_max * 2]f32 = undefined;
-        const frames = e.feed_frames;
-        const buffer_s = @as(f64, @floatFromInt(frames)) / @as(f64, @floatFromInt(e.rate));
-        const latency_s = e.host.latency_ms / 1000;
-        const period_ns: u64 = @intFromFloat(buffer_s * 1e9);
-        var wrote_at = c.SDL_GetTicksNS();
-        while (!e.feed_quit.load(.acquire)) {
-            const in_time = e.waitForRoom(frames, period_ns, wrote_at);
-            e.mix(&buf, frames);
-            // A block mixed before the room was there waits a period in the write as well.
-            if (!e.paused) e.updateClock(if (in_time) latency_s else latency_s + buffer_s, frames);
-            const err = c.Pa_WriteStream(e.stream, &buf, frames);
-            if (err != c.paNoError and err != c.paOutputUnderflowed) c.SDL_Delay(1);
-            wrote_at = c.SDL_GetTicksNS();
-        }
-        return 0;
+        const frames: u32 = @intCast(count);
+        e.mix(@ptrCast(@alignCast(out.?)), frames);
+        if (!e.paused) e.updateClock(e.host.latency_ms / 1000, frames);
+        return c.paContinue;
     }
 
     /// Every block must be ready within one period, so this thread outranks everything else the game runs.
+    /// SDL's time-critical is only a nice level here; realtime comes through rtkit when the system allows it.
     fn raiseAudioPriority() void {
-        switch (builtin.os.tag) {
-            // SDL's time-critical is only a nice level here; realtime comes through rtkit when the system allows it.
-            .linux => {
-                const rr: c_int = @backingInt(std.os.linux.SCHED.Mode.RR);
-                if (c.SDL_SetLinuxThreadPriorityAndPolicy(std.os.linux.gettid(), c.SDL_THREAD_PRIORITY_TIME_CRITICAL, rr)) return;
-                std.log.warn("audio thread stays non-realtime: {s}", .{std.mem.span(c.SDL_GetError())});
-            },
-            // MMCSS Pro Audio ranks above a time-critical thread of a normal process. The task is never reverted: the thread ends with the stream.
-            .windows => {
-                var task: ?*anyopaque = null;
-                if (c.PaWasapi_ThreadPriorityBoost(&task, c.eThreadPriorityProAudio) == c.paNoError) return;
-                std.log.warn("audio thread has no MMCSS boost", .{});
-            },
-            else => {},
-        }
+        const rr: c_int = @backingInt(std.os.linux.SCHED.Mode.RR);
+        if (c.SDL_SetLinuxThreadPriorityAndPolicy(std.os.linux.gettid(), c.SDL_THREAD_PRIORITY_TIME_CRITICAL, rr)) return;
+        std.log.warn("audio thread stays non-realtime: {s}", .{std.mem.span(c.SDL_GetError())});
         _ = c.SDL_SetCurrentThreadPriority(c.SDL_THREAD_PRIORITY_TIME_CRITICAL);
-    }
-
-    /// Mixing waits for room in the device: a block mixed early sits a period in the write, and so
-    /// does every keysound queued after it. False when the host never reports room, as a period past due.
-    fn waitForRoom(e: *Engine, frames: u32, period_ns: u64, wrote_at: u64) bool {
-        // Room comes about a period after the last write; polling only near then keeps wakeups few.
-        c.SDL_DelayNS((wrote_at + period_ns * 3 / 4) -| c.SDL_GetTicksNS());
-        const give_up = wrote_at + 2 * period_ns;
-        while (c.SDL_GetTicksNS() < give_up) {
-            const room = c.Pa_GetStreamWriteAvailable(e.stream);
-            if (room < 0) return false;
-            if (room >= frames) return true;
-            c.SDL_DelayNS(50_000);
-        }
-        return false;
     }
 
     fn openNull(e: *Engine) !void {
@@ -689,6 +652,21 @@ test "mixer schedules sample accurately" {
     try std.testing.expectEqual(@as(f32, 1), out[4]);
     try std.testing.expectEqual(@as(f32, 0.5), out[6]);
     try std.testing.expectEqual(@as(f32, 0), out[8]);
+}
+
+test "the PortAudio callback mixes each buffer it is asked for and keeps the clock" {
+    const e = try Engine.create(std.testing.allocator);
+    defer e.destroy();
+    const data = [_]f32{ 1, 1, 0.5, 0.5 };
+    const samples = [_]decode.Sample{.{ .data = @constCast(&data) }};
+    const sched = [_]Sched{.{ .frame = 1, .wav = 0 }};
+    e.samples = &samples;
+    e.schedule = &sched;
+    var out: [64]f32 = undefined;
+    try std.testing.expectEqual(@as(c_int, c.paContinue), Engine.paCallback(null, &out, 32, null, 0, e));
+    try std.testing.expectEqual(@as(f32, 1), out[2]);
+    try std.testing.expectEqual(@as(i64, 32), e.frame.load(.acquire));
+    try std.testing.expect(e.clock_valid.load(.acquire));
 }
 
 test "tick clock stays fixed after settling and audio follows it" {
