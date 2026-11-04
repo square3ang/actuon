@@ -1,4 +1,3 @@
-//! Drawing layer over sokol_gfx: rectangles, cached text, textures, all batched per frame.
 const std = @import("std");
 const i18n = @import("i18n.zig");
 const c = @import("c");
@@ -85,13 +84,12 @@ pub const Texture = struct {
     /// Zero until it has pixels; drawn as white until then.
     image: c.sg_image = .{ .id = 0 },
     view: c.sg_view = .{ .id = 0 },
-    /// `streamTexture` writes here, then copies into `image`.
     staging: c.sg_image = .{ .id = 0 },
     w: f32,
     h: f32,
 };
 
-/// A movie frame after FSRCNNX. `tex` is what gets drawn, with the source's size so source rects still fit.
+/// `tex` keeps the source's size so source rects still fit.
 pub const Scaled = struct {
     tex: *Texture,
     images: [up_passes.len]c.sg_image,
@@ -133,7 +131,6 @@ const Cmd = struct {
     count: u32,
 };
 
-/// A frame's geometry. Draw order is kept; a new draw call starts only when state must change.
 const Batch = struct {
     verts: std.ArrayList(Vertex) = .empty,
     idx: std.ArrayList(u32) = .empty,
@@ -224,8 +221,7 @@ const vert_spv align(4) = if (os == .linux) @embedFile("sprite.vert").* else {};
 const frag_spv align(4) = if (os == .linux) @embedFile("sprite.frag").* else {};
 const shader_entry: [*c]const u8 = if (os == .macos) "main0" else "main";
 
-/// FSRCNNX's layers, each writing the image with its own index. `inputs` are earlier images, the movie being -1.
-/// All work at the movie's size but the last, which is twice it.
+/// FSRCNNX's layers: each lists the earlier images it reads (-1 is the movie); only the last doubles the size.
 const up_passes = [_][]const i8{
     &.{-1},
     &.{-1},
@@ -263,7 +259,6 @@ fn shaderFunc(comptime name: []const u8, comptime target: [*:0]const u8) c.sg_sh
 pub const Gfx = struct {
     gpa: std.mem.Allocator,
     win: *c.SDL_Window,
-    /// Upscale movies with FSRCNNX.
     upscale_on: bool = false,
     upscale_tried: bool = false,
     /// Zero ids when the GPU can't run it.
@@ -273,7 +268,6 @@ pub const Gfx = struct {
     reflex_wanted: ?i32 = null,
     pipelines: [2]c.sg_pipeline = undefined, // blend, add
     samplers: [2]c.sg_sampler = undefined, // linear, nearest
-    /// Bound for draws of nothing but shapes.
     white: *Texture = undefined,
     batch: Batch = .{},
     state: State = .{},
@@ -285,10 +279,8 @@ pub const Gfx = struct {
     ibuf_size: usize = 0,
     fonts: [font_sizes.len]?*c.TTF_Font = @splat(null),
     cjk_fonts: [font_sizes.len][max_cjk_fonts]?*c.TTF_Font = @splat(@splat(null)),
-    /// Font file for the next text calls, null for the built-in one.
     text_font: ?[:0]const u8 = null,
-    /// Opened skin fonts by file and exact size; null remembers a file that would not open.
-    /// shortcut: kept until exit and only TTF/OTF, bitmap .fnt files show in the built-in font.
+    /// Null remembers a file that would not open. shortcut: kept until exit and only TTF/OTF, bitmap .fnt files show in the built-in font.
     file_fonts: std.AutoHashMapUnmanaged(u64, ?*c.TTF_Font) = .empty,
     text_cache: std.AutoHashMapUnmanaged(TextKey, TextEntry) = .empty,
     frame: u64 = 0,
@@ -297,7 +289,7 @@ pub const Gfx = struct {
     w: f32 = 1280,
     h: f32 = 720,
 
-    /// Mouse for this frame, in render pixels. Widgets read it while they draw.
+    /// In render pixels.
     mx: f32 = -1,
     my: f32 = -1,
     down: bool = false,
@@ -376,8 +368,7 @@ pub const Gfx = struct {
         return d;
     }
 
-    /// Textures at bindings 0..count, all paired with sampler slot 0 at `sampler_binding`. sokol refuses
-    /// a texture outside a pair, even one the shader only reads with textureLoad.
+    /// Every texture is paired with sampler slot 0: sokol refuses an unpaired one, even one only read with textureLoad.
     fn fragmentTextures(s: *c.sg_shader_desc, count: usize, sampler_binding: u8) void {
         for (0..count) |b| {
             s.views[b].texture.stage = c.SG_SHADERSTAGE_FRAGMENT;
@@ -489,8 +480,7 @@ pub const Gfx = struct {
         g.reflex_wanted = mode;
     }
 
-    /// Call before anything the frame samples. Under vsync the loop blocks in `present`, just before this,
-    /// so input and the song clock are read just after the wait, at a steady phase of the refresh.
+    /// Call before anything the frame samples, so input and the song clock are read at a steady phase of the refresh.
     pub fn waitFrame(g: *Gfx) void {
         if (g.vsync_wanted) |mode| c.rb_set_vsync(mode);
         g.vsync_wanted = null;
@@ -511,7 +501,6 @@ pub const Gfx = struct {
         if (g.text_cache.count() > 2048) g.evict();
     }
 
-    /// Window coordinates of an event to the pixels everything draws in.
     pub fn pixelDensity(g: *const Gfx) f32 {
         return c.SDL_GetWindowPixelDensity(g.win);
     }
@@ -533,7 +522,6 @@ pub const Gfx = struct {
         g.batch.push(g.gpa, null, g.state, v, idx);
     }
 
-    /// Draws part of a texture, all of it when `src` is null.
     pub fn sprite(g: *Gfx, t: *Texture, src: ?c.SDL_FRect, dst: c.SDL_FRect, o: SpriteOptions) void {
         const v = spriteVerts(t.w, t.h, src orelse .{ .x = 0, .y = 0, .w = t.w, .h = t.h }, dst, o);
         var state = g.state;
@@ -542,7 +530,6 @@ pub const Gfx = struct {
         g.batch.push(g.gpa, t, state, &v, &.{ 0, 1, 2, 0, 2, 3 });
     }
 
-    /// A sprite whose opacity runs from `left_a` to `right_a`, so it can melt into what is under it.
     pub fn spriteHFade(g: *Gfx, t: *Texture, src: c.SDL_FRect, dst: c.SDL_FRect, left_a: u8, right_a: u8) void {
         var v = spriteVerts(t.w, t.h, src, dst, .{});
         v[0].col[3] = left_a;
@@ -555,7 +542,6 @@ pub const Gfx = struct {
         g.batch.push(g.gpa, t, state, &v, &.{ 0, 1, 2, 0, 2, 3 });
     }
 
-    /// A texture to fill with `updateTexture`.
     pub fn createTexture(g: *Gfx, w: c_int, h: c_int) ?*Texture {
         if (w <= 0 or h <= 0) return null;
         const t = g.gpa.create(Texture) catch return null;
@@ -563,9 +549,7 @@ pub const Gfx = struct {
         return t;
     }
 
-    /// Replaces a texture's pixels (RGBA, `pitch` bytes a row). Takes effect for this frame's draws,
-    /// which are only recorded at `present`.
-    /// Waits for the GPU to go idle under Vulkan, so per-frame pixels belong in `streamTexture`.
+    /// RGBA, `pitch` bytes a row. Waits for the GPU to go idle under Vulkan, so per-frame pixels belong in `streamTexture`.
     pub fn updateTexture(g: *Gfx, t: *Texture, px: [*]const u8, pitch: usize) void {
         const w: usize = @intFromFloat(t.w);
         const h: usize = @intFromFloat(t.h);
@@ -595,8 +579,7 @@ pub const Gfx = struct {
         t.view = view;
     }
 
-    /// Replaces a whole texture's pixels (RGBA, tightly packed) without waiting for the GPU.
-    /// At most once a frame, outside a pass; a texture must only ever take one of this and `updateTexture`.
+    /// RGBA, tightly packed; at most once a frame, outside a pass, and never mixed with `updateTexture` on one texture.
     pub fn streamTexture(g: *Gfx, t: *Texture, px: [*]const u8) void {
         const w: c_int = @intFromFloat(t.w);
         const h: c_int = @intFromFloat(t.h);
@@ -641,8 +624,6 @@ pub const Gfx = struct {
         c.sg_copy_image_to_image(&copy);
     }
 
-    /// What to draw for a movie this frame: FSRCNNX's output when the movie is being enlarged,
-    /// else the movie itself. Only reruns the model when `stale`.
     pub fn upscaled(g: *Gfx, src: *Texture, out: *?Scaled, stale: *bool, from: c.SDL_FRect, to: c.SDL_FRect) *Texture {
         if (!g.upscale_on or g.up_merge.id == 0 or src.view.id == 0 or from.w <= 0 or from.h <= 0) return src;
         var pw: c_int = 0;
@@ -792,7 +773,6 @@ pub const Gfx = struct {
         c.sg_write_buffer_transient(&d);
     }
 
-    /// Sends the frame's draws to the backbuffer.
     fn record(g: *Gfx, hold_present: bool) void {
         defer g.batch.reset();
         const ready = g.batch.cmds.items.len > 0;
@@ -852,7 +832,6 @@ pub const Gfx = struct {
         g.push(&v, &idx);
     }
 
-    /// The menus' backdrop: a night sky under a dim, so text stays readable.
     pub fn backdrop(g: *Gfx) void {
         if (!g.backdrop_tried) {
             g.backdrop_tried = true;
@@ -879,7 +858,7 @@ pub const Gfx = struct {
         g.quad(.{ vert(x, y, left), vert(x + w, y, right), vert(x + w, y + h, right), vert(x, y + h, left) });
     }
 
-    /// Arc as a strip. `from`, `to` in radians; a full circle when they differ by tau.
+    /// `from`, `to` in radians.
     pub fn ring(g: *Gfx, cx: f32, cy: f32, r: f32, thick: f32, from: f32, to: f32, col: Color) void {
         const segs = 48;
         var v: [2 * (segs + 1)]Vertex = undefined;
@@ -909,7 +888,7 @@ pub const Gfx = struct {
         g.quad(.{ vert(x0 + nx, y0 + ny, col), vert(x1 + nx, y1 + ny, col), vert(x1 - nx, y1 - ny, col), vert(x0 - nx, y0 - ny, col) });
     }
 
-    /// Light adds up while this is on: bombs, beams, glows. Sprites choose their own blending.
+    /// Sprites choose their own blending.
     pub fn additive(g: *Gfx, on: bool) void {
         g.state.add = on;
     }
@@ -918,7 +897,6 @@ pub const Gfx = struct {
         return g.mx >= x and g.mx < x + w and g.my >= y and g.my < y + h;
     }
 
-    /// True once for a click inside the box; the click is then used up.
     pub fn clickIn(g: *Gfx, x: f32, y: f32, w: f32, h: f32) bool {
         if (!g.clicked or !g.hit(x, y, w, h)) return false;
         g.clicked = false;
@@ -945,14 +923,12 @@ pub const Gfx = struct {
         g.push(&v, &idx);
     }
 
-    /// Plain rounded plate with a small label.
     pub fn panel(g: *Gfx, x: f32, y: f32, w: f32, h: f32, label: []const u8) void {
         const u = g.h / 720;
         g.round(x, y, w, h, 8 * u, plate.alpha(225));
         if (label.len > 0) _ = g.text(label, x + 10 * u, y + 4 * u, g.scaled(12), dim);
     }
 
-    /// Fixed-width number with dim leading zeros, like a scoreboard.
     pub fn digits(g: *Gfx, right: f32, y: f32, size: u16, cells: u8, value: u64, col: Color) void {
         const cell = g.measure("0", size);
         var v = value;
@@ -965,7 +941,6 @@ pub const Gfx = struct {
         }
     }
 
-    /// Text with a dark edge so it reads over notes, scaled about its middle for pops.
     pub fn textPop(g: *Gfx, s: []const u8, cx: f32, y: f32, size: u16, col: Color, scale: f32) void {
         const edge = g.textEntry(s, size, .{ .r = 4, .g = 8, .b = 20 }) orelse return;
         const o = @as(f32, @floatFromInt(size)) * 0.05 + 1;
@@ -979,7 +954,6 @@ pub const Gfx = struct {
         g.sprite(e.tex, null, .{ .x = cx - w / 2, .y = top, .w = w, .h = h }, .{ .col = opaque_white.alpha(col.a) });
     }
 
-    /// Limits drawing to a box until `unclip`.
     pub fn clip(g: *Gfx, x: f32, y: f32, w: f32, h: f32) void {
         g.state.clip = .{ .x = @intFromFloat(x), .y = @intFromFloat(y), .w = @intFromFloat(w), .h = @intFromFloat(h) };
     }
@@ -988,7 +962,6 @@ pub const Gfx = struct {
         g.state.clip = null;
     }
 
-    /// A size from the 720p design, scaled to the window.
     pub fn scaled(g: *const Gfx, n: f32) u16 {
         return @intFromFloat(@round(n * g.h / 720));
     }
@@ -1015,8 +988,7 @@ pub const Gfx = struct {
     pub const Size = struct { w: f32, h: f32 };
     const opaque_white: Color = .{ .r = 255, .g = 255, .b = 255 };
 
-    /// SDL_ttf hangs a fallback glyph from its own font's ascent, which sits it below the main baseline,
-    /// so each CJK run is rendered with its own font and placed on the main font's baseline by hand.
+    /// SDL_ttf sets a fallback glyph below the main baseline, so each CJK run is rendered alone and placed by hand.
     fn renderRuns(g: *Gfx, main: *c.TTF_Font, size: u16, s: []const u8, col: c.SDL_Color) ?*c.SDL_Surface {
         const picker: GlyphFont = .{ .main = main, .cjk = &g.cjk_fonts[fontIndex(size)] };
         if (runEnd(s, 0, picker) == s.len and picker.of(decodeAt(s, 0).cp) == main) {
@@ -1104,7 +1076,6 @@ pub const Gfx = struct {
         return e.w;
     }
 
-    /// Text clipped to `max_w`.
     pub fn textClip(g: *Gfx, s: []const u8, x: f32, y: f32, max_w: f32, size: u16, col: Color) void {
         const e = g.textEntry(s, size, col) orelse return;
         const w = @min(e.w, max_w);
@@ -1117,7 +1088,6 @@ pub const Gfx = struct {
         _ = g.text(s, x, y, size, col);
     }
 
-    /// `fmt` for text with a row in i18n.
     pub fn fmtTr(g: *Gfx, x: f32, y: f32, size: u16, col: Color, comptime f: []const u8, args: anytype) void {
         var buf: [512]u8 = undefined;
         const s = i18n.bufPrint(&buf, f, args) catch return;
@@ -1130,8 +1100,7 @@ pub const Gfx = struct {
         c.rb_present();
     }
 
-    /// Writes this frame to a BMP and presents it, in place of `present`. False when nothing was saved.
-    // shortcut: BMP needs no new library, encode PNG in a thread if the files or the hitch bother players.
+    /// Replaces `present`; false when nothing was saved. shortcut: BMP needs no new library, encode PNG in a thread if the files or the hitch bother players.
     pub fn saveShot(g: *Gfx, path: [*:0]const u8) bool {
         defer g.reapTextures();
         g.record(true);
@@ -1164,7 +1133,6 @@ pub fn imageFits(bytes: []const u8, max_px: i64) bool {
     return @as(i64, w) * h <= max_px;
 }
 
-/// Loads an image file into a texture with stb_image.
 pub fn loadTexture(g: *Gfx, path: []const u8, bytes: []const u8) ?*Texture {
     _ = path;
     if (!imageFits(bytes, max_skin_image_px)) return null;
@@ -1216,7 +1184,6 @@ fn decodeAt(s: []const u8, at: usize) struct { cp: u32, len: usize } {
     return .{ .cp = cp, .len = len };
 }
 
-/// Where the run of glyphs from one font, starting at `at`, ends.
 fn runEnd(s: []const u8, at: usize, picker: anytype) usize {
     const first = picker.of(decodeAt(s, at).cp);
     var i = at + decodeAt(s, at).len;

@@ -1,4 +1,3 @@
-//! User settings, persisted as JSON in the data directory.
 const std = @import("std");
 const fs = @import("../platform/fs.zig");
 const input = @import("../input/input.zig");
@@ -8,7 +7,6 @@ const table = @import("../table/table.zig");
 const default_download_url = "https://gingerrush.com/download/package/{md5}";
 
 pub const Config = struct {
-    /// The most of the lane that lift and the lane cover may take between them.
     const max_covered = 0.9;
 
     pub fn setLift(cfg: *Config, v: f32) void {
@@ -29,12 +27,10 @@ pub const Config = struct {
         cfg.setHidden(cfg.hidden);
     }
 
-    /// The share of the lane notes fall through, top cover to judge line.
     pub fn openLane(cfg: *const Config) f32 {
         return 1 - cfg.liftShown() - cfg.coverShown();
     }
 
-    /// What play draws: a cover switched off keeps its amount for when it is back on.
     pub fn coverShown(cfg: *const Config) f32 {
         return if (cfg.lane_cover_on) cfg.lane_cover else 0;
     }
@@ -53,21 +49,18 @@ pub const Config = struct {
     height: u32 = 720,
     fullscreen: bool = false,
     vsync: i32 = 1,
-    /// Frames per second at most; 0 leaves it to VSync.
+    /// 0 leaves it to VSync.
     fps_limit: u32 = 0,
     /// 0 off, 1 on, 2 on with Boost.
     reflex: i32 = 0,
-    /// Deblocks BGA movies and upscales them with FSRCNNX instead of plain filtering.
     bga_upscale: bool = true,
-    /// Off skips loading BGA images and movies.
     bga: bool = true,
-    /// With BGA on, shows it in autoplay and replays only: beatoraja's AUTO.
     bga_auto: bool = false,
     audio_rate: u32 = 48000,
     audio_frames: u32 = 128,
-    /// PortAudio name of an output. Empty picks the output automatically.
+    /// Empty picks the output automatically.
     audio_device: []const u8 = "",
-    /// Key sampling rate during play in Hz. 0 uses OS key events instead, which on Linux carry evdev's kernel timestamps.
+    /// Hz. 0 uses OS key events instead, which on Linux carry evdev's kernel timestamps.
     input_poll_hz: u32 = if (@import("builtin").os.tag == .linux) 0 else 1000,
     volume: f32 = 0.8,
     bgm_volume: f32 = 0.5,
@@ -94,63 +87,51 @@ pub const Config = struct {
     ln_mode: u8 = 0,
     /// What a play is measured against, an index into play.pace_targets.
     pace_target: u8 = 0,
-    /// The versus score board sits on the left instead of the right.
     versus_panel_left: bool = false,
     /// 0 start BPM, 1 max BPM, 2 main BPM (mode of the chart), 3 off (classic HS), 4 min BPM.
     hs_fix: u8 = 2,
-    /// Changing the lane cover during play takes the BPM playing now as the reference: beatoraja's HS auto adjust.
     hs_auto_adjust: bool = false,
-    /// Green number: milliseconds a note is visible at the reference BPM.
+    /// ms a note is visible at the reference BPM.
     green_ms: u32 = 600,
     lane_cover: f32 = 0,
-    /// Fractions of the lane: raises the judge line, and hides notes just above it.
+    /// Fractions of the lane.
     lift: f32 = 0,
     hidden: f32 = 0,
-    /// Off keeps the amount but draws nothing, as beatoraja's on/off for each.
     lane_cover_on: bool = true,
     lift_on: bool = true,
     hidden_on: bool = true,
-    /// Notes appear the green number's time before the line whatever the BPM does: beatoraja's CONSTANT.
     constant: bool = false,
-    /// After each play, moves the judge offset by that play's average timing.
     judge_auto_adjust: bool = false,
     assist: Assists = .{},
-    /// The default skin; a slot in `skins` overrides it.
     skin: []const u8 = "",
     skins: SkinSlots = .{},
-    /// A folder holding select and decide music, ahead of the skin's. Empty for the skin's own.
+    /// Wins over the skin's music; empty for the skin's own.
     bgm_path: []const u8 = "",
-    /// The folder picked to search for music sets, any player's.
     bgm_root: []const u8 = "",
-    /// A folder of system sounds, ahead of the skin's. Empty for the skin's own.
+    /// Wins over the skin's sounds; empty for the skin's own.
     sound_path: []const u8 = "",
     sound_root: []const u8 = "",
-    /// An i18n language code. Empty follows the OS language.
+    /// Empty follows the OS language.
     language: []const u8 = "",
     ir_url: []const u8 = "https://ir.actuon.app",
     ir_token: []const u8 = "",
-    /// Off keeps failed plays off the IR, as beatoraja's "Complete song". Versus rounds always send.
     ir_send_failed: bool = true,
     /// Either a direct archive or a JSON answer naming one (see download.packageUrl).
     download_url: []const u8 = default_download_url,
-    /// scancode (or joystick code) per physical button: 7 keys, scratch A, scratch B for each side.
-    /// `p1` is the 7 key layout; the rest of the double layouts start from these two.
+    /// Scancode or joystick code per button: 7 keys, scratch A, B. `p1` is 7 key; double layouts start from these.
     p1: [9]u16 = .{ 29, 22, 27, 7, 6, 9, 25, 225, 224 },
     p2: [9]u16 = .{ 16, 14, 54, 15, 55, 51, 56, 229, 228 },
-    /// PMS: 9 buttons
     pms: [9]u16 = .{ 4, 22, 7, 9, 44, 13, 14, 15, 51 },
-    /// Per side: keys, scratch A, scratch B. Null until set, which keeps an older config's keys.
+    /// Null until set, which keeps an older config's keys.
     keys5: ?[7]u16 = null,
     keys10: ?[14]u16 = null,
     keys14: ?[18]u16 = null,
     keys4: [4]u16 = .{ 7, 9, 13, 14 },
     keys6: [6]u16 = .{ 22, 7, 9, 13, 14, 15 },
-    /// Song select takes the 7 key inputs as beatoraja does, with option panels on Start and Select.
     beatoraja_select: bool = false,
-    /// beatoraja's defaults, Q and W.
+    /// Q and W, as beatoraja.
     start_select: [2]u16 = .{ 20, 26 },
 
-    /// What a slot shows, empty for the built-in look.
     pub fn skinFor(cfg: *const Config, slot: SkinSlot) []const u8 {
         const v = cfg.skins.get(slot);
         if (std.mem.eql(u8, v, builtin_skin)) return "";
@@ -158,7 +139,6 @@ pub const Config = struct {
     }
 };
 
-/// The layout for a mode, filled in from the older shared one the first time it is needed.
 pub fn keysOf(cfg: *Config, mode: core.types.Mode) []u16 {
     switch (mode) {
         .popn9 => return &cfg.pms,
@@ -184,7 +164,6 @@ fn sideOf5(side: [9]u16) [7]u16 {
     return side[0..5].* ++ side[7..9].*;
 }
 
-/// The options a replay records, as set. `load` keeps every field in range.
 pub fn playOptions(cfg: *const Config, seed: u64) core.replay.Replay {
     return .{
         .gauge = @fromBackingInt(cfg.gauge_type),
@@ -199,10 +178,9 @@ pub fn playOptions(cfg: *const Config, seed: u64) core.replay.Replay {
     };
 }
 
-/// beatoraja's assists, in its order. Any of them keeps the play from being saved.
+/// In beatoraja's order. Any of them keeps the play from being saved.
 pub const Assists = struct {
     expand_judge: bool = false,
-    /// Notes scroll at one speed through BPM changes and stops.
     constant: bool = false,
     judge_area: bool = false,
     legacy: bool = false,
@@ -212,14 +190,13 @@ pub const Assists = struct {
 
     pub const names = [_][]const u8{ "EXPAND JUDGE", "CONSTANT", "JUDGE AREA", "LEGACY NOTE", "MARK NOTE", "BPM GUIDE", "NO MINE" };
 
-    /// The `i`th in beatoraja's order, below `names.len`. `a` is a pointer, const or not.
+    /// `i` below `names.len`; `a` is a pointer, const or not.
     pub fn flag(a: anytype, i: usize) @TypeOf(&a.expand_judge) {
         inline for (@typeInfo(Assists).@"struct".field_names, 0..) |name, k| if (k == i) return &@field(a, name);
         unreachable;
     }
 };
 
-/// What a play changes that a replay cannot record.
 pub const Assist = struct {
     battle: bool = false,
     auto_scratch: bool = false,
@@ -295,11 +272,9 @@ pub fn path(gpa: std.mem.Allocator) ![]u8 {
     return std.fmt.allocPrint(gpa, "{s}config.json", .{dir});
 }
 
-/// The result's strings live in `a`. A broken file falls back to defaults rather than blocking startup.
-/// A screen or key mode with a skin of its own. Tags match the fields of SkinSlots.
+/// Tags match the fields of SkinSlots.
 pub const SkinSlot = enum { select, decide, result, beat7, beat5, beat14, beat10, popn9, beat4, beat6 };
 
-/// In a slot: the built-in look, whatever the default skin is.
 pub const builtin_skin = "builtin";
 
 /// Empty means the default skin. Otherwise a skin file, or a folder searched for the right type.
@@ -337,7 +312,6 @@ test "a slot overrides the default skin, and can ask for the built-in look" {
     try std.testing.expectEqualStrings("", cfg.skinFor(.result));
 }
 
-/// Set when `load` could not read the file, so the game can tell the player.
 pub var set_aside = false;
 
 /// The defaults are saved on exit: keep the player's settings out of their way.
@@ -354,6 +328,7 @@ fn setAside(a: std.mem.Allocator, p: []const u8, why: anyerror) void {
 /// Set when the unreadable file could not be moved: `save` then leaves it alone.
 pub var stuck = false;
 
+/// The result's strings live in `a`. A broken file falls back to defaults rather than blocking startup.
 pub fn load(a: std.mem.Allocator) Config {
     const p = path(a) catch return .{};
     const bytes = fs.readAlloc(a, p, 1 << 20) catch |e| {
@@ -371,8 +346,7 @@ pub fn load(a: std.mem.Allocator) Config {
     return cfg;
 }
 
-/// Settings refuses plain HTTP to the internet, but an older save may hold one: its token would
-/// go out readable with every request, and the next sign-in its password.
+/// An older save may hold plain HTTP to the internet, which would send its token and next password readable.
 fn dropPlainIr(cfg: *Config) void {
     if (!table.sendsInClear(cfg.ir_url)) return;
     std.log.warn("IR address {s} is plain HTTP on the internet: signed out, back to the default", .{cfg.ir_url});
@@ -400,7 +374,6 @@ pub fn save(gpa: std.mem.Allocator, cfg: Config) !void {
 
 pub const Binding = struct { lane: u8, key: u8 };
 
-/// Input code to lane table for a mode.
 pub fn bindings(cfg: *const Config, mode: core.types.Mode) [input.code_count]?Binding {
     var t: [input.code_count]?Binding = @splat(null);
     const put = struct {
@@ -442,7 +415,6 @@ test "each mode keeps its own keys, and old configs carry over" {
     try std.testing.expectEqual(@as(u8, 6), bindings(&cfg, .beat10)[102].?.lane);
     try std.testing.expectEqual(@as(u8, 8), bindings(&cfg, .beat14)[102].?.lane);
 
-    // Changing 5 key leaves 7 key alone.
     keysOf(&cfg, .beat5)[0] = 200;
     try std.testing.expectEqual(@as(u8, 0), bindings(&cfg, .beat5)[200].?.lane);
     try std.testing.expect(bindings(&cfg, .beat7)[200] == null);

@@ -1,4 +1,3 @@
-//! Result screen; also records the score and the replay.
 const std = @import("std");
 const select = @import("select.zig");
 const c = @import("c");
@@ -17,10 +16,9 @@ const App = app_mod.App;
 
 pub const clear_names = [_][]const u8{ "NO PLAY", "FAILED", "ASSIST EASY", "LIGHT ASSIST", "EASY", "NORMAL", "HARD", "EX HARD", "FULL COMBO", "PERFECT", "MAX" };
 
-/// 5 ms a bin, over the widest window a hit can land in.
+/// Covers the widest window a hit can land in.
 pub const timing_bins = 61;
 const timing_bin_us = 5_000;
-/// Too few hits say nothing about a player's offset.
 const offset_min_hits = 32;
 
 pub const TimingStats = struct {
@@ -30,7 +28,6 @@ pub const TimingStats = struct {
     mean_fast_us: i32 = 0,
     deviation_us: u32 = 0,
 
-    /// The judge offset that centres this play's hits, when there are enough to say.
     pub fn suggestedOffsetMs(t: *const TimingStats, current_ms: i32) ?i32 {
         if (t.hits < offset_min_hits) return null;
         return current_ms - @divTrunc(t.mean_fast_us, 1000);
@@ -76,7 +73,6 @@ pub const State = struct {
     music_slot: ?u8 = null,
     recorded: bool = false,
     shown_at: u64 = 0,
-    /// When a key started the skin's fade out; the screen ends with it.
     leave_at: u64 = 0,
     ir_used: bool = false,
     paused: bool = false,
@@ -149,7 +145,6 @@ pub fn capture(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, nat
     const finished = natural and !snap.failed;
     r.clear = s.sim.clear(finished);
     r.assisted = s.params.assist.any();
-    // beatoraja's lamps for a cleared assisted play.
     if (r.assisted and @backingInt(r.clear) >= @backingInt(core.types.Clear.light_assist_easy)) {
         r.clear = if (s.params.assist.judging()) .assist_easy else .light_assist_easy;
     }
@@ -264,7 +259,6 @@ fn drawSkinned(a: *App, sk: *@import("../skin/model.zig").Skin) void {
     if (r.leave_at != 0 and now - r.leave_at >= @as(u64, @intCast(std.math.clamp(skin.fadeout_ms, 0, 5000)))) a.scene = .select;
 }
 
-/// The title, the clear banner, which slides in, and the rank.
 fn drawHeadline(a: *App, ease: f32, ex: u32) void {
     const g = &a.g;
     const r = &a.res;
@@ -282,7 +276,6 @@ fn drawHeadline(a: *App, ease: f32, ex: u32) void {
     g.textPop(rankOf(ex, r.notes), rcx, rcy - 86 * u, g.scaled(144), gfx.white, pop);
 }
 
-/// EX counts up while the banner lands.
 fn drawExPanel(a: *App, ease: f32, ex: u32) void {
     const g = &a.g;
     const r = &a.res;
@@ -310,7 +303,6 @@ fn drawExPanel(a: *App, ease: f32, ex: u32) void {
     if (r.ir_used) g.textRight(irLabel(r, &place), g.w * 0.48 - 30 * u, lamp_y + 14 * u, g.scaled(14), gfx.sky);
 }
 
-/// Judges slide in from the right, one after another. Stats and the gauge follow.
 fn drawJudges(a: *App, age_ms: f32) void {
     const g = &a.g;
     const r = &a.res;
@@ -350,7 +342,6 @@ fn drawJudges(a: *App, age_ms: f32) void {
     g.textRight(std.fmt.bufPrint(&buf, "{d:.1}%", .{r.snap.gauge}) catch "", x0 + w - 10 * u, y + 12 * u, g.scaled(20), gfx.white);
 }
 
-/// How early and late the hits were, centre line at the note, with the mean and the offset it suggests.
 fn drawTiming(a: *App, x: f32, y: f32, w: f32, h: f32) void {
     const g = &a.g;
     const t = &a.res.timing;
@@ -429,7 +420,6 @@ test "timing stats bin presses, skip misses and suggest an offset that centres t
     // Pressing 10 ms early needs an offset 10 ms lower.
     try std.testing.expectEqual(@as(?i32, -7), t.suggestedOffsetMs(3));
     try std.testing.expectEqual(@as(?i32, null), timingStats(hits[0..5]).suggestedOffsetMs(0));
-    // A far late hit lands in the last bin, not out of range.
     const late = [_]session_mod.TimedHit{.{ .fast_us = -500_000, .judge = 3 }};
     try std.testing.expectEqual(@as(u32, 1), timingStats(&late).bins[timing_bins - 1]);
 }

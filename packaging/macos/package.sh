@@ -1,8 +1,4 @@
 #!/bin/sh
-# Builds actuon.app and actuon.dmg. Needs zig 0.17, dylibbundler, and the libraries from README.md (Homebrew).
-# Signing and notarization run when these are set:
-#   CODESIGN_IDENTITY  e.g. "Developer ID Application: Name (TEAMID)"
-#   NOTARY_PROFILE     a profile stored with `xcrun notarytool store-credentials`
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 out="$root/zig-out/package"

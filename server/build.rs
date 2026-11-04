@@ -1,5 +1,4 @@
-// libactuon_core.a comes from `zig build core` in the repository root. The static build for deployment
-// links one built for musl, kept in zig-out/musl so it never replaces the one tests use.
+// libactuon_core.a comes from `zig build core`; the musl deploy build uses zig-out/musl so tests keep theirs.
 fn main() {
     let root = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let out = if std::env::var("TARGET").unwrap().ends_with("musl") {

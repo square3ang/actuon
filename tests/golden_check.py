@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compares chartdump with the stored beatoraja parser output: golden_check.py CHARTDUMP [--update-from FILE]."""
+"""Usage: golden_check.py CHARTDUMP [--update-from FILE]"""
 import os, subprocess, sys, tempfile
 root = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'charts')
 os.chdir(root)

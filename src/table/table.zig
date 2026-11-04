@@ -1,5 +1,4 @@
-//! Difficulty tables in the bmstable format: an HTML page with a meta tag pointing at a
-//! header JSON, which points at a data JSON. Courses come from the header's "course" field.
+//! bmstable difficulty tables: HTML meta tag to header JSON (with "course") to data JSON.
 const std = @import("std");
 const core = @import("actuon_core");
 const http = @import("../platform/http.zig");
@@ -7,7 +6,6 @@ const db_mod = @import("../db/db.zig");
 const Db = db_mod.Db;
 const J = std.json.Value;
 
-/// Value of `<meta name="bmstable" content="...">`, tolerant of attribute order and quoting.
 pub fn findMeta(html: []const u8) ?[]const u8 {
     var pos: usize = 0;
     while (std.ascii.findIgnoreCase(html[pos..], "<meta")) |off| {
@@ -108,7 +106,6 @@ fn storeCourse(a: std.mem.Allocator, st: db_mod.Stmt, url: []const u8, v: J) !vo
 
 pub const FetchResult = struct { songs: u32, courses: u32 };
 
-/// Parses already-downloaded JSON into the DB, replacing what was stored for `url`.
 pub fn store(gpa: std.mem.Allocator, d: Db, url: []const u8, head_bytes: []const u8, data_bytes: []const u8) !FetchResult {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -136,8 +133,7 @@ pub fn store(gpa: std.mem.Allocator, d: Db, url: []const u8, head_bytes: []const
 
     try d.exec("BEGIN");
     errdefer d.exec("ROLLBACK") catch {};
-    // A new course can reuse a freed id and must not inherit its score. Swept before the inserts too, because
-    // removing a table in settings leaves its courses' scores behind.
+    // A new course may reuse a freed id, and removing a table in settings leaves its scores behind.
     try d.exec("DELETE FROM course_score WHERE course_id NOT IN (SELECT id FROM course)");
     // Courses keep their rows, because their scores point at the ids. Empty hashes mark the ones to drop.
     for ([_][]const u8{ "DELETE FROM table_song WHERE url=?1", "UPDATE course SET hashes='' WHERE table_url=?1" }) |sql| {
@@ -214,8 +210,7 @@ fn urlHost(url: []const u8) ?[]const u8 {
     return if (std.mem.indexOfScalar(u8, host, '%') == null) host else null;
 }
 
-/// A hostile table must not make the game knock on the player's own network.
-/// shortcut: checks the written host, not where its name resolves or a redirect goes; check the connected address if that matters.
+/// shortcut: keeps hostile tables off the home network but checks the written host, not where its name resolves or a redirect goes; check the connected address if that matters.
 fn isPrivateHost(written: []const u8) bool {
     const host = std.mem.trimEnd(u8, written, ".");
     if (std.ascii.eqlIgnoreCase(host, "localhost") or std.ascii.endsWithIgnoreCase(host, ".localhost")) return true;

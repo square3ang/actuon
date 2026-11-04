@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end IR test: server re-simulation decides the score. Usage: ir_e2e.py SERVER_BIN MKREPLAY CHART WORKDIR"""
+"""Usage: ir_e2e.py SERVER_BIN MKREPLAY CHART WORKDIR"""
 import hashlib, json, os, socket, struct, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 
 server, mkreplay, chart, work = sys.argv[1:5]

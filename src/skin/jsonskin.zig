@@ -1,4 +1,3 @@
-//! beatoraja JSON skins and, through a table-to-JSON bridge, Lua skins; the native format is the same schema.
 const std = @import("std");
 const c = @import("c");
 const core = @import("actuon_core");
@@ -85,7 +84,6 @@ fn idOf(a: std.mem.Allocator, v: ?J) ![]const u8 {
     };
 }
 
-/// The option a property starts on: the one its `def` names, else its first.
 pub fn defaultItem(pv: J) ?std.json.ObjectMap {
     if (pv != .object) return null;
     const items = arr(pv.object.get("item"));
@@ -99,7 +97,7 @@ pub fn defaultItem(pv: J) ?std.json.ObjectMap {
     return chosen;
 }
 
-/// A player's choices for one skin folder, by the skin's own names. Names it no longer has do nothing.
+/// Keyed by the skin's own names; names it no longer has do nothing.
 pub const Conf = struct {
     property: std.json.ArrayHashMap([]const u8) = .{},
     file: std.json.ArrayHashMap([]const u8) = .{},
@@ -128,7 +126,7 @@ pub const Offset = struct {
     }
 };
 
-/// Makes the player's choices the skin's defaults, which is all the loaders read.
+/// The loaders read only defaults, so the player's choices are written over them.
 pub fn applyConf(a: std.mem.Allocator, head: J, conf: Conf) !void {
     if (head != .object) return;
     for ([_]struct { []const u8, std.StringArrayHashMapUnmanaged([]const u8) }{
@@ -145,7 +143,6 @@ pub fn applyConf(a: std.mem.Allocator, head: J, conf: Conf) !void {
     }
 }
 
-/// What a filepath entry's "dir/*.png|1|/foot" can stand for: names in `dir`, sorted.
 pub fn wildChoices(a: std.mem.Allocator, dir: []const u8, rel: []const u8) ![]const []const u8 {
     const star = std.mem.indexOfScalar(u8, rel, '*') orelse return &.{};
     const base_end = if (std.mem.lastIndexOfScalar(u8, rel[0..star], '/')) |i| i + 1 else 0;
@@ -171,8 +168,7 @@ pub fn wildChoices(a: std.mem.Allocator, dir: []const u8, rel: []const u8) ![]co
     return out.items;
 }
 
-/// Turns a skin's "dir/*.png|1|/foot" into a real path relative to `dir`: the file its `filepath`
-/// entry names by `def`, else the name closest to `def`. The |n| marks only tell entries apart.
+/// In "dir/*.png|1|/foot" the |n| marks only tell `filepath` entries apart.
 pub fn resolveWild(a: std.mem.Allocator, dir: []const u8, files: []const J, rel: []const u8) ![]const u8 {
     const star = std.mem.indexOfScalar(u8, rel, '*') orelse return rel;
     const base_end = if (std.mem.lastIndexOfScalar(u8, rel[0..star], '/')) |i| i + 1 else 0;
@@ -195,7 +191,6 @@ pub fn resolveWild(a: std.mem.Allocator, dir: []const u8, files: []const J, rel:
     return std.fmt.allocPrint(a, "{s}{s}{s}", .{ rel[0..base_end], best orelse return rel, foot });
 }
 
-/// "RRGGBBAA"; anything else is clear.
 fn hexColor(s: []const u8) gfx.Color {
     const v = std.fmt.parseInt(u32, s, 16) catch return .{ .r = 0, .g = 0, .b = 0, .a = 0 };
     if (s.len != 8) return .{ .r = 0, .g = 0, .b = 0, .a = 0 };
@@ -207,14 +202,11 @@ const Loader = struct {
     skin: *m.Skin,
     dir: []const u8,
     resolver: *const fn (i32) bool,
-    /// The header's filepath entries; a Lua body does not repeat them.
+    /// A Lua body does not repeat the header's filepath entries.
     head_files: []const J = &.{},
-    /// Offset id -> the player's values.
     offsets: std.AutoHashMapUnmanaged(i32, Offset) = .empty,
-    /// Font id -> file.
     fonts: std.StringHashMapUnmanaged([:0]const u8) = .empty,
     bitmaps: std.StringHashMapUnmanaged(*bitfont.BitmapFont) = .empty,
-    /// source id -> texture index
     sources: std.StringHashMapUnmanaged(i32) = .empty,
     paths: std.ArrayList(?[]const u8) = .empty,
     srcs: std.StringHashMapUnmanaged(m.Src) = .empty,
@@ -240,7 +232,6 @@ const Loader = struct {
         }
     }
 
-    /// Expands {"if":..,"value":..} items and {"include":..} in arrays and values, like JsonSkinSerializer.
     fn expand(l: *Loader, v: J, depth: u32) anyerror!J {
         if (depth > 32) return v;
         switch (v) {
@@ -366,7 +357,7 @@ const Loader = struct {
         out.keys = keys.items;
     }
 
-    /// A path the skin names, as a real file inside the skin folder or null.
+    /// Null unless the path is a real file inside the skin folder.
     fn assetPath(l: *Loader, raw: []const u8) !?[]const u8 {
         const rel = try l.a.dupe(u8, raw);
         std.mem.replaceScalar(u8, rel, '\\', '/');
@@ -707,7 +698,6 @@ test "hostile numbers in a JSON skin are bounded" {
     try std.testing.expectEqual(@as(i32, m.max_div), number.src.divx);
     try std.testing.expectEqual(@as(i32, 32), number.digits);
     try std.testing.expectEqual(@as(i32, m.max_parts), skin.objects[skin.objects.len - 1].parts);
-    // A condition nested past the stack: refused, not followed.
     const opens = try a.alloc(u8, 100_000);
     @memset(opens, '[');
     const closes = try a.alloc(u8, opens.len);

@@ -1,5 +1,3 @@
-//! The selected song's preview: one decoded at a time off the main thread, and only the playing
-//! one kept. What the audio thread may still read is freed a while after it stops being wanted.
 const std = @import("std");
 const c = @import("c");
 const fs = @import("../platform/fs.zig");
@@ -13,11 +11,9 @@ const Job = struct {
     gpa: std.mem.Allocator,
     rate: u32,
     path: []const u8,
-    /// `path` is a chart with no preview of its own, so one is mixed from its sounds.
     from_chart: bool,
     data: []f32 = &.{},
     done: std.atomic.Value(bool) = .init(false),
-    /// Set once the cursor has moved on, so a slow mix stops early.
     cancel: std.atomic.Value(bool) = .init(false),
     thread: ?*c.SDL_Thread = null,
 
@@ -34,7 +30,7 @@ const Job = struct {
         return (try decode.decode(std.heap.page_allocator, bytes, j.path, j.rate)).data;
     }
 
-    /// Joins, and hands over `path`, which the caller keeps or frees.
+    /// Hands over `path`, which the caller keeps or frees.
     fn finish(j: *Job) []const u8 {
         if (j.thread) |t| c.SDL_WaitThread(t, null);
         const path = j.path;
@@ -48,7 +44,6 @@ const Retired = struct { data: []const f32, at: u64 };
 pub const Preview = struct {
     gpa: std.mem.Allocator,
     rate: u32,
-    /// What should play; empty for the menu music.
     current: []const f32 = &.{},
     current_path: []const u8 = "",
     job: ?*Job = null,
@@ -59,8 +54,6 @@ pub const Preview = struct {
         p.retired.append(p.gpa, .{ .data = data, .at = now }) catch {};
     }
 
-    /// Call each frame of song select. `path` is the preview wanted, null for none, or with
-    /// `from_chart` a chart to mix one from. An old preview keeps playing until the new one is ready.
     pub fn tick(p: *Preview, path: ?[]const u8, from_chart: bool, now: u64) void {
         var i: usize = 0;
         while (i < p.retired.items.len) {
@@ -82,7 +75,6 @@ pub const Preview = struct {
                 p.current = data;
                 p.current_path = job_path;
             } else {
-                // Never played: the cursor moved on while it decoded.
                 if (data.len > 0) std.heap.page_allocator.free(data);
                 p.gpa.free(job_path);
             }
@@ -117,7 +109,6 @@ pub const Preview = struct {
     }
 };
 
-/// The file a folder offers as its preview when the chart names none, such as preview_music.ogg.
 pub fn isPreviewFile(name: []const u8, exts: []const []const u8) bool {
     const bare = if (std.mem.startsWith(u8, name, "_")) name[1..] else name;
     if (!std.ascii.startsWithIgnoreCase(bare, "preview")) return false;
@@ -163,7 +154,6 @@ test "a preview still mixing for a chart the cursor left is told to stop, then d
     try std.testing.expect(j.cancel.load(.acquire));
     j.data = try std.heap.page_allocator.alloc(f32, 2);
     j.done.store(true, .release);
-    // Its mix is freed unplayed, and the chart now wanted starts: a missing file, so it ends at once.
     p.tick("b.bms", true, 0);
     try std.testing.expectEqual(@as(usize, 0), p.current.len);
     try std.testing.expect(p.job != null);

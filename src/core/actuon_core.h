@@ -1,4 +1,3 @@
-/* C ABI of libactuon_core. */
 #pragma once
 #include <stddef.h>
 #include <stdint.h>

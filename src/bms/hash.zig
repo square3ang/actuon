@@ -1,4 +1,4 @@
-//! Chart identity: lowercase hex MD5 and SHA-256 of the raw file bytes (as beatoraja).
+//! Hashes the raw file bytes, as beatoraja does, so chart identities match.
 const std = @import("std");
 const Chart = @import("../core/types.zig").Chart;
 

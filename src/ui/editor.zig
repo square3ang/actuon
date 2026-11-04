@@ -1,6 +1,4 @@
-//! Editor integration. BMSE, iBMSC, uBMSC and BmsONE launch a player as `<exe> -P -N<measure> <file>`
-//! to preview and `-S` to stop. A running instance owns the window, so later launches hand their
-//! command over through a small file in the data folder, which the running app polls.
+//! A running instance owns the window, so later launches pass their command through a polled file.
 const std = @import("std");
 const c = @import("c");
 const core = @import("actuon_core");
@@ -12,7 +10,7 @@ pub const Command = struct {
     measure: i32 = 0,
 };
 
-/// True for command lines in the editors' style.
+/// BMSE, iBMSC, uBMSC and BmsONE run `<exe> -P -N<measure> <file>` to preview and `-S` to stop.
 pub fn parseArgs(args: []const [:0]const u8) ?Command {
     var cmd: Command = .{};
     var found = false;
@@ -35,7 +33,6 @@ fn path(a: std.mem.Allocator, name: []const u8) ![]u8 {
     return std.fmt.allocPrint(a, "{s}{s}", .{ dir, name });
 }
 
-/// Heartbeat younger than this means another instance is alive.
 const alive_window_s = 3;
 
 fn wallSeconds() i64 {
@@ -66,7 +63,7 @@ pub fn send(a: std.mem.Allocator, cmd: Command) !void {
     try fs.writeAtomic(a, p, text);
 }
 
-/// Takes a pending command, if any; strings live in `a`.
+/// Strings live in `a`.
 pub fn receive(a: std.mem.Allocator) ?Command {
     const p = path(a, "command.json") catch return null;
     const bytes = fs.readAlloc(a, p, 1 << 16) catch return null;
@@ -74,7 +71,6 @@ pub fn receive(a: std.mem.Allocator) ?Command {
     return std.json.parseFromSliceLeaky(Command, a, bytes, .{ .allocate = .alloc_always }) catch null;
 }
 
-/// Chart time of the start of a measure, for -N.
 pub fn measureStart(chart: *const core.types.Chart, measure: i32) i64 {
     const target: f64 = @floatFromInt(measure);
     var best: i64 = 0;

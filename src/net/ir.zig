@@ -1,4 +1,4 @@
-//! IR client: uploads replays and fetches rankings on background threads, never during play timing.
+//! Background threads only, never during play timing.
 const std = @import("std");
 const i18n = @import("../ui/i18n.zig");
 const tr = i18n.tr;
@@ -15,13 +15,12 @@ pub const Upload = struct {
     sha: []u8,
     chart_path: []u8,
     replay: []u8,
-    /// A versus room this play counts for, or empty.
+    /// Empty outside a versus room.
     room: []u8,
     board: *Board,
 };
 
-/// One upload's outcome and the chart's ranking around it, for the result screen. Two owners, because
-/// the player can start the next chart while a slow upload is still running.
+/// Two owners: the player can start the next chart while a slow upload runs.
 pub const Board = struct {
     pub const Row = struct { name_buf: [160]u8 = undefined, name_len: usize = 0, ex: i64 = 0, clear: i64 = 0 };
     pub const pending = 0;
@@ -37,7 +36,7 @@ pub const Board = struct {
     total: i64 = 0,
     clears: [11]i64 = @splat(0),
     rows: []Row = &.{},
-    /// The row at the top of the skin's list. Only the UI thread touches it once the board is ready.
+    /// Only the UI thread touches it once the board is ready.
     offset: usize = 0,
 
     pub fn release(b: *Board) void {
@@ -46,8 +45,7 @@ pub const Board = struct {
         b.gpa.destroy(b);
     }
 
-    /// The rest follow beatoraja's AbstractResult: a wheel step is one row, and the last place on
-    /// the slider does nothing.
+    /// As beatoraja's AbstractResult: a wheel step is one row, and the slider's last place does nothing.
     pub fn scroll(b: *Board, rows: i32) void {
         if (!b.ready() or b.rows.len == 0) return;
         const to = @as(i64, @intCast(b.offset)) + rows;
@@ -68,7 +66,6 @@ pub const Board = struct {
         return b.state.load(.acquire) != pending;
     }
 
-    /// The one line a built-in screen shows.
     pub fn placeText(b: *const Board, buf: []u8) []const u8 {
         return switch (b.state.load(.acquire)) {
             pending => tr("IR: loading..."),
@@ -188,8 +185,7 @@ fn shouldRetryScore(status: u16, room: []const u8, tries: u32) bool {
     return status == 503 and room.len > 0 and tries < score_retries;
 }
 
-/// Submit the chart and the replay together: the server checks them and keeps no copy of the chart.
-/// `prev_rank` gets the player's place from before this score, when the caller wants it.
+/// Sends chart and replay together, as the server keeps no chart. `prev_rank` gets the place before this score.
 pub fn submit(gpa: std.mem.Allocator, client: *std.http.Client, base: []const u8, token: []const u8, sha: []const u8, chart_path: []const u8, replay: []const u8, room: []const u8, prev_rank: ?*i64) !u16 {
     // Without the file nothing says how the chart should be parsed.
     if (chart_path.len == 0) return error.NoChart;
@@ -280,7 +276,7 @@ fn rankingThread(ud: ?*anyopaque) callconv(.c) c_int {
     return 0;
 }
 
-/// A chart's ranking with no upload, for song select. The caller owns one reference, as with startUpload.
+/// The caller owns one reference, as with startUpload.
 pub fn startRanking(gpa: std.mem.Allocator, base: []const u8, token: []const u8, sha: []const u8) ?*Board {
     const board = gpa.create(Board) catch return null;
     board.* = .{ .gpa = gpa };
@@ -320,8 +316,7 @@ pub fn startUpload(gpa: std.mem.Allocator, base: []const u8, token: []const u8, 
     return board;
 }
 
-/// A background GET or POST whose JSON answer is parsed into display lines. Two owners, because a
-/// request has no timeout: the UI can leave one that hangs without waiting for it.
+/// Two owners: with no timeout, the UI may leave one hanging.
 pub const Query = struct {
     gpa: std.mem.Allocator,
     url: []u8,
@@ -412,8 +407,7 @@ fn fetchMine(a: std.mem.Allocator, base: []const u8, token: []const u8) ![]MySco
     return v.scores;
 }
 
-/// Bests only ever rise on both sides, and counts stay out of it: the server does not keep judge counts.
-/// Play counts stay local, so downloading twice changes nothing.
+/// Bests only rise; judge and play counts stay local (the server keeps none), so downloading twice changes nothing.
 fn mergeMine(d: db_mod.Db, scores: []const MyScore) !u32 {
     var merged: u32 = 0;
     try d.exec("BEGIN");
@@ -448,8 +442,7 @@ fn validSha(s: []const u8) bool {
 const Best = struct { ex: u32, clear: u32 };
 const Pending = struct { id: i64, sha: []const u8, path: []const u8 };
 
-/// Replays the server's bests do not already cover, best first so that one upload can cover the rest of its chart.
-/// shortcut: a replay that only improves combo or BP is not sent, compare those too if players ask for it.
+/// Best first, so one upload covers its chart. shortcut: a replay that only improves combo or BP is not sent, compare those too if players ask for it.
 fn pendingReplays(a: std.mem.Allocator, d: db_mod.Db, mine: []const MyScore) ![]Pending {
     var best: std.StringHashMapUnmanaged(Best) = .empty;
     // A claim does not count: a replay that only matches it still turns it into a verified score.
@@ -472,8 +465,6 @@ fn pendingReplays(a: std.mem.Allocator, d: db_mod.Db, mine: []const MyScore) ![]
     return out.items;
 }
 
-/// Local bests the server has no row to match, whether verified or not. Imported scores land here,
-/// and so do plays whose replay the server refused.
 fn pendingClaims(a: std.mem.Allocator, d: db_mod.Db, mine: []const MyScore) ![]MyScore {
     var best: std.StringHashMapUnmanaged(Best) = .empty;
     for (mine) |s| {
@@ -511,7 +502,6 @@ fn sendClaims(s: *Sync, a: std.mem.Allocator, claims: []const MyScore) !void {
     }
 }
 
-/// One run of IR sync on a background thread with its own database connection.
 pub const Sync = struct {
     gpa: std.mem.Allocator,
     base: []u8,
@@ -652,7 +642,6 @@ pub fn startSync(gpa: std.mem.Allocator, base: []const u8, token: []const u8, up
 
 pub const AccountReply = struct { status: u16, body: []const u8, token: ?[]const u8 };
 
-/// Asks the server for a token. Anything but a 200 comes back as a status for the caller to explain.
 pub fn requestToken(a: std.mem.Allocator, base: []const u8, name: []const u8, password: []const u8, register: bool) !AccountReply {
     const body = try std.json.Stringify.valueAlloc(a, .{ .name = name, .password = password }, .{});
     const url = try std.fmt.allocPrint(a, "{s}/{s}", .{ base, if (register) "register" else "login" });
@@ -680,7 +669,6 @@ fn requestRename(a: std.mem.Allocator, base: []const u8, name: []const u8, token
     return (try http.request(a, .POST, url, body, try bearer(a, token))).status;
 }
 
-/// One sign-up, sign-in or rename on a background thread, so a slow server cannot stall the menu.
 pub const Account = struct {
     gpa: std.mem.Allocator,
     base: []u8,

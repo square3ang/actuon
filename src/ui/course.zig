@@ -1,4 +1,3 @@
-//! Course (dan) play: chains charts, carrying the gauge and summing the score.
 const std = @import("std");
 const tr = @import("i18n.zig").tr;
 const c = @import("c");
@@ -24,7 +23,6 @@ pub const Run = struct {
     paused: bool = false,
 };
 
-/// Combines one stage into the running total.
 pub fn addScore(total: *core.sim.Score, s: *const core.sim.Score) void {
     for (&total.counts, s.counts) |*d, v| {
         d[0] += v[0];
@@ -98,7 +96,6 @@ fn launch(a: *App) void {
     }, false);
 }
 
-/// Folds the finished stage in. True when another stage should follow.
 pub fn stageDone(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, natural: bool) bool {
     const r = &a.course.?;
     addScore(&r.total, &snap.score);
@@ -117,7 +114,7 @@ pub fn next(a: *App) void {
     launch(a);
 }
 
-/// Runs after capture(): replaces the single-stage result with the course totals.
+/// Must run after capture(), whose single-stage result it overwrites.
 pub fn finish(a: *App) void {
     var r = a.course.?;
     a.course = null;

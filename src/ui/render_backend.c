@@ -1,4 +1,3 @@
-// sokol_gfx's implementation and its platform half: Vulkan on Linux, Direct3D 11 on Windows.
 #if defined(_WIN32)
 #define COBJMACROS
 #define SOKOL_D3D11
@@ -43,8 +42,7 @@ static bool rb_tearing;
 
 SDL_WindowFlags rb_window_flags(void) { return 0; }
 
-// Reflex through NVAPI. nvapi64.dll ships with NVIDIA's driver, so elsewhere this stays off.
-// The ids and layouts are from NVIDIA's nvapi.h and nvapi_interface.h.
+// Reflex through nvapi64.dll, which only NVIDIA's driver ships; ids and layouts from nvapi.h and nvapi_interface.h.
 typedef struct {
     UINT32 version;
     UINT8 low_latency, boost;
@@ -240,7 +238,6 @@ static VkSemaphore rb_acquired[RB_MAX_IMAGES + 1];
 static VkPresentModeKHR rb_mode = VK_PRESENT_MODE_FIFO_KHR;
 static bool rb_stale;
 
-// Reflex and Reflex Boost, on drivers that have them.
 static bool rb_reflex;
 static VkSemaphore rb_sleep_sem;
 static int rb_reflex_mode;

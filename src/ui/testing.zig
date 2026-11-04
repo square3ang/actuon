@@ -1,5 +1,4 @@
-//! An App with no window or audio device, over a small library in memory, for tests of what keys do.
-//! `g` stays undefined: key handlers may only pass its window to SDL, which refuses it safely.
+//! `g` stays undefined: key handlers may only pass its window to SDL, which refuses it.
 const std = @import("std");
 const app_mod = @import("app.zig");
 const select = @import("select.zig");

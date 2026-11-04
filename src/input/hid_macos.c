@@ -1,5 +1,4 @@
-// macOS keyboard input through IOKit HID on its own run loop thread. Needs the Input Monitoring
-// permission; when it is refused we return 0 and the game stays on SDL keyboard events.
+// Without Input Monitoring permission this returns 0 and SDL keys stay in charge.
 #include <IOKit/hid/IOHIDManager.h>
 #include <pthread.h>
 

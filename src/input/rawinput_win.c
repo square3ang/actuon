@@ -1,5 +1,3 @@
-// Windows RawInput on a dedicated high-priority thread, so key timing does not wait for the
-// render loop. Keys arrive with Linux-style codes; the mapping table lives in input.zig.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -55,7 +53,6 @@ static DWORD WINAPI thread_main(LPVOID ready) {
     return 0;
 }
 
-// Virtual keys by Linux-style code, the inverse of fold_extended.
 // shortcut: keypad keys share virtual keys with the navigation cluster, split them when a binding needs both.
 static int code_vk[128];
 

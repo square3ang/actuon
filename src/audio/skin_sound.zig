@@ -1,4 +1,3 @@
-//! Sounds a skin asks for by path: decoded off the main thread, kept until exit.
 const std = @import("std");
 const c = @import("c");
 const fs = @import("../platform/fs.zig");
@@ -9,7 +8,6 @@ pub const Op = enum { cache, play, loop, stop };
 
 pub const extensions = [_][]const u8{ "ogg", "wav", "flac", "mp3" };
 
-/// The file for `name` directly in `dir`, if there is one.
 pub fn findIn(al: std.mem.Allocator, dir: []const u8, name: []const u8) ?[]const u8 {
     for (extensions) |ext| {
         const p = std.fmt.allocPrint(al, "{s}/{s}.{s}", .{ dir, name, ext }) catch return null;
@@ -30,7 +28,6 @@ fn collectSets(al: std.mem.Allocator, dir: []const u8, markers: []const []const 
     }
 }
 
-/// Folders up to three levels down in actuon's own `folder` and in the one the player picked.
 fn sets(al: std.mem.Allocator, folder: []const u8, root: []const u8, markers: []const []const u8) []const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     if (fs.dataDir(al)) |data| {
@@ -48,8 +45,6 @@ pub fn soundSets(al: std.mem.Allocator, root: []const u8) []const []const u8 {
     return sets(al, "sound", root, &.{ "f-open", "scratch", "o-open" });
 }
 
-/// Steps along the skin's own ("") and the sets, stopping at either end so a second press or a
-/// held key doesn't turn the pick off. A value no longer on offer counts as "".
 pub fn nextSet(now: []const u8, list: []const []const u8, dir: i32) []const u8 {
     var at: i64 = 0;
     for (list, 1..) |set, i| {
@@ -66,7 +61,7 @@ pub const Entry = struct {
     data: []const f32 = &.{},
     ready: std.atomic.Value(bool) = .init(false),
     thread: ?*c.SDL_Thread = null,
-    /// A request made before the decode finished. Main thread only.
+    /// Main thread only.
     pending: ?struct { loop: bool, gain: f32 } = null,
     loop_slot: ?u8 = null,
 
@@ -82,14 +77,12 @@ pub const Entry = struct {
     }
 };
 
-/// Rotates through the one-shot slots, past the music's.
 pub fn nextSlot(slot: *u8) u8 {
     const now = slot.*;
     slot.* = if (now + 1 < engine_mod.ui_slots) now + 1 else engine_mod.first_oneshot_slot;
     return now;
 }
 
-/// Far past the few dozen sounds a skin names.
 const max_entries = 256;
 
 pub const Player = struct {
@@ -132,7 +125,7 @@ pub const Player = struct {
         }
     }
 
-    /// Starts what finished decoding. The engine's command queue takes one producer, this thread.
+    /// The engine's command queue takes one producer, this thread.
     pub fn tick(p: *Player) void {
         for (p.entries.items) |e| {
             const want = e.pending orelse continue;

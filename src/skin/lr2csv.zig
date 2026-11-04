@@ -1,4 +1,3 @@
-//! LR2 CSV skins (.lr2skin / .csv), following beatoraja's LR2SkinCSVLoader and LR2PlaySkinLoader.
 const std = @import("std");
 const core = @import("actuon_core");
 const fs = @import("../platform/fs.zig");
@@ -12,7 +11,7 @@ const Parser = struct {
     mode: core.types.Mode,
     root: []const u8,
     images: std.ArrayList(?[]const u8) = .empty,
-    /// #LR2FONT in file order, null where one would not load: SRC_TEXT counts them.
+    /// Null where a font failed to load, as SRC_TEXT counts #LR2FONT lines in file order.
     fonts: std.ArrayList(?*bitfont.BitmapFont) = .empty,
     fonts_loaded: u32 = 0,
     objects: std.ArrayList(m.Object) = .empty,
@@ -60,7 +59,6 @@ fn vals(str: []const []const u8) [24]i32 {
     return v;
 }
 
-/// Maps "LR2files\Theme\Name\sub\x.png" onto disk, case-insensitively, under the skin's own root.
 fn resolve(p: *Parser, raw: []const u8) ?[]const u8 {
     return resolvePath(p.a, p.root, raw);
 }
@@ -199,8 +197,7 @@ fn condition(p: *Parser, str: []const []const u8) bool {
     return true;
 }
 
-/// #CUSTOMOPTION,title,first op,item,item...: an item's op is the first op plus its position.
-/// Without a saved pick, or with one the skin no longer has, the first item.
+/// #CUSTOMOPTION,title,first op,item...: an item's op is first op + position; no valid saved pick means the first.
 fn pickedItem(p: *Parser, str: []const []const u8) i32 {
     const pick = p.conf.property.map.get(str[1]) orelse return 0;
     for (str[3..], 0..) |item, i| {
@@ -359,7 +356,7 @@ fn readText(a: std.mem.Allocator, path: []const u8) ![]const u8 {
 
 pub const CustomOption = struct { title: []const u8, items: []const []const u8 };
 
-/// Every #CUSTOMOPTION a skin file declares, includes too. #IF is ignored: a chooser shows them all.
+/// #IF is ignored: a chooser shows every #CUSTOMOPTION.
 pub fn customOptions(a: std.mem.Allocator, path: []const u8) ![]const CustomOption {
     var out: std.ArrayList(CustomOption) = .empty;
     var includes: u32 = 0;
@@ -398,8 +395,7 @@ fn runFile(p: *Parser, path: []const u8) !void {
     while (it.next()) |l| try line(p, l);
 }
 
-/// The directory the skin's "LR2files\Theme\<name>\" prefix stands for: the folder containing the
-/// scene folder, e.g. <name>/Play/7key.lr2skin gives <name>.
+/// What "LR2files\Theme\<name>\" stands for: <name>/Play/7key.lr2skin gives <name>.
 pub fn skinRoot(path: []const u8) []const u8 {
     const d = std.fs.path.dirname(path) orelse ".";
     return std.fs.path.dirname(d) orelse d;

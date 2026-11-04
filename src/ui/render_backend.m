@@ -1,4 +1,3 @@
-// sokol_gfx's implementation and its platform half on macOS: Metal.
 #include <SDL3/SDL.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>

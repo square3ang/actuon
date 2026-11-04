@@ -1,4 +1,3 @@
-//! FFI to libactuon_core: the judge code the client plays with.
 use std::os::raw::c_char;
 
 #[repr(C)]
@@ -36,7 +35,6 @@ extern "C" {
     );
 }
 
-/// Re-simulates a replay. Err carries the C API's negative code.
 pub fn verify(chart: &[u8], replay: &[u8], format: u8) -> Result<Verified, i32> {
     let input = VerifyInput {
         chart: chart.as_ptr(),
@@ -73,7 +71,6 @@ fn c_text(field: &[u8]) -> String {
     String::from_utf8_lossy(&field[..end]).into_owned()
 }
 
-/// Names a file that parses as a chart with notes to play. Err carries the C API's negative code.
 pub fn check_chart(chart: &[u8], format: u8) -> Result<ChartInfo, i32> {
     let mut raw = RawChartInfo {
         title: [0; 256],

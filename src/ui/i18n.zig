@@ -1,11 +1,9 @@
-//! Interface text in English, Korean, Japanese and Simplified Chinese. The English text is the key.
-//! A key with no row stops the build. BMS and beatoraja terms (gauge and lamp names, EX, BP, LN) stay as they are.
+//! A key with no row stops the build; BMS terms (EX, BP, LN, gauges, lamps) stay untranslated.
 const std = @import("std");
 const c = @import("c");
 
 pub const Lang = enum { en, ko, ja, zh };
 
-/// Each language's name in itself, in `Lang` order.
 pub const names = [_][]const u8{ "English", "한국어", "日本語", "简体中文" };
 
 pub var current: Lang = .en;
@@ -15,7 +13,6 @@ pub fn fromCode(code: []const u8) ?Lang {
     return std.meta.stringToEnum(Lang, code);
 }
 
-/// The player's choice, or else the first OS language with a translation, or else English.
 pub fn resolve(saved: []const u8) Lang {
     if (fromCode(saved)) |l| return l;
     var count: c_int = 0;
@@ -51,7 +48,6 @@ pub fn bufPrint(buf: []u8, comptime en: []const u8, args: anytype) std.fmt.BufPr
 }
 
 const rows = [_]Row{
-    // Settings tabs.
     .{ "Library", "라이브러리", "ライブラリ", "曲库" },
     .{ "Tables", "난이도표", "難易度表", "难度表" },
     .{ "Play", "플레이", "プレイ", "游玩" },
@@ -64,7 +60,6 @@ const rows = [_]Row{
     .{ "Controls", "조작", "操作", "操作" },
     .{ "Settings", "설정", "設定", "设置" },
 
-    // Settings rows.
     .{ "Add folder", "폴더 추가", "フォルダを追加", "添加文件夹" },
     .{ "Remove all folders", "모든 폴더 제거", "全フォルダを削除", "移除所有文件夹" },
     .{ "Remove a folder", "폴더 제거", "フォルダを削除", "移除文件夹" },
@@ -119,7 +114,6 @@ const rows = [_]Row{
     .{ "beatoraja controls", "beatoraja 조작", "beatoraja操作", "beatoraja 操作" },
     .{ "Start, Select", "Start, Select", "Start, Select", "Start, Select" },
 
-    // Settings help.
     .{ "Choose a folder. It is scanned for charts right away.", "폴더를 고르면 바로 채보를 찾아요.", "フォルダを選ぶとすぐに譜面を検索します。", "选择文件夹后立即扫描谱面。" },
     .{ "Paste a table's web address with Ctrl+V. It loads right away.", "난이도표 주소를 Ctrl+V로 붙여 넣으면 바로 불러와요.", "難易度表のURLをCtrl+Vで貼り付けるとすぐ読み込みます。", "用 Ctrl+V 粘贴难度表网址，立即加载。" },
     .{ "Downloads every added table again. F8 in song select does the same.", "추가한 난이도표를 전부 다시 받아요. 곡 선택 화면에서 F8을 눌러도 돼요.", "追加した難易度表をすべて再取得します。選曲画面のF8と同じです。", "重新下载所有已添加的难度表。选曲界面按 F8 效果相同。" },
@@ -139,7 +133,7 @@ const rows = [_]Row{
     .{ "Off plays without background images and movies, Auto shows them in autoplay and replays only. From the next chart.", "끄면 배경 이미지와 영상 없이, 자동이면 오토플레이와 리플레이에서만 보여요. 다음 곡부터 적용돼요.", "オフは背景画像と動画なし、オートはオートプレイとリプレイでだけ表示します。次の譜面から。", "关闭则不显示背景图像和视频，自动则只在自动演奏和回放中显示。从下一首起生效。" },
     .{ "Auto", "자동", "オート", "自动" },
 
-    // Play and assist options. beatoraja's option names stay in English on the values.
+    // beatoraja's option names stay in English on the values.
     .{ "Random", "랜덤", "ランダム", "随机" },
     .{ "Random (2P side)", "랜덤 (2P 쪽)", "ランダム (2P側)", "随机（2P 侧）" },
     .{ "DP option", "DP 옵션", "DPオプション", "DP 选项" },
@@ -219,7 +213,6 @@ const rows = [_]Row{
     .{ "Song select, result and play take the 7 key inputs and Start, Select as in beatoraja, on keyboard or controller.", "곡 선택, 결과, 플레이에서 7키와 Start, Select를 beatoraja처럼 써요. 키보드와 컨트롤러 둘 다 돼요.", "選曲、リザルト、プレイで7鍵とStart, Selectをbeatorajaと同様に使います。キーボードでもコントローラーでも。", "选曲、结算和游玩时按 beatoraja 方式使用 7 键及 Start、Select，键盘和手柄均可。" },
     .{ "Enter, then press Start, then Select. They open option panels in song select and change speed in play.", "Enter를 누르고 Start, Select 순서로 누르세요. 곡 선택에서는 옵션을 열고, 플레이 중에는 속도를 바꿔요.", "Enterの後、Start、Selectの順に押します。選曲ではオプション、プレイでは速度を操作します。", "按 Enter 后依次按 Start、Select。选曲时打开选项面板，游玩时调整速度。" },
 
-    // Settings values and prompts.
     .{ "Event", "이벤트", "イベント", "事件" },
     .{ "Off", "끔", "オフ", "关" },
     .{ "On", "켬", "オン", "开" },
@@ -249,7 +242,6 @@ const rows = [_]Row{
     .{ "Up/Down select    Left/Right change    Enter edit    Esc or right click back", "상하 선택    좌우 변경    Enter 편집    Esc·우클릭 뒤로", "上下 選択    左右 変更    Enter 編集    Esc・右クリック 戻る", "上下 选择    左右 更改    Enter 编辑    Esc/右键 返回" },
     .{ "Up/Down choose a tab    Enter open    Esc or right click leave", "상하 탭 선택    Enter 열기    Esc·우클릭 나가기", "上下 タブ選択    Enter 開く    Esc・右クリック 終了", "上下 选择标签页    Enter 打开    Esc/右键 离开" },
 
-    // Settings messages.
     .{ "{s}", "{s}", "{s}", "{s}" },
     .{ "No file dialog available: type the path", "파일 선택 창을 열 수 없어요. 경로를 직접 입력하세요", "ファイルダイアログを使えません。パスを入力してください", "文件对话框不可用：请输入路径" },
     .{ "Sign in to an IR server first", "IR 서버에 먼저 로그인하세요", "先にIRサーバーへログインしてください", "请先登录 IR 服务器" },
@@ -295,7 +287,6 @@ const rows = [_]Row{
     .{ "That table is already added", "이미 추가한 난이도표예요", "その難易度表は追加済みです", "该难度表已添加" },
     .{ "Type a number from {d} to {d}", "{d}~{d} 사이 숫자를 입력하세요", "{d} から {d} までの数字を入力してください", "请输入 {d} 到 {d} 的数字" },
 
-    // IR account answers and the place on a chart's board.
     .{ "Name must be 1-32 letters, digits or _ - . /", "이름은 글자, 숫자, _ - . / 로 1~32자로 해 주세요", "名前は文字、数字、_ - . / で1~32文字にしてください", "名称须为 1~32 个字母、数字或 _ - . /" },
     .{ "Name must be 1-32 letters, digits or _ - . /, and password at least 8", "이름은 글자, 숫자, _ - . / 로 1~32자, 비밀번호는 8자 이상으로 해 주세요", "名前は文字、数字、_ - . / で1~32文字、パスワードは8文字以上にしてください", "名称须为 1~32 个字母、数字或 _ - . /，密码至少 8 个字符" },
     .{ "Sign in again first", "다시 로그인해 주세요", "先にログインし直してください", "请先重新登录" },
@@ -311,7 +302,6 @@ const rows = [_]Row{
     .{ "IR: uploading...", "IR: 업로드 중...", "IR: アップロード中...", "IR：上传中..." },
     .{ "IR: upload failed", "IR: 업로드 실패", "IR: アップロード失敗", "IR：上传失败" },
 
-    // Song select.
     .{ "Tables updated", "난이도표를 업데이트했어요", "難易度表を更新しました", "难度表已更新" },
     .{ "{d} of {d} tables failed to load", "난이도표 {1d}개 중 {0d}개를 불러오지 못했어요", "難易度表 {1d} 件中 {0d} 件の読み込みに失敗", "{1d} 个难度表中有 {0d} 个加载失败" },
     .{ "Tables failed to load", "난이도표를 불러오지 못했어요", "難易度表の読み込みに失敗", "难度表加载失败" },
@@ -397,7 +387,6 @@ const rows = [_]Row{
     .{ "Table standings", "난이도표 순위", "難易度表順位", "难度表排名" },
     .{ "Rivals", "라이벌", "ライバル", "对手" },
 
-    // Loading, play, pause and result.
     .{ "LOADING", "불러오는 중", "読み込み中", "加载中" },
     .{ "Versus", "대전", "対戦", "对战" },
     .{ "Room code", "방 코드", "ルームコード", "房间代码" },
@@ -454,7 +443,6 @@ const rows = [_]Row{
     .{ "Could not start course", "코스를 시작하지 못했어요", "コースを開始できません", "无法开始课程" },
     .{ "Course has charts missing from the library", "라이브러리에 없는 채보가 코스에 있어요", "コースの譜面にライブラリにないものがあります", "课程中有谱面不在曲库内" },
 
-    // Skin settings and skins per screen.
     .{ "This skin has no settings.", "이 스킨은 설정이 없어요.", "このスキンに設定はありません。", "此皮肤没有设置项。" },
     .{ "Skin settings", "스킨 설정", "スキン設定", "皮肤设置" },
     .{ "Left/Right changes the value. Changes show on song select and from the next play. Esc goes back.", "좌우 키로 값을 바꿔요. 곡 선택 화면과 다음 플레이부터 적용돼요. Esc로 돌아가요.", "左右で値を変更します。選曲と次のプレイから反映されます。Esc: 戻る。", "左右键更改数值。在选曲和下次游玩时生效。Esc 返回。" },
@@ -473,7 +461,6 @@ const rows = [_]Row{
     .{ "Enter or click: pick a skin   Left/Right: step   O: its options   Esc: back", "Enter·클릭: 스킨 고르기   좌우: 넘기기   O: 옵션   Esc: 뒤로", "Enter・クリック: スキン選択   左右: 切替   O: オプション   Esc: 戻る", "Enter/点击：选择皮肤   左右：切换   O：选项   Esc：返回" },
 };
 
-/// The placeholders of a format, letters only: `{1d}` and `{d}` are the same one.
 fn placeholders(text: []const u8, out: [][]const u8) [][]const u8 {
     var n: usize = 0;
     var rest = text;

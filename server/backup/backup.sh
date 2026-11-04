@@ -1,5 +1,4 @@
 #!/bin/sh
-# Copies the IR data directory to the rclone remote "backup". A systemd timer runs it every 6 hours.
 # Usage: backup.sh once|restore [NAME]
 set -eu
 data=${DATA_DIR:-/data}
@@ -31,7 +30,7 @@ once() {
 	echo "backed up $name"
 }
 
-# The newest copy, or the one named. The server must be stopped: it would keep writing to the database this replaces.
+# The server must be stopped: it would keep writing to the database this replaces.
 restore() {
 	name=${1:-$(rclone lsf "$remote/db" | sort | tail -n 1)}
 	[ -n "$name" ] || { echo "no backup in $remote/db" >&2; exit 1; }

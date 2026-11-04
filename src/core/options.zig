@@ -1,11 +1,10 @@
-//! Lane options. Deterministic for a seed, so a replay stores just the seed and the option.
+//! Deterministic for a seed, so a replay stores just the seed and the option.
 const std = @import("std");
 const types = @import("types.zig");
 
 /// beatoraja's order. The EX kinds move the scratch too.
 pub const Random = enum(u8) { off, mirror, random, r_random, s_random, spiral, h_random, all_scratch, random_ex, s_random_ex };
 
-/// beatoraja's DP option. Battle plays a single chart on both sides; AS adds auto scratch.
 pub const Double = enum(u8) { off, flip, battle, battle_auto_scratch };
 
 /// Which note a press takes when several are in reach, as beatoraja's JudgeAlgorithm.
@@ -14,7 +13,6 @@ pub const Algorithm = enum(u8) { combo, duration, lowest };
 /// Gauge auto shift, in beatoraja's order.
 pub const Gas = enum(u8) { none, continue_play, survival_to_groove, best_clear, select_to_under };
 
-/// The lanes of a side; `with_scratch` adds its scratch last.
 fn sideLanes(mode: types.Mode, side: u8, with_scratch: bool, buf: *[9]u8) []u8 {
     const per: u8 = mode.keys() / mode.players();
     const offset = side * per;
@@ -49,7 +47,6 @@ fn scratchOfSide(mode: types.Mode, side: u8) ?u8 {
     return null;
 }
 
-/// Notes that count toward the score: an LN once, a CN or HCN at both ends.
 fn recount(chart: *types.Chart) void {
     var n: u32 = 0;
     for (chart.notes) |note| switch (note.kind) {
@@ -63,7 +60,6 @@ fn recount(chart: *types.Chart) void {
     if (!chart.total_defined) chart.total = types.defaultTotal(n);
 }
 
-/// Removes notes in place and renumbers the LN pairs. The chart's arena keeps the bytes.
 fn dropNotes(chart: *types.Chart, comptime gone: fn (types.Note) bool) void {
     var map: std.ArrayList(i32) = .empty;
     const a = chart.arena.allocator();
@@ -93,7 +89,7 @@ pub fn dropMines(chart: *types.Chart) void {
     }.f);
 }
 
-/// beatoraja's LEGACY NOTE assist: every long note becomes a plain note at its head.
+/// beatoraja's LEGACY NOTE assist.
 pub fn legacyNotes(chart: *types.Chart) void {
     dropNotes(chart, struct {
         fn f(n: types.Note) bool {
@@ -107,7 +103,6 @@ pub fn legacyNotes(chart: *types.Chart) void {
     recount(chart);
 }
 
-/// Copies a single chart onto the second side. False for a mode with no double.
 pub fn battle(chart: *types.Chart) !bool {
     const to: types.Mode = switch (chart.mode) {
         .beat7 => .beat14,
@@ -133,7 +128,6 @@ pub fn battle(chart: *types.Chart) !bool {
     return true;
 }
 
-/// Swaps the two sides of a double chart.
 pub fn flip(chart: *types.Chart) void {
     if (chart.mode.players() < 2) return;
     const per = chart.mode.keys() / 2;
@@ -143,7 +137,6 @@ pub fn flip(chart: *types.Chart) void {
 
 pub const LnMode = enum(u8) { ln, cn, hcn };
 
-/// Decides the LNs the chart leaves open. False when nothing changed, so the play is an ordinary one.
 pub fn applyLnMode(chart: *types.Chart, mode: LnMode) bool {
     if (mode == .ln) return false;
     var changed = false;
@@ -158,7 +151,6 @@ pub fn applyLnMode(chart: *types.Chart, mode: LnMode) bool {
     return changed;
 }
 
-/// The options that pick a lane per note rather than one map for the whole chart.
 fn perNote(opt: Random) bool {
     return switch (opt) {
         .s_random, .spiral, .h_random, .all_scratch, .s_random_ex => true,
@@ -166,14 +158,12 @@ fn perNote(opt: Random) bool {
     };
 }
 
-/// beatoraja's H-RANDOM threshold, a 16th note at 120 BPM: closer notes on one lane count as a jack.
-/// ALL-SCR keeps scratch notes this far apart too.
+/// beatoraja's H-RANDOM jack threshold (a 16th at 120 BPM); ALL-SCR keeps scratch notes this far apart too.
 const jack_gap_us: i64 = 125_000;
 
 const Spiral = struct { head: u8 = 0, step: u8 = 1 };
 
-/// Rewrites lanes in place, each side with its own option. Scratch stays on scratch, as in LR2,
-/// except under the EX options and ALL-SCR.
+/// Scratch stays on scratch, as in LR2, except under the EX options and ALL-SCR.
 pub fn apply(chart: *types.Chart, opts: [2]Random, seed: u64) void {
     const sides = chart.mode.players();
     if (opts[0] == .off and (sides < 2 or opts[1] == .off)) return;
@@ -211,8 +201,6 @@ pub fn apply(chart: *types.Chart, opts: [2]Random, seed: u64) void {
     reroll(chart, opts, &spirals, rnd);
 }
 
-/// Picks a lane per note: an LN keeps its lane until it ends and two notes at the same instant
-/// never share a lane.
 fn reroll(chart: *types.Chart, opts: [2]Random, spirals: *[2]Spiral, rnd: std.Random) void {
     const mode = chart.mode;
     const per: u8 = mode.keys() / mode.players();
@@ -227,7 +215,6 @@ fn reroll(chart: *types.Chart, opts: [2]Random, spirals: *[2]Spiral, rnd: std.Ra
             if (n.time_us != t) break;
             j += 1;
         }
-        // ends keep the lane their start already chose, and that lane stays taken at this instant
         for (chart.notes[i..j]) |*n| {
             if (n.kind == .ln_end and n.pair >= 0) {
                 n.lane = chart.notes[@intCast(n.pair)].lane;

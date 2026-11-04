@@ -1,4 +1,3 @@
-//! A list that opens over a row. The owner holds what the entries mean and acts on the index it gets back.
 const std = @import("std");
 const c = @import("c");
 const gfx = @import("gfx.zig");
@@ -10,7 +9,7 @@ pub const Drop = struct {
     cursor: usize = 0,
     first: usize = 0,
     w: f32 = 0,
-    /// The row it hangs from, kept up to date by the row as it draws.
+    /// The row sets this through `anchor` each time it draws.
     y: f32 = 0,
     h: f32 = 0,
     right: f32 = 0,
@@ -31,7 +30,6 @@ pub const Drop = struct {
         d.right = right;
     }
 
-    /// The chosen entry, if this key chose one.
     pub fn key(d: *Drop, a: *App, sc: u32) ?usize {
         switch (sc) {
             c.SDL_SCANCODE_UP => if (d.cursor > 0) {
@@ -56,7 +54,7 @@ pub const Drop = struct {
         return null;
     }
 
-    /// Draw last, over the rest. `click` was held back from the rows beneath. Returns the clicked entry.
+    /// Draw last, over the rest. `click` was held back from the rows beneath.
     pub fn draw(d: *Drop, a: *App, click: bool) ?usize {
         const g = &a.g;
         const u = g.h / 720;

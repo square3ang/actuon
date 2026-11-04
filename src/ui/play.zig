@@ -1,4 +1,4 @@
-//! Play scene drawing without a skin: lanes, notes, gauge, judge. Reads only session snapshots.
+//! Reads only session snapshots.
 const std = @import("std");
 const bga = @import("bga.zig");
 const core = @import("actuon_core");
@@ -39,7 +39,7 @@ pub fn paceTargetName(target: u8) []const u8 {
     };
 }
 
-/// The EX a target stands for, rounded up as ranks are.
+/// Rounded up, as ranks are.
 pub fn targetEx(target: u8, best_ex: u32, total_notes: u32) u32 {
     const ninths = pace_targets[@min(target, pace_targets.len - 1)].ninths;
     if (ninths == 0) return best_ex;
@@ -51,13 +51,11 @@ pub fn paceTarget(target: u8, practice: bool) u8 {
     return if (practice and pace_targets[@min(target, pace_targets.len - 1)].ninths == 0) 1 else target;
 }
 
-/// The run against where the target stands by now, not its end of song total.
 pub fn paceDiff(ex: u32, target_ex: u32, judged: u32, total_notes: u32) i64 {
     if (total_notes == 0) return ex;
     return @as(i64, ex) - @divTrunc(@as(i64, target_ex) * @min(judged, total_notes), total_notes);
 }
 
-/// BPM the green number refers to, per Config.hs_fix.
 pub fn referenceBpm(chart: *const core.types.Chart, hs_fix: u8) f64 {
     return switch (hs_fix) {
         0 => chart.bpm,
@@ -68,7 +66,6 @@ pub fn referenceBpm(chart: *const core.types.Chart, hs_fix: u8) f64 {
     };
 }
 
-/// Where the chart is drawn this frame.
 pub const Scroll = struct {
     t: i64,
     now_y: f64,
@@ -79,7 +76,7 @@ pub const Scroll = struct {
     /// beatoraja's CONSTANT option: nothing shows earlier than this before its time.
     appear_us: ?i64,
 
-    /// How far above the judge line a point of the chart is, as a share of the open lane.
+    /// A share of the open lane above the judge line.
     pub fn share(sc: Scroll, at_us: i64, at_y: f64) f32 {
         if (sc.per_us) |k| return @floatCast(@as(f64, @floatFromInt(at_us - sc.t)) * k);
         return @floatCast((at_y - sc.now_y) * sc.per_y);
@@ -110,12 +107,10 @@ pub fn judgeAreaShare(chart: *const core.types.Chart, sc: Scroll) [2]f32 {
     return .{ sc.share(lo, chart.yAt(lo)), sc.share(hi, chart.yAt(hi)) };
 }
 
-/// Where a BPM guide line goes: the timelines the tempo changes at.
 pub fn bpmChanges(chart: *const core.types.Chart, i: usize) bool {
     return i > 0 and chart.timelines[i].bpm != chart.timelines[i - 1].bpm;
 }
 
-/// The BPM the chart spends the most time at.
 pub fn mainBpm(chart: *const core.types.Chart) f64 {
     // shortcut: tempos past the 256th distinct one are ignored, use a map if a chart needs more
     var bpms: [256]f64 = undefined;
@@ -136,13 +131,11 @@ pub fn mainBpm(chart: *const core.types.Chart) f64 {
     return bpms[std.mem.indexOfMax(i64, totals[0..n])];
 }
 
-/// y units that fit in the visible lane height: `green_ms` of travel at the reference BPM.
 pub fn visibleY(green_ms: u32, ref_bpm: f64) f64 {
     return @as(f64, @floatFromInt(green_ms)) / 1000.0 * ref_bpm / 240.0;
 }
 
-/// First note still worth drawing. A long note stays until its end has passed: on a slow
-/// section it can easily last longer than the margin.
+/// A long note stays until its end has passed, which on a slow section can outlast the margin.
 pub fn skipPastNotes(chart: *const core.types.Chart, first: usize, t: i64) usize {
     var i = first;
     while (i < chart.notes.len) : (i += 1) {
@@ -174,7 +167,6 @@ pub const View = struct {
     first_note: usize = 0,
     last_t: i64 = std.math.minInt(i64),
     bga: ?*bga.Bga = null,
-    /// The built-in skin's option, read at play start.
     scratch_right: bool = false,
     best_ex: u32 = 0,
     target_ex: u32 = 0,
@@ -203,7 +195,7 @@ pub const View = struct {
         const chart = &s.chart;
         const mode = chart.mode;
         const t = snap.time_us - @as(i64, cfg.visual_offset_ms) * 1000;
-        if (t < v.last_t) v.first_note = 0; // seeked backwards
+        if (t < v.last_t) v.first_note = 0;
         v.last_t = t;
         const u = g.h / 720;
         if (v.density_max == 0) fillDensity(v, chart);
@@ -236,7 +228,6 @@ pub const View = struct {
     }
 };
 
-/// Where the lanes are on screen.
 const Lanes = struct {
     mode: core.types.Mode,
     order: [core.types.max_lanes]u8 = undefined,
@@ -305,7 +296,6 @@ fn layoutLanes(g: *gfx.Gfx, mode: core.types.Mode, cfg: *const config.Config, sc
     return l;
 }
 
-/// The gear: steel rails, a dark well, lit from below.
 fn drawGear(g: *gfx.Gfx, l: *const Lanes, s: *Session, snap: *const session_mod.Snapshot) void {
     g.hgrad(l.left - l.rail, 0, l.rail, g.h, gfx.steel, gfx.rule);
     g.hgrad(l.right, 0, l.rail, g.h, gfx.rule, gfx.steel);
@@ -327,7 +317,6 @@ fn drawGear(g: *gfx.Gfx, l: *const Lanes, s: *Session, snap: *const session_mod.
     g.additive(false);
 }
 
-/// Bar lines, and under the BPM GUIDE assist a line and the new tempo where it changes.
 fn drawBarLines(g: *gfx.Gfx, l: *const Lanes, chart: *const core.types.Chart, sc: Scroll, bpm_guide: bool) void {
     const u = g.h / 720;
     for (chart.timelines, 0..) |tl, i| {
@@ -359,7 +348,6 @@ fn drawNotes(g: *gfx.Gfx, v: *View, l: *const Lanes, chart: *const core.types.Ch
         const lane = note.lane;
         const col = noteColor(l.mode, lane);
         switch (note.kind) {
-            // MARK NOTE leaves a hit note's ghost until it reaches the line.
             .normal => if (v.render_state[i] == 0) {
                 drawNote(g, l.xs[lane], yy - nh, l.ws[lane], nh, col);
             } else if (mark and yy < l.judge_y) g.rect(l.xs[lane] + 1, yy - nh, l.ws[lane] - 1, nh, col.alpha(70)),
@@ -408,7 +396,6 @@ fn drawJudgeLine(g: *gfx.Gfx, l: *const Lanes) void {
     g.rect(l.left, l.judge_y - 2 * u, l.w, 4 * u, gfx.white);
 }
 
-/// Turntable, staggered keys, and the bombs over them.
 fn drawController(g: *gfx.Gfx, l: *const Lanes, snap: *const session_mod.Snapshot, t: i64) void {
     const u = g.h / 720;
     g.rect(l.left, l.pad_y, l.w, l.pad_h, gfx.plate);
@@ -425,7 +412,6 @@ fn drawController(g: *gfx.Gfx, l: *const Lanes, snap: *const session_mod.Snapsho
     g.additive(false);
 }
 
-/// Gauge along the bottom of the gear.
 fn drawGaugeInfo(g: *gfx.Gfx, l: *const Lanes, snap: *const session_mod.Snapshot, cfg: *const config.Config, t: i64) void {
     const u = g.h / 720;
     const info_y = l.pad_y + l.pad_h + 4 * u;
@@ -437,7 +423,6 @@ fn drawGaugeInfo(g: *gfx.Gfx, l: *const Lanes, snap: *const session_mod.Snapshot
     g.fmt(l.left + l.w * 0.36, info2 + 2 * u, g.scaled(12), gfx.dim, "GREEN {d}  C{d} L{d} H{d}", .{ cfg.green_ms * 3 / 5, @as(u32, @intFromFloat(cfg.lane_cover * 100)), @as(u32, @intFromFloat(@round(cfg.lift * 100))), @as(u32, @intFromFloat(@round(cfg.hidden * 100))) });
 }
 
-/// Judge and combo pop over the lanes.
 fn drawJudgePop(g: *gfx.Gfx, l: *const Lanes, snap: *const session_mod.Snapshot, t: i64) void {
     const u = g.h / 720;
     const cx = l.left + l.w / 2;
@@ -446,7 +431,6 @@ fn drawJudgePop(g: *gfx.Gfx, l: *const Lanes, snap: *const session_mod.Snapshot,
         const pop: f32 = if (age < 80_000) 1.3 - 0.3 * @as(f32, @floatFromInt(age)) / 80_000 else 1;
         const j = snap.last_judge;
         const jy = l.judge_y * 0.62;
-        // PGREAT shimmers, the way a perfect should.
         const col = if (j == 0) (if (@mod(@divTrunc(t, 50_000), 2) == 0) gfx.white else gfx.cyan) else judge_colors[j];
         if (snap.score.combo > 0) {
             var cb: [16]u8 = undefined;
@@ -545,14 +529,12 @@ fn drawGauge(g: *gfx.Gfx, x: f32, y: f32, w: f32, h: f32, value: f32, border: f3
         const col = if (hard) gfx.danger else if (pct >= border) gfx.cyan else gfx.accent;
         const fx = x + @as(f32, @floatFromInt(i)) * (seg_w + gap);
         if (i < filled) {
-            // The last few cells flicker like a live meter.
             const dimmed = flick and i + 3 >= filled;
             g.vgrad(fx, y, seg_w, h, gfx.mix(col, gfx.white, if (dimmed) 0.1 else 0.45), col.alpha(if (dimmed) 120 else 255));
         } else g.rect(fx, y, seg_w, h, col.alpha(30));
     }
 }
 
-/// Score graph: the run against the best, with grade lines.
 fn drawScoreGraph(g: *gfx.Gfx, ex: u32, passed: u32, best: u32, notes: u32, x: f32, y: f32, w: f32, h: f32) void {
     const u = g.h / 720;
     g.panel(x, y, w, h, "SCORE GRAPH");
@@ -599,7 +581,6 @@ fn drawTitleBar(g: *gfx.Gfx, s: *Session, snap: *const session_mod.Snapshot, x: 
     g.hgrad(x + 8 * u, 8 * u + bar_h - 3 * u, (w - 16 * u) * frac, 2 * u, gfx.accent, gfx.cyan);
 }
 
-/// BGA, or the title when the chart has none.
 fn drawStage(g: *gfx.Gfx, v: *View, s: *Session, snap: *const session_mod.Snapshot, t: i64, x: f32, w: f32, stage_y: f32, stage_h: f32) void {
     const chart = &s.chart;
     const u = g.h / 720;
@@ -638,7 +619,6 @@ fn drawReadouts(g: *gfx.Gfx, chart: *const core.types.Chart, snap: *const sessio
     g.digits(bx3 + cw - 12 * u, num_y, num, 4, sc.max_combo, gfx.white);
 }
 
-/// Note density over the song, and under it the recent hits around a centre line, the newest brightest.
 fn drawNotesGraph(g: *gfx.Gfx, v: *View, nx: f32, graph_y: f32, b_w: f32, graph_h: f32, frac: f32) void {
     const u = g.h / 720;
     g.panel(nx, graph_y, b_w, graph_h, "NOTES GRAPH");
@@ -716,7 +696,6 @@ fn drawDeck(g: *gfx.Gfx, v: *View, s: *Session, snap: *const session_mod.Snapsho
     const bar_h = 38 * u;
     drawTitleBar(g, s, snap, x, w, bar_h, frac);
 
-    // Bottom stack: readouts, then graphs.
     const graph_h = 112 * u;
     const read_h = 74 * u;
     const graph_y = g.h - 8 * u - graph_h;
@@ -728,7 +707,6 @@ fn drawDeck(g: *gfx.Gfx, v: *View, s: *Session, snap: *const session_mod.Snapsho
     const pace = if (v.target_live) @as(i64, sc.exScore()) - v.target_ex else paceDiff(sc.exScore(), v.target_ex, sc.passed, chart.total_notes);
     g.fmt(x + 10 * u, read_y + 22 * u, g.scaled(12), if (pace >= 0) gfx.cyan else gfx.amber, "{s} {s}{d}", .{ v.target_label, if (pace >= 0) "+" else "-", @abs(pace) });
 
-    // Graphs.
     const a_w = w * 0.26;
     const c_w = w * 0.3;
     const b_w = w - a_w - c_w - gap * 2;
@@ -769,7 +747,6 @@ test "scratch on the right moves to the end in single play only" {
 }
 
 test "green number maps to visible y" {
-    // 600 ms at 150 BPM is 0.375 measures: 150 BPM spends 1.6 s on a measure.
     try std.testing.expectApproxEqAbs(@as(f64, 0.375), visibleY(600, 150), 1e-9);
 }
 

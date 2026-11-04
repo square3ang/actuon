@@ -1,5 +1,4 @@
-//! BMS decoder. Note layout, timing and LN pairing follow jbms-parser, the parser beatoraja
-//! uses and lr2oraja-endlessdream (GPLv3) builds as a submodule, so note counts and times match it; see docs/spec.md for deliberate differences.
+//! BMS decoder matching jbms-parser, as built into lr2oraja-endlessdream (GPLv3); docs/spec.md lists differences.
 const std = @import("std");
 const types = @import("../core/types.zig");
 const encoding = @import("encoding.zig");
@@ -68,9 +67,7 @@ const Tl = struct {
 const Timelines = struct {
     gpa: std.mem.Allocator,
     items: std.ArrayList(*Tl) = .empty,
-    /// A Tl is ~350 B, so a hostile chart of distinct positions would need gigabytes.
-    /// Real charts stay far below: 999 bars at 192 steps is ~192k.
-    /// shortcut: a chart past this is refused, raise it if a real one is.
+    /// shortcut: a chart past this many ~350 B Tls is refused (real ones stay near 192k), raise it if a real one is.
     max: usize = 1 << 19,
 
     fn lowerBound(self: *const Timelines, section: f64) usize {
@@ -245,8 +242,6 @@ const Decoder = struct {
     }
 };
 
-/// The value of a #RANDOM, #SETRANDOM, #SWITCH or #SETSWITCH line, also kept in `values` so a replay
-/// can repeat it. Null when the line has no number.
 fn pickBranch(a: std.mem.Allocator, line: []const u8, is_set: bool, opts: Options, rng: *Rng, values: *std.ArrayList(i32)) !?i32 {
     const off: usize = if (is_set) 10 else 7;
     if (line.len <= off) return null;
@@ -254,8 +249,7 @@ fn pickBranch(a: std.mem.Allocator, line: []const u8, is_set: bool, opts: Option
     const v: i32 = blk: {
         if (is_set) break :blk r;
         if (opts.selected_random) |sel| if (values.items.len < sel.len) {
-            // A replay is untrusted: a value no roll gives would skip every #IF and drop their notes.
-            // Rng.below gives 1 for a range of 0 or less, so such a roll is 2.
+            // Untrusted: a value no roll gives would drop every #IF's notes (a range <= 0 rolls 1, so allow 2).
             const s = sel[values.items.len];
             if (s < 1 or s > (if (r >= 1) r else 2)) return error.BadRandom;
             break :blk s;
@@ -266,7 +260,6 @@ fn pickBranch(a: std.mem.Allocator, line: []const u8, is_set: bool, opts: Option
     return v;
 }
 
-/// Parses a BMS/BME/BML/PMS file. All returned memory lives in `Chart.arena`.
 pub fn parse(gpa: std.mem.Allocator, raw: []const u8, opts: Options) Error!Chart {
     var chart: Chart = .{ .arena = std.heap.ArenaAllocator.init(gpa) };
     errdefer chart.arena.deinit();
@@ -300,7 +293,6 @@ pub fn parse(gpa: std.mem.Allocator, raw: []const u8, opts: Options) Error!Chart
 
     var rng: Rng = .{ .s = opts.seed };
     var random_values: std.ArrayList(i32) = .empty;
-    // `outer` caches whether every frame below is active, so the live check is O(1) at any depth.
     const Frame = struct {
         value: i32,
         matched: bool,
@@ -407,7 +399,6 @@ pub fn parse(gpa: std.mem.Allocator, raw: []const u8, opts: Options) Error!Chart
             continue;
         }
 
-        // A line is live only when every enclosing conditional is live.
         if (!Frame.live(if_stack.items) or !Frame.live(sw_stack.items)) continue;
 
         const c = line[1];
@@ -539,8 +530,7 @@ fn build(d: *Decoder, maxsec: usize) !void {
     const a = d.a;
     const chart = d.chart;
 
-    // First pass: section rates and final mode. The mode can change on any note in the file,
-    // so it must be settled before lanes are assigned.
+    // Any note can change the mode, so it is settled before lanes are assigned.
     const sections = try a.alloc(Section, maxsec + 1);
     var prev_end: f64 = 0;
     for (sections, 0..) |*s, i| {
@@ -628,8 +618,7 @@ fn collectTable(d: *Decoder, out: *std.ArrayList(Pending), line: []const u8, tab
     }.f);
 }
 
-/// TreeMap semantics, later definitions win: the sort is stable, so tempoEvents applies
-/// equal positions in file order and the last one overwrites the rest.
+/// Stable, so at equal positions the last definition in the file wins, as jbms-parser's TreeMap.
 fn sortPending(items: []Pending) void {
     std.mem.sort(Pending, items, {}, struct {
         fn lt(_: void, x: Pending, y: Pending) bool {
@@ -695,10 +684,8 @@ fn tempoEvents(d: *Decoder, tls: *Timelines, s: *Section, lines: []const []const
 
 const LaneState = struct {
     start: [types.max_lanes]?*Ln = @splat(null),
-    /// LNs that still reach the current measure, so each lookup stays short.
     lnlist: [types.max_lanes]std.ArrayList(*Ln) = @splat(.empty),
 
-    /// Far more than a lane can hold in one measure of a real chart.
     /// shortcut: lookups stay a scan of at most this many, move to an interval tree if a real chart needs more.
     const max_live = 1024;
 
@@ -803,7 +790,6 @@ fn channelLine(d: *Decoder, tls: *Timelines, s: *const Section, line: []const u8
                 const tl = try c.tls.get(c.s.sectionnum + c.s.rate * pos);
                 const k = c.lane;
                 if (v == c.d.lnobj) {
-                    // the nearest earlier note on the lane, independent of line order
                     var i = c.tls.lowerBound(tl.section);
                     while (i > 0) {
                         i -= 1;
@@ -856,7 +842,6 @@ fn channelLine(d: *Decoder, tls: *Timelines, s: *const Section, line: []const u8
                         c.st.start[k] = null;
                     } else {
                         const start = c.st.start[k].?;
-                        // notes swallowed by the LN become background sound
                         var i = c.tls.lowerBound(tl.section);
                         while (i > 0) {
                             i -= 1;
@@ -1195,7 +1180,6 @@ test "only Qwilight's #4K and #6K headers make those modes" {
     try std.testing.expectEqual(@as(u32, 3), six.total_notes);
     try std.testing.expectEqual(@as(u8, 5), six.notes[2].lane);
 
-    // Four lanes in use without the header stay what the channels say.
     var plain = try parse(std.testing.allocator, "#BPM 120\n#WAV01 a.wav\n#00111:01\n#00112:01\n#00114:01\n#00115:01\n", .{});
     defer plain.deinit();
     try std.testing.expectEqual(Mode.beat5, plain.mode);

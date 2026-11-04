@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""Renders every screen headlessly, to check a change to drawing code leaves them as they were.
-Usage: ui_shots.py ACTUON_BIN OUT_DIR [BASELINE_DIR]
-Run it on the old build, then on the new one with the old OUT_DIR as baseline. Needs xvfb-run and Vulkan.
-Images are not committed: they differ between GPUs."""
+"""Usage: ui_shots.py ACTUON_BIN OUT_DIR [BASELINE_DIR]; run on the old build, then the new one against it."""
 import concurrent.futures, json, os, subprocess, sys, tempfile
 
 binary, out = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
@@ -51,7 +48,6 @@ SCREENS = {
 }
 # The versus screen needs a sign-in, not a server: this IR answers nobody.
 SIGNED_IN = {"ir_url": "http://127.0.0.1:1", "ir_token": "t"}
-# After the chart has ended, for the result screen.
 RESULT_MS = 30000
 
 

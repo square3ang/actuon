@@ -1,4 +1,4 @@
-//! C ABI of libactuon_core: the IR server re-simulates replays with the same code the client plays with.
+//! The IR server re-simulates replays with the same code the client plays with.
 const std = @import("std");
 const core = @import("actuon_core.zig");
 const replay = core.replay;
@@ -16,8 +16,7 @@ fn formatOf(n: u8) core.Format {
     return if (n == 2) .pms else if (n == 3) .bmson else .bms;
 }
 
-/// The judge steps every millisecond to the chart's end, so a longer chart could hold a check slot for its whole time limit.
-/// A real chart is far shorter; one hour simulates in about 0.1 s.
+/// The judge steps every ms to the end, so a longer chart could hold a check slot; one hour simulates in ~0.1 s.
 const max_song_us: i64 = 3600 * std.time.us_per_s;
 /// Keys still held on the result screen come after the end, but nothing that late can change a score.
 const max_overrun_us: i64 = 600 * std.time.us_per_s;
@@ -43,8 +42,7 @@ export fn actuon_verify(input: *const VerifyInput, out: *replay.Result) callconv
     // HARD and EXHARD start full, so a play with nothing to hit would still clear as MAX.
     if (chart.total_notes == 0 or tooLong(&chart)) return -2;
     if (r.events.len > 0 and r.events[r.events.len - 1].time_us > chart.last_time_us + max_overrun_us) return -1;
-    // PMS drops channels it has no lane for, so a client naming PMS for a BMS chart could score a MAX on what is left.
-    // A real PMS chart loses nothing when read as BMS. Parsed here because #RANDOM changes a chart's note count per replay.
+    // PMS drops lane-less channels, so a BMS chart named PMS could MAX the rest; a real PMS chart reads the same as BMS.
     if (format == .pms) {
         var whole = core.bms.parse(gpa, chart_bytes, .{ .selected_random = r.bms_random }) catch return -2;
         defer whole.deinit();
@@ -66,7 +64,7 @@ fn copyText(out: *[256]u8, text: []const u8) void {
     out[n] = 0;
 }
 
-/// Returns 0 when the bytes parse as a chart with notes to play, and names it in `info`. Otherwise -2.
+/// 0 when the bytes parse as a chart with notes to play, else -2.
 export fn actuon_check_chart(data: [*]const u8, len: usize, format: u8, info: *ChartInfo) callconv(.c) i32 {
     const gpa = std.heap.c_allocator;
     const bytes = data[0..len];
@@ -78,7 +76,6 @@ export fn actuon_check_chart(data: [*]const u8, len: usize, format: u8, info: *C
     return 0;
 }
 
-/// Lowercase hex SHA-256 and MD5 of a chart file, without decoding it.
 export fn actuon_chart_hash(data: [*]const u8, len: usize, sha256_hex: *[64]u8, md5_hex: *[32]u8) callconv(.c) void {
     var sha: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(data[0..len], &sha, .{});

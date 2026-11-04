@@ -2,7 +2,6 @@ name: ci
 on:
   push:
     tags: ['*']
-  # Checks every platform without a tag, and releases nothing.
   workflow_dispatch:
 # Building naga takes minutes, longest on Windows, so each OS caches the binary under .naga.
 env: { NAGA_VERSION: 30.0.1 }
@@ -30,7 +29,6 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 packaging/linux/build-appimage.sh
       - uses: actions/upload-artifact@v4
         with: { name: linux, path: actuon-x86_64.AppImage, if-no-files-found: error }
-  # The core, its tools and the server, apart from the game so the two run side by side. None of it needs naga.
   server:
     runs-on: ubuntu-latest
     container: archlinux:latest

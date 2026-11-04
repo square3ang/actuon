@@ -1,5 +1,4 @@
 /* Hallmark · v2.0.0 · shape: app screen · theme: actuon design system (by request) · posture: restrained · signature: the scoreboard table with fixed digit cells and lamps */
-/* critique: no chart titles exist on the server, so the hash carries the chart; a title would read far better. */
 :root {
   --bg: #0a0f1c; --well: #050810; --plate: #0f1628; --plate-225: #0f1628e1; --rule: #222e48;
   --white: #ecf0f8; --dim: #8694b0; --cyan: #b0d4ff; --sky: #82beff; --accent: #265cf0; --danger: #d63e36; --amber: #f0aa46;

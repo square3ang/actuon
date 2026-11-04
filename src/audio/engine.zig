@@ -1,6 +1,4 @@
-//! Audio output and mixer. The writer thread owns all voices: game threads talk to it through a
-//! wait-free queue, and scheduled background notes are started sample-accurately inside the buffer.
-//! The writer thread never allocates, locks or touches the disk.
+//! The writer thread owns all voices and never allocates, locks or does I/O; commands come via a wait-free queue.
 const std = @import("std");
 const c = @import("c");
 const builtin = @import("builtin");
@@ -8,20 +6,15 @@ const decode = @import("decode.zig");
 const alsa = @import("alsa.zig");
 
 pub const max_voices = 256;
-/// Largest buffer the settings allow.
 const feed_max = 4096;
 const device_key_max = 512;
-/// Song frames one output buffer can consume: `feed_max` plus the largest slew.
 const song_max = feed_max + feed_max / 256 + 1;
 /// Slew at most one frame per this many: 0.4%, about 7 cents.
 const slew_period = 256;
-/// Audio this close to the tick clock is left alone, so jitter cannot wobble the pitch.
 const sync_deadband_us = 2_000;
-/// Audio further behind than this, such as after an underrun, skips instead of slewing.
 const sync_skip_us = 50_000;
 pub const ui_slots = 11;
-/// Menu music takes turns on these, so the old track can fade under the new one. Three because a
-/// new track can start before the last fade ended.
+/// Menu music alternates slots to crossfade; three since a new track can start mid-fade.
 pub const menu_slots = 3;
 pub const decide_slot = menu_slots;
 pub const first_oneshot_slot = decide_slot + 1;
@@ -66,7 +59,6 @@ pub const Engine = struct {
     sched_pos: usize = 0,
     voices: [max_voices]Voice = @splat(.{}),
     ui_voices: [ui_slots]UiVoice = @splat(.{}),
-    /// Song position of the first sample of the next buffer.
     frame: std.atomic.Value(i64) = .init(0),
     paused: bool = false,
     cmd_buf: [4096]Cmd = undefined,
@@ -86,13 +78,12 @@ pub const Engine = struct {
     skip_frames: i64 = 0,
     song_buf: [song_max * 2]f32 = undefined,
     host: HostInfo = .{},
-    /// Drives the mixer, writing to `stream` or, on the null output, only keeping time.
     feed_thread: ?*c.SDL_Thread = null,
     feed_frames: u32 = 0,
     feed_quit: std.atomic.Value(bool) = .init(false),
     pa_ready: bool = false,
     alsa_out: if (builtin.os.tag == .linux) ?alsa.Out else void = if (builtin.os.tag == .linux) null else {},
-    /// What `open` was asked for, not necessarily what opened. Must outlive the engine.
+    /// Not necessarily what opened. Must outlive the engine.
     device: []const u8 = "",
 
     pub fn create(gpa: std.mem.Allocator) !*Engine {
@@ -118,9 +109,6 @@ pub const Engine = struct {
         };
     }
 
-    /// Opens the lowest-latency path available. Windows order is ASIO, WASAPI exclusive, then WASAPI
-    /// shared as the mandatory fallback; Linux is in `openLinux`.
-    /// A named `device` comes first; if it is gone or refuses, the usual order still gives sound.
     pub fn open(e: *Engine, want_rate: u32, frames: u32, prefer_null: bool, device: []const u8) !void {
         e.rate = want_rate;
         e.device = device;
@@ -146,14 +134,12 @@ pub const Engine = struct {
         return e.openNull();
     }
 
-    /// ALSA through libasound, with JACK from PortAudio. A named device is always ALSA.
     fn openLinux(e: *Engine, frames: u32, device: []const u8) !void {
         if (device.len > 0) {
             if (e.openAlsa(alsa.fromPortAudioName(device), frames)) return;
             std.log.warn("audio device \"{s}\" did not open, using the default", .{device});
         }
-        // PortAudio's JACK backend only links to physical ports, so through PipeWire's JACK layer
-        // it stays silent whenever the default sink is virtual. ALSA follows the default sink.
+        // PortAudio JACK links only physical ports, so on PipeWire a virtual default sink goes silent; ALSA follows it.
         const jack_first = !pipewireRunning();
         if (jack_first and e.openDefaultOf(c.paJACK, frames)) return;
         if (e.openAlsa("default", frames)) return;
@@ -196,20 +182,18 @@ pub const Engine = struct {
         return 0;
     }
 
-    /// Reopens on another output or buffer size, keeping the rate that loaded sounds were decoded at.
-    /// Not during play: the song clock would jump. Does nothing under --null-audio or when nothing changed.
+    /// Keeps the rate sounds were decoded at. Not during play: the song clock would jump.
     pub fn reopen(e: *Engine, frames: u32, device: []const u8) void {
         if (!e.pa_ready or (std.mem.eql(u8, e.device, device) and @min(frames, feed_max) == e.feed_frames)) return;
         e.close();
         e.open(e.rate, frames, false, device) catch |err| std.log.err("audio reopen failed: {t}", .{err});
     }
 
-    /// Exclusive first where the platform has it, then shared.
     fn openOn(e: *Engine, ty: c.PaHostApiTypeId, dev: c.PaDeviceIndex, rate: u32, frames: u32) bool {
         return e.tryOpen(ty, dev, rate, frames, true) or e.tryOpen(ty, dev, rate, frames, false);
     }
 
-    /// The name a config stores. Windows lists one card under each API, so there the API is part of it.
+    /// Windows lists one card under each API, so there the API is part of the name.
     fn deviceKey(buf: []u8, os: std.Target.Os.Tag, ty: c.PaHostApiTypeId, name: []const u8) ?[]const u8 {
         if (os == .windows) return std.fmt.bufPrint(buf, "{s}: {s}", .{ nameOf(ty), name }) catch null;
         return if (name.len <= buf.len) name else null;
@@ -237,7 +221,6 @@ pub const Engine = struct {
         return null;
     }
 
-    /// Names of the stereo outputs. Empty when PortAudio never started.
     pub fn outputDevices(e: *const Engine, a: std.mem.Allocator) []const []const u8 {
         if (!e.pa_ready) return &.{};
         if (builtin.os.tag == .linux) return alsa.outputNames(a);
@@ -269,8 +252,7 @@ pub const Engine = struct {
             .hostApiSpecificStreamInfo = null,
         };
         if (builtin.os.tag == .windows) {
-            // PortAudio's ASIO sizes the driver buffer from the suggested latency, so the default
-            // one kept the driver's preferred size whatever Buffer size said.
+            // PortAudio ASIO sizes the driver buffer from this, so the default ignored Buffer size.
             if (ty == c.paASIO) out.suggestedLatency = @as(f64, @floatFromInt(frames)) / @as(f64, @floatFromInt(rate));
             if (ty == c.paWASAPI and exclusive) {
                 var wasapi: c.PaWasapiStreamInfo = std.mem.zeroes(c.PaWasapiStreamInfo);
@@ -286,9 +268,7 @@ pub const Engine = struct {
         return e.startStream(ty, &out, rate, frames, false);
     }
 
-    /// A callback, not blocking writes: at 32 or 64 frames a period is under 1.5 ms, less than a
-    /// polling thread can count on waking in. Linux ALSA, whose ioplug PCMs may never run a
-    /// callback, has its own writer in `alsaThread`.
+    /// Callback, not blocking writes: a 32-64 frame period is under 1.5 ms, too short for a polling thread; ALSA ioplug may never call back, so it uses `alsaThread`.
     fn startStream(e: *Engine, ty: c.PaHostApiTypeId, out: *c.PaStreamParameters, rate: u32, frames: u32, exclusive: bool) bool {
         var stream: ?*c.PaStream = null;
         const err = c.Pa_OpenStream(&stream, null, out, @floatFromInt(rate), @min(frames, feed_max), c.paClipOff | c.paDitherOff, paCallback, e);
@@ -317,8 +297,7 @@ pub const Engine = struct {
         return c.paContinue;
     }
 
-    /// Every block must be ready within one period, so this thread outranks everything else the game runs.
-    /// SDL's time-critical is only a nice level here; realtime comes through rtkit when the system allows it.
+    /// Blocks are due each period; SDL's time-critical is only a nice level here, so realtime comes via rtkit.
     fn raiseAudioPriority() void {
         const rr: c_int = @backingInt(std.os.linux.SCHED.Mode.RR);
         if (c.SDL_SetLinuxThreadPriorityAndPolicy(std.os.linux.gettid(), c.SDL_THREAD_PRIORITY_TIME_CRITICAL, rr)) return;
@@ -368,7 +347,7 @@ pub const Engine = struct {
         };
     }
 
-    /// Installs sounds and schedule for a song. Must not race the writer thread, so it pauses first.
+    /// Pauses first: it must not race the writer thread.
     pub fn load(e: *Engine, samples: []const decode.Sample, schedule: []const Sched, start_frame: i64) void {
         e.push(.{ .set_paused = true });
         // The writer thread only reads these while unpaused; give it a chance to observe the pause.
@@ -415,17 +394,15 @@ pub const Engine = struct {
         e.push(.{ .seek = frame });
     }
 
-    /// `data` must outlive the engine. A looping sound fades in; a one-shot starts at full gain.
+    /// `data` must outlive the engine.
     pub fn uiPlay(e: *Engine, slot: u8, data: []const f32, loop: bool, gain: f32) void {
         e.push(.{ .ui_play = .{ .slot = slot, .data = data, .loop = loop, .gain = gain } });
     }
-    /// Fades the slot to `gain`; a slot that reaches zero stops.
     pub fn uiGain(e: *Engine, slot: u8, gain: f32) void {
         e.push(.{ .ui_gain = .{ .slot = slot, .gain = gain } });
     }
 
     fn mixUi(e: *Engine, out: [*]f32, frames: usize) void {
-        // A full fade takes one second.
         const step = 1 / @as(f32, @floatFromInt(e.rate));
         for (&e.ui_voices) |*v| {
             for (0..frames) |i| {
@@ -507,7 +484,6 @@ pub const Engine = struct {
         e.processCmds();
         e.mixUi(out, frames);
         if (e.paused) return;
-        // Skipping through the mixer keeps scheduled notes and voice positions right.
         while (e.skip_frames > 0) {
             const n: usize = @intCast(@min(e.skip_frames, feed_max));
             e.mixSong(n);
@@ -516,14 +492,12 @@ pub const Engine = struct {
         const n: usize = @intCast(@as(i64, @intCast(frames)) + e.slew);
         e.mixSong(n);
         e.addSong(out, frames, n);
-        // Soft clip only when needed: a dense chart routinely sums past full scale.
         for (out[0 .. frames * 2]) |*s| {
             const x = s.*;
             if (x > 1 or x < -1) s.* = std.math.clamp(x, -1.5, 1.5) * (1 - std.math.clamp(x, -1.5, 1.5) * std.math.clamp(x, -1.5, 1.5) / 6.75);
         }
     }
 
-    /// Renders the next `frames` of the song into `song_buf` and advances the song position.
     fn mixSong(e: *Engine, frames: usize) void {
         @memset(e.song_buf[0 .. frames * 2], 0);
         const f0 = e.frame.load(.monotonic);
@@ -549,8 +523,7 @@ pub const Engine = struct {
         e.frame.store(f1, .release);
     }
 
-    /// Adds `n` rendered frames to `out`, stretched to `frames`. The ends line up with the
-    /// rendered ends, so consecutive buffers join without keeping resampler state.
+    /// Stretches `n` frames to `frames` with ends aligned, so buffers join without resampler state.
     fn addSong(e: *const Engine, out: [*]f32, frames: usize, n: usize) void {
         if (n == frames) {
             for (out[0 .. frames * 2], e.song_buf[0 .. frames * 2]) |*d, s| d.* += s;
@@ -568,7 +541,6 @@ pub const Engine = struct {
     }
 
     fn updateClock(e: *Engine, dac_delay_s: f64, frames: u32) void {
-        // Song time of what the listener hears right now, relative to the shared monotonic clock.
         const now_us: i64 = @intCast(c.SDL_GetTicksNS() / 1000);
         const f = e.frame.load(.monotonic);
         const song_us = @divTrunc(f * 1_000_000, e.rate);
@@ -592,10 +564,8 @@ pub const Engine = struct {
         e.steerAudio(raw - prev, frames);
     }
 
-    /// Moves the audio toward the tick clock. `err_us` is how far the audio is ahead of it.
     /// shortcut: audio far ahead only slews, as a stalled device stalls our writes too; add a hold if that proves wrong.
     fn steerAudio(e: *Engine, err_us: i64, frames: u32) void {
-        // Writer wake-up jitter is the noise here; the mean is what's true.
         e.audio_err_us += @divTrunc(err_us - e.audio_err_us, 32);
         if (e.audio_err_us < -sync_skip_us) {
             e.skip_frames = @max(e.usToFrame(-err_us), 0);
@@ -613,7 +583,6 @@ pub const Engine = struct {
         e.slew = std.math.clamp(-e.usToFrame(e.audio_err_us), -budget, budget);
     }
 
-    /// Converts a monotonic timestamp to song time.
     pub fn toSongUs(e: *const Engine, mono_ns: u64) i64 {
         return @as(i64, @intCast(mono_ns / 1000)) + e.clock_offset_us.load(.acquire);
     }
@@ -677,12 +646,10 @@ test "tick clock stays fixed after settling and audio follows it" {
     e.updateClock(0, 128);
     try std.testing.expectEqual(@as(i64, 123), e.clock_offset_us.load(.acquire));
 
-    // Jitter inside the deadband leaves the pitch alone.
     e.audio_err_us = 0;
     e.steerAudio(sync_deadband_us, 128);
     try std.testing.expectEqual(@as(i64, 0), e.slew);
 
-    // Ahead consumes fewer frames, behind consumes more, each within the slew limit.
     e.audio_err_us = 10_000;
     e.steerAudio(10_000, 512);
     try std.testing.expectEqual(@as(i64, -2), e.slew);
@@ -694,7 +661,6 @@ test "tick clock stays fixed after settling and audio follows it" {
     e.mix(&out, 512);
     try std.testing.expectEqual(f0 + 514, e.frame.load(.monotonic));
 
-    // Far behind skips, and voices move with the song position.
     const data: [96000]f32 = @splat(0.25);
     const samples = [_]decode.Sample{.{ .data = @constCast(&data) }};
     e.samples = &samples;
@@ -735,7 +701,6 @@ test "menu layer plays while paused and leaves the song clock alone" {
     try std.testing.expectEqual(@as(f32, 0.5), out[2]);
     try std.testing.expectEqual(@as(f32, 0), out[4]);
     try std.testing.expectEqual(@as(i64, 0), e.frame.load(.monotonic));
-    // The fade-out of a loop ends by stopping it.
     e.rate = 2;
     e.uiPlay(0, &data, true, 1);
     e.mix(&out, 4);
@@ -743,7 +708,6 @@ test "menu layer plays while paused and leaves the song clock alone" {
     e.uiGain(0, 0);
     e.mix(&out, 4);
     try std.testing.expectEqual(@as(usize, 0), e.ui_voices[0].data.len);
-    // Two slots crossfade: the old one still sounds as the new one comes in.
     e.rate = 4;
     e.uiPlay(0, &data, true, 1);
     e.mix(&out, 4);

@@ -1,5 +1,4 @@
-//! Background animation: still images and ffmpeg-decoded video, driven by the chart clock.
-//! Decoding runs on one thread per video so that a slow codec never holds up the render thread.
+//! One decode thread per video, so a slow codec never holds up rendering.
 const std = @import("std");
 const c = @import("c");
 const core = @import("actuon_core");
@@ -17,7 +16,7 @@ pub fn isVideo(path: []const u8) bool {
     return false;
 }
 
-/// Which image each layer shows at a time; pure so seeking can be tested without media.
+/// Pure so seeking can be tested without media.
 pub const Cursor = struct {
     next: usize = 0,
     last_t: i64 = std.math.minInt(i64),
@@ -57,7 +56,6 @@ pub const Video = struct {
     thread: ?*c.SDL_Thread = null,
     tex: *gfx.Texture,
     uploaded_frame: u64 = std.math.maxInt(u64),
-    /// A frame arrived that `scaled` hasn't been redrawn from.
     stale: bool = false,
     scaled: ?gfx.Scaled = null,
     g: *gfx.Gfx,
@@ -132,7 +130,6 @@ pub const Video = struct {
         gpa.destroy(v);
     }
 
-    /// Null when ffmpeg can't build it: the movie then plays unfiltered.
     fn makeDeblock(w: c_int, h: c_int, fmt: c.AVPixelFormat) ?Filters {
         const name = c.av_get_pix_fmt_name(fmt) orelse return null;
         var buf: [256]u8 = undefined;
@@ -152,7 +149,7 @@ pub const Video = struct {
         return .{ .graph = graph.?, .src = src.?, .sink = sink.? };
     }
 
-    /// Song time of a stream timestamp, within a day either way, so the sums in `decodeLoop` cannot overflow.
+    /// Clamped to a day either way so the sums in `decodeLoop` cannot overflow.
     fn frameUs(ts: i64, tb: f64) i64 {
         const day: f64 = 86_400e6;
         return std.math.lossyCast(i64, std.math.clamp(@as(f64, @floatFromInt(ts)) * tb * 1e6, -day, day));
@@ -164,7 +161,6 @@ pub const Video = struct {
         c.avcodec_flush_buffers(v.dec);
     }
 
-    /// Next decoded frame, or null at the end of the file.
     fn nextFrame(v: *Video, pkt: *c.AVPacket, frame: *c.AVFrame) bool {
         while (true) {
             if (c.avcodec_receive_frame(v.dec, frame) == 0) return true;
@@ -198,9 +194,8 @@ pub const Video = struct {
                 continue;
             }
             defer c.av_frame_unref(frame);
-            // A frame without a time keeps the last one, and a file's wild times must not overflow the sums here.
             if (frame.best_effort_timestamp != c.AV_NOPTS_VALUE) pts = frameUs(frame.best_effort_timestamp, v.tb);
-            if (pts + 50_000 < clock) continue; // late: drop without paying for the conversion
+            if (pts + 50_000 < clock) continue;
             var dst = [4]?[*]u8{ v.back.ptr, null, null, null };
             var stride = [4]c_int{ v.w * 4, 0, 0, 0 };
             if (v.filters) |f| {
@@ -224,7 +219,6 @@ pub const Video = struct {
         }
     }
 
-    /// A skin's movie: runs from the scene's start, over and over.
     pub fn tickLoop(v: *Video, now_ms: i64) void {
         const dur = v.fmt.duration;
         const us = @max(now_ms, 0) * 1000;
@@ -232,7 +226,6 @@ pub const Video = struct {
         v.stale = v.upload() or v.stale;
     }
 
-    /// True when the texture took a new frame.
     fn upload(v: *Video) bool {
         // The clock tick and the draw both land here, and a texture streams once a frame.
         if (v.uploaded_frame == v.g.frame) return false;
@@ -259,12 +252,10 @@ fn decodeThread(ud: ?*anyopaque) callconv(.c) c_int {
 
 const Media = union(enum) { none, image: *gfx.Texture, video: *Video };
 
-/// How a skin shows the picture. The defaults fill the box.
 pub const Look = struct {
     /// beatoraja's stretch types: 0 fills, 1 fits inside keeping the shape, 3 covers and crops.
     stretch: i32 = 0,
     alpha: u8 = 255,
-    /// Black behind the picture.
     backdrop: bool = true,
 };
 
@@ -329,7 +320,6 @@ pub const Bga = struct {
         return g.textureFromPixels(px, w, h, @intCast(w * 4));
     }
 
-    /// Null when the chart has no BGA. Missing or broken files only blank their own slot.
     pub fn create(gpa: std.mem.Allocator, g: *gfx.Gfx, s: *Session) ?*Bga {
         if (s.chart.bga.len == 0 or s.chart.bmps.len == 0) return null;
         const b = gpa.create(Bga) catch return null;

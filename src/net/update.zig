@@ -1,5 +1,4 @@
-//! Updates the game from GitHub releases. Only the player's choice starts an install, and the new
-//! files take effect at the next launch. Player data lives in the data directory, which this never touches.
+//! Never touches the data directory, and installs only on the player's choice.
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("c");
@@ -28,7 +27,6 @@ pub const Release = struct {
     sha256: [32]u8 = undefined,
 };
 
-/// The newer release in a GitHub answer, or null when this build is current. The answer is untrusted:
 /// shortcut: the digest comes from GitHub beside the file, so this catches damage and a foreign host but not a hijacked repository; sign releases offline if that becomes a concern.
 pub fn parseRelease(a: std.mem.Allocator, json: []const u8, current: []const u8, asset: ?[]const u8) !?Release {
     const Answer = struct {
@@ -54,7 +52,6 @@ pub fn parseRelease(a: std.mem.Allocator, json: []const u8, current: []const u8,
     return release;
 }
 
-/// Saves a download only if it matches, so nothing unverified stays on disk.
 fn fetchVerified(gpa: std.mem.Allocator, url: []const u8, sha256: [32]u8, path: []const u8, progress: *http.Progress) !void {
     errdefer fs.remove(path);
     try http.download(gpa, url, path, progress);
@@ -82,9 +79,7 @@ fn replaceFolder(a: std.mem.Allocator, url: []const u8, sha256: [32]u8, dir: []c
     try swapFiles(a, try std.fs.path.join(a, &.{ staged, windows_folder }), dir);
 }
 
-/// Moves each file in, keeping the one it replaces. Windows can rename a running exe and its DLLs
-/// but not overwrite them, and only the next launch can delete them.
-/// shortcut: a power cut mid-swap leaves old and new files mixed, reinstall by hand; add a journal if that is ever reported.
+/// Windows can rename a running exe but not overwrite it. shortcut: a power cut mid-swap leaves old and new files mixed, reinstall by hand; add a journal if that is ever reported.
 fn swapFiles(a: std.mem.Allocator, from: []const u8, to: []const u8) !void {
     const entries = try fs.list(a, from);
     var has_exe = false;
@@ -123,7 +118,7 @@ fn swapBack(a: std.mem.Allocator, from: []const u8, to: []const u8, name: []cons
     if (fs.exists(old)) try fs.rename(old, dest);
 }
 
-/// What the last update kept. The files in use by then have been released.
+/// The files in use by the last update have been released by now.
 fn removeLeftovers(a: std.mem.Allocator, dir: []const u8) !void {
     for (try fs.list(a, dir)) |e| {
         if (std.mem.endsWith(u8, e.name, old_suffix)) fs.remove(try std.fs.path.join(a, &.{ dir, e.name }));
@@ -133,8 +128,7 @@ fn removeLeftovers(a: std.mem.Allocator, dir: []const u8) !void {
 
 const Target = union(enum) { appimage: []const u8, folder: []const u8 };
 
-/// What this install can replace. Dev builds, Flatpak and macOS have none and use the releases page.
-/// shortcut: macOS opens the page because replacing a signed bundle is untested; add it once a signed build exists.
+/// shortcut: dev builds, Flatpak and macOS (signed bundle untested) get the releases page; add macOS once a signed build exists.
 fn findTarget(a: std.mem.Allocator) !?Target {
     switch (builtin.os.tag) {
         .linux => {
@@ -319,7 +313,6 @@ test "a bad release answer is rejected" {
     for (cases) |json| try std.testing.expectError(error.BadRelease, parseRelease(a, json, "0.1.0", "a.zip"));
 }
 
-/// Answers one request with `body` and gives its address.
 const TestServer = struct {
     server: std.Io.net.Server,
     thread: std.Thread,

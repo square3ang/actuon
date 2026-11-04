@@ -1,5 +1,3 @@
-//! Menu sound effects and background loop, synthesized at runtime so no audio assets ship.
-//! Band-limited supersaws, FM plucks and bells, filtered noise and a stereo reverb.
 const std = @import("std");
 
 pub const Sfx = enum { move, adjust, confirm, back, start, clear, fail };
@@ -38,7 +36,6 @@ const Rng = struct {
     }
 };
 
-/// Zero-delay state variable filter.
 const Svf = struct {
     ic1: f32 = 0,
     ic2: f32 = 0,
@@ -62,7 +59,6 @@ const Svf = struct {
     }
 };
 
-/// Anti-aliased saw: the step is rounded off with a two-sample polynomial.
 fn sawBlep(p: f32, dt: f32) f32 {
     var s = 2 * p - 1;
     if (p < dt) {
@@ -75,7 +71,6 @@ fn sawBlep(p: f32, dt: f32) f32 {
     return s;
 }
 
-/// Several detuned saws per note, spread across the stereo field and swept through a low pass.
 fn superChord(buf: []f32, rate: f32, at: f32, dur: f32, notes: []const f32, amp: f32, cut0: f32, cut1: f32, attack: f32, release: f32, rng: *Rng) void {
     const frames = buf.len / 2;
     const start: usize = @intFromFloat(at * rate);
@@ -114,7 +109,6 @@ fn superChord(buf: []f32, rate: f32, at: f32, dur: f32, notes: []const f32, amp:
     }
 }
 
-/// Two-operator FM: the modulation dies faster than the tone, so it starts bright and settles glassy.
 fn fm(buf: []f32, rate: f32, at: f32, dur: f32, f: f32, ratio: f32, index: f32, amp: f32, pan: f32) void {
     const frames = buf.len / 2;
     const start: usize = @intFromFloat(at * rate);
@@ -133,7 +127,6 @@ fn fm(buf: []f32, rate: f32, at: f32, dur: f32, f: f32, ratio: f32, index: f32, 
     }
 }
 
-/// Noise through a band pass swept between two cutoffs.
 fn noise(buf: []f32, rate: f32, at: f32, dur: f32, cut0: f32, cut1: f32, q: f32, amp: f32, rise: bool, rng: *Rng) void {
     const frames = buf.len / 2;
     const start: usize = @intFromFloat(at * rate);
@@ -166,7 +159,6 @@ fn kick(buf: []f32, rate: f32, at: f32, amp: f32) void {
     }
 }
 
-/// Sine sub with a touch of drive, so it also reads on small speakers.
 fn sub(buf: []f32, rate: f32, at: f32, dur: f32, f: f32, amp: f32) void {
     const frames = buf.len / 2;
     const start: usize = @intFromFloat(at * rate);
@@ -181,7 +173,7 @@ fn sub(buf: []f32, rate: f32, at: f32, dur: f32, f: f32, amp: f32) void {
     }
 }
 
-/// Ping-pong delay. Two laps let the tails wrap into a loop's start.
+/// Two laps let the tails wrap into a loop's start.
 fn echo(buf: []f32, delay: usize, feedback: f32) void {
     const frames = buf.len / 2;
     for (0..2) |_| {
@@ -193,8 +185,7 @@ fn echo(buf: []f32, delay: usize, feedback: f32) void {
     }
 }
 
-/// Parallel damped combs into series all-passes, per channel, added onto `out`. The buffers are treated
-/// as circular and run for two laps, so a looped sound's tail lands on its own start.
+/// Two circular laps land a loop's tail on its own start.
 fn reverb(al: std.mem.Allocator, send: []const f32, out: []f32, rate: f32, feedback: f32, level: f32) !void {
     const frames = send.len / 2;
     const scale = rate / 44100;
@@ -260,7 +251,6 @@ pub fn renderSfx(al: std.mem.Allocator, which: Sfx, rate_hz: u32) ![]f32 {
     errdefer al.free(buf);
     var rng: Rng = .{};
     switch (which) {
-        // A short glassy tick with an air transient on top.
         .move => {
             fm(buf, rate, 0, 0.05, 2093, 3, 1.6, 0.3, 0);
             noise(buf, rate, 0, 0.012, 7000, 5000, 1.2, 0.5, false, &rng);
@@ -278,7 +268,6 @@ pub fn renderSfx(al: std.mem.Allocator, which: Sfx, rate_hz: u32) ![]f32 {
             fm(buf, rate, 0, 0.16, 1318.5, 2, 1.6, 0.24, 0.25);
             fm(buf, rate, 0.07, 0.26, 880, 2, 1.6, 0.24, -0.25);
         },
-        // Riser into a wide chord with a sub and a kick under the hit.
         .start => {
             noise(buf, rate, 0, 0.42, 600, 9000, 1.6, 0.9, true, &rng);
             const hit = 0.4;
@@ -294,7 +283,6 @@ pub fn renderSfx(al: std.mem.Allocator, which: Sfx, rate_hz: u32) ![]f32 {
             superChord(buf, rate, 0.34, 1.2, &.{ 60, 67, 72, 76, 79 }, 0.03, 700, 6000, 0.05, 0.7, &rng);
             sub(buf, rate, 0.34, 0.6, 65.4, 0.25);
         },
-        // Falling filter over a detuned minor chord.
         .fail => {
             superChord(buf, rate, 0, 1.1, &.{ 45, 48, 52, 57 }, 0.05, 3500, 180, 0.005, 0.5, &rng);
             sub(buf, rate, 0, 0.5, 55, 0.3);
@@ -329,9 +317,7 @@ const lead = [_]f32{
     74, 0, 0,  71, 0, 67, 0, 0,
 };
 
-/// Sixteen bars of melodic house in A minor (Am F C G). The frame count is a whole number of
-/// beats and every voice wraps, so the buffer loops without a seam. The first half keeps the filter
-/// closed and the drums thin; the second half opens up.
+/// Whole beats and wrapping voices make the buffer loop without a seam.
 pub fn renderBgm(al: std.mem.Allocator, rate_hz: u32) ![]f32 {
     const rate: f32 = @floatFromInt(rate_hz);
     const spb: usize = rate_hz * 60 / bpm;
@@ -358,7 +344,6 @@ pub fn renderBgm(al: std.mem.Allocator, rate_hz: u32) ![]f32 {
         const open = slot >= slots / 2;
         const progress = floatOf(slot) / floatOf(slots / 2);
 
-        // A quiet held layer under everything.
         superChord(duck_bus, rate, at, chord_beats * beat_s, &chord, 0.012, 700, 900, 0.3, 0.3, &rng);
         for (stabs) |st| {
             const t = at + floatOf(st[0]) * step_s;
@@ -382,11 +367,9 @@ pub fn renderBgm(al: std.mem.Allocator, rate_hz: u32) ![]f32 {
     }
     echo(send, spb * 3 / 4, 0.22);
 
-    // Drums.
     for (0..beats) |b| {
         const t = floatOf(b) * beat_s;
         const full = b >= beats / 2;
-        // The kick drops out for the first bars of the quiet half.
         if (b >= 16) kick(out, rate, t, 0.62);
         noise(out, rate, t + beat_s / 2, 0.09, 9000, 7500, 1.5, if (full) 0.2 else 0.12, false, &rng);
         if (full) {
@@ -400,7 +383,6 @@ pub fn renderBgm(al: std.mem.Allocator, rate_hz: u32) ![]f32 {
         }
     }
 
-    // Harmony pumps under the kick.
     for (0..frames) |i| {
         const in_beat = floatOf(i % spb) / floatOf(spb);
         const pump = 1 - 0.5 * @exp(-in_beat * 10);
@@ -410,7 +392,6 @@ pub fn renderBgm(al: std.mem.Allocator, rate_hz: u32) ![]f32 {
     mixIn(out, send, 1);
     mixIn(send, duck_bus, 0.5);
     try reverb(al, send, out, rate, 0.84, 0.35);
-    // Well under the effects, which must stay audible over it.
     normalize(out, 0.5);
     return out;
 }

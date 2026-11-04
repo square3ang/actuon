@@ -1,9 +1,7 @@
-//! Linux output straight through libasound. PortAudio's ALSA backend insists on two periods and
-//! fixed formats; this takes whatever buffer the device allows down to one period, as SideALSA's PRO mode does.
+//! PortAudio's ALSA backend insists on two periods; this goes down to one, as SideALSA PRO does.
 const std = @import("std");
 const c = @import("c");
 
-/// Wider devices are refused, so the conversion buffer stays a fixed size.
 pub const max_channels = 8;
 
 pub const Format = enum { f32, s32, s16 };
@@ -12,12 +10,11 @@ pub const Out = struct {
     pcm: *c.snd_pcm_t,
     format: Format,
     channels: u32,
-    /// Frames per write; the device picks it, near the requested size.
+    /// Frames; the device picks it near the requested size.
     period: u32,
     /// Seconds from a write to when its first frame plays, with the device kept one period short of full.
     lead_s: f64,
 
-    /// `period_max` caps the period to what the caller's buffers hold.
     pub fn open(name: []const u8, rate: u32, frames: u32, period_max: u32) ?Out {
         var name_buf: [512]u8 = undefined;
         const name_z = std.fmt.bufPrintSentinel(&name_buf, "{s}", .{name}, 0) catch return null;
@@ -54,7 +51,6 @@ pub const Out = struct {
         var dir: c_int = 0;
         try check(c.snd_pcm_hw_params_set_period_size_near(pcm, hw, &period, &dir));
         if (period > period_max) return error.PeriodTooLarge;
-        // As small as the device goes: one period where it allows that, else two.
         var buffer: c.snd_pcm_uframes_t = period;
         try check(c.snd_pcm_hw_params_set_buffer_size_near(pcm, hw, &buffer));
         try check(c.snd_pcm_hw_params(pcm, hw));
@@ -76,15 +72,12 @@ pub const Out = struct {
         };
     }
 
-    /// Waits until a whole period fits, so the caller mixes only then. False on a timeout or a
-    /// recovered underrun; the caller loops, which lets it notice when to stop.
     pub fn waitRoom(o: *Out) bool {
         const r = c.snd_pcm_wait(o.pcm, 100);
         if (r < 0) _ = c.snd_pcm_recover(o.pcm, r, 1);
         return r > 0;
     }
 
-    /// Writes one period of stereo float, converted to what the device takes.
     pub fn write(o: *Out, stereo: []const f32, scratch: []u8) void {
         const bytes = interleave(scratch, stereo, o.channels, o.format);
         const n = c.snd_pcm_writei(o.pcm, bytes.ptr, o.period);
@@ -101,7 +94,6 @@ fn check(r: c_int) !void {
     if (r < 0) return error.Refused;
 }
 
-/// Stereo float into the device's layout: integers clip instead of wrapping, extra channels stay silent.
 fn interleave(dst: []u8, stereo: []const f32, channels: u32, format: Format) []u8 {
     const frames = stereo.len / 2;
     const size: usize = if (format == .s16) 2 else 4;
@@ -119,7 +111,6 @@ fn interleave(dst: []u8, stereo: []const f32, channels: u32, format: Format) []u
     return out;
 }
 
-/// ALSA's output PCMs by the names `open` takes.
 pub fn outputNames(a: std.mem.Allocator) []const []const u8 {
     var hints: [*c]?*anyopaque = null;
     if (c.snd_device_name_hint(-1, "pcm", &hints) < 0) return &.{};

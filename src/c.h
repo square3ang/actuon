@@ -1,4 +1,3 @@
-// Single translation unit for every C API the client uses (see addTranslateC in build.zig).
 #include <SDL3/SDL.h>
 #include <SDL3_ttf/SDL_ttf.h>
 #include <portaudio.h>

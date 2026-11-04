@@ -1,4 +1,3 @@
-//! Which skin file each screen and key mode uses, as beatoraja's skin select.
 const std = @import("std");
 const c = @import("c");
 const gfx = @import("gfx.zig");
@@ -16,7 +15,7 @@ const slots = std.enums.values(Slot);
 
 pub const State = struct {
     arena: ?std.heap.ArenaAllocator = null,
-    /// The skin files on offer per slot; `""` (the default) and "builtin" come ahead of them.
+    /// `""` (the default) and "builtin" come ahead of these.
     choices: [slots.len][]const []const u8 = @splat(&.{}),
     cursor: usize = 0,
     drop: Drop = .{},
@@ -58,7 +57,6 @@ pub fn close(a: *App) void {
     a.skinslots = .{};
 }
 
-/// Steps through default, built-in and the files; a value no longer on offer counts as the default.
 pub fn cycled(now: []const u8, files: []const []const u8, dir: i32) []const u8 {
     var at: i64 = 0;
     if (std.mem.eql(u8, now, config.builtin_skin)) at = 1;
@@ -149,7 +147,6 @@ pub fn key(a: *App, sc: c.SDL_Scancode) void {
     }
 }
 
-/// "folder/file" for a skin file, the folder alone for a whole skin.
 fn shown(buf: []u8, path: []const u8) []const u8 {
     const dir = std.fs.path.basename(std.fs.path.dirname(path) orelse "");
     return std.fmt.bufPrint(buf, "{s}/{s}", .{ dir, std.fs.path.basename(path) }) catch std.fs.path.basename(path);

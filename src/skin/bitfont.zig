@@ -1,4 +1,3 @@
-//! Bitmap fonts: LR2's .lr2font, following beatoraja's LR2FontLoader, and AngelCode BMFont text .fnt files.
 const std = @import("std");
 const core = @import("actuon_core");
 const fs = @import("../platform/fs.zig");
@@ -22,14 +21,12 @@ pub const Glyph = struct {
 };
 
 pub const BitmapFont = struct {
-    /// The pixel height glyphs were drawn at.
     size: f32 = 0,
-    /// .lr2font: added between glyphs, in skin pixels.
+    /// .lr2font only, in skin pixels.
     margin: f32 = 0,
     /// LR2 stretches each glyph to the text's height and squeezes the line into its width.
     lr2: bool = false,
     pages: []const ?[]const u8 = &.{},
-    /// Where `pages` start in the skin's textures.
     first_tex: i32 = 0,
     glyphs: std.AutoHashMapUnmanaged(u32, Glyph) = .empty,
 };
@@ -111,7 +108,6 @@ fn parseLr2(a: std.mem.Allocator, text: []const u8, dir: []const u8) !?*BitmapFo
     return font;
 }
 
-/// `key=value` from a BMFont line; a quoted value keeps its spaces, and is not searched.
 fn bmValue(line: []const u8, key: []const u8) ?[]const u8 {
     var i: usize = 0;
     while (i < line.len) {
@@ -168,7 +164,6 @@ fn parseBm(a: std.mem.Allocator, text: []const u8, dir: []const u8) !?*BitmapFon
     return font;
 }
 
-/// Null for a missing or unreadable file, such as a binary .fnt: the skin then falls back to a built-in font.
 pub fn load(a: std.mem.Allocator, path: []const u8) ?*BitmapFont {
     // Apart from `a`: the skin keeps what it parses, and a font's text would stay as long as the skin.
     var tmp = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
@@ -182,14 +177,13 @@ pub fn load(a: std.mem.Allocator, path: []const u8) ?*BitmapFont {
     return parseBm(a, bytes, dir) catch null;
 }
 
-/// `load`, for at most `max_fonts` per skin. `loaded` counts every try: a failing one reads its file too.
+/// `loaded` counts every try: a failing one reads its file too.
 pub fn loadCapped(a: std.mem.Allocator, path: []const u8, loaded: *u32) ?*BitmapFont {
     if (loaded.* >= max_fonts) return null;
     loaded.* += 1;
     return load(a, path);
 }
 
-/// Pixel width of `s` at `scale`, margins included.
 pub fn measure(font: *const BitmapFont, s: []const u8, scale: f32) f32 {
     var w: f32 = 0;
     var view = std.unicode.Utf8View.initUnchecked(s).iterator();

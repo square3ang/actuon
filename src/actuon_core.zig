@@ -1,4 +1,3 @@
-//! Deterministic game core plus chart decoding; shared by the client, tools and libactuon_core.
 pub const types = @import("core/types.zig");
 pub const windows = @import("core/windows.zig");
 pub const gauge = @import("core/gauge.zig");
@@ -11,13 +10,13 @@ pub const encoding = @import("bms/encoding.zig");
 
 const std = @import("std");
 
-/// A chart's format. The numbers are what the IR's upload and libactuon_core take.
+/// The numbers are what the IR's upload and libactuon_core take.
 pub const Format = enum(u8) {
     bms = 1,
     pms = 2,
     bmson = 3,
 
-    /// By the file's name, as beatoraja does. .bme and .bml are BMS.
+    /// As beatoraja: .bme and .bml are BMS.
     pub fn of(path: []const u8) Format {
         if (std.ascii.endsWithIgnoreCase(path, ".bmson")) return .bmson;
         if (std.ascii.endsWithIgnoreCase(path, ".pms")) return .pms;
@@ -25,7 +24,6 @@ pub const Format = enum(u8) {
     }
 };
 
-/// Only BMS and PMS read the options.
 pub fn parse(gpa: std.mem.Allocator, format: Format, data: []const u8, opts: bms.Options) !types.Chart {
     if (format == .bmson) return bmson.parse(gpa, data);
     var o = opts;

@@ -1,4 +1,3 @@
-//! SQLite wrapper and the song/score store.
 const std = @import("std");
 const c = @import("c");
 const core = @import("actuon_core");
@@ -136,8 +135,7 @@ fn hasColumn(d: Db, table: []const u8, column: []const u8) !bool {
     return false;
 }
 
-/// A database from before CN and HCN had scores of their own. Its rows are all LN plays, and its charts must be
-/// read again to learn which leave the LN type open.
+/// Before CN and HCN had own scores, every row was an LN play; charts are reread to learn which leave LN type open.
 fn migrateLnModes(d: Db) !void {
     if (try hasColumn(d, "score", "mode")) return;
     try d.exec("BEGIN IMMEDIATE");
@@ -167,8 +165,7 @@ pub fn initSchema(d: Db) !void {
     try dropUnusedColumns(d);
 }
 
-/// Columns older builds wrote and nothing read: chart facts that rescans refill, and timestamps no screen shows.
-/// The score's judge counts and clearcount stay: they are the player's, and no file could give them back.
+/// Rescans refill these chart facts; judge counts and clearcount stay, as no file could give them back.
 fn dropUnusedColumns(d: Db) !void {
     const gone = [_][2][]const u8{
         .{ "song", "total" },           .{ "song", "judgerank" },    .{ "song", "has_mine" }, .{ "song", "has_random" },
@@ -183,8 +180,7 @@ fn dropUnusedColumns(d: Db) !void {
     }
 }
 
-/// Once per database. Old builds kept replays of every LN mode, and a beta filed them all as LN, so each
-/// is labelled from the byte after its gauge: see core.replay.encode.
+/// Once per database: a beta filed every replay as LN, so each is labelled from the byte after its gauge (core.replay.encode).
 fn labelReplayModes(d: Db) !void {
     const version = try d.prepare("PRAGMA user_version");
     const done = (try version.step()) and version.int(0) >= 1;
@@ -197,7 +193,6 @@ fn labelReplayModes(d: Db) !void {
     try d.exec("COMMIT");
 }
 
-/// The LN mode song select's scores and replays are for, on charts that leave it open. Only this connection sees it.
 pub fn setLnMode(d: Db, mode: u8) !void {
     const st = try d.prepare("UPDATE temp.play_setting SET ln_mode=?1");
     defer st.deinit();
@@ -225,7 +220,7 @@ fn isChart(name: []const u8) bool {
 
 pub const ScanStats = struct { parsed: u32 = 0, removed: u32 = 0, failed: u32 = 0 };
 
-/// Charts parsed at once. It bounds memory, as parsed charts wait in memory for their insert.
+/// Bounds memory, as parsed charts wait in memory for their insert.
 const scan_batch = 256;
 
 const ScanJob = struct {
@@ -281,7 +276,6 @@ fn insertBatch(gpa: std.mem.Allocator, d: Db, ins: anytype, jobs: []ScanJob, sta
     defer unparsed.deinit();
     for (jobs) |*job| {
         const chart = &(job.chart orelse {
-            // Remembered, so the next scan skips it until the file changes, and said once.
             std.log.warn("not a chart this player can read: {s}", .{job.path});
             unparsed.bindText(1, job.path);
             unparsed.bindInt(2, job.mtime);
@@ -321,8 +315,7 @@ fn insertBatch(gpa: std.mem.Allocator, d: Db, ins: anytype, jobs: []ScanJob, sta
     try d.exec("COMMIT");
 }
 
-/// Incremental: a chart is only re-parsed if its mtime or size changed.
-/// shortcut: every chart is stat'ed on each pass, move to OS file notifications if huge libraries feel slow.
+/// shortcut: only changed mtime or size re-parses, but every chart is stat'ed on each pass, move to OS file notifications if huge libraries feel slow.
 pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: ?*std.atomic.Value(u32)) !ScanStats {
     var stats: ScanStats = .{};
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -379,8 +372,7 @@ pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: 
     try insertBatch(gpa, d, ins, batch.items, &stats, progress);
     try d.exec("BEGIN IMMEDIATE");
     errdefer d.exec("ROLLBACK") catch {};
-    // Drop rows only under the scanned roots: an unplugged library must not vanish because
-    // its root is gone, so a folder that could not be read keeps its rows.
+    // A folder that could not be read keeps its rows, so an unplugged library does not vanish.
     for (outer) |r| {
         const sel = try d.prepare("SELECT path, 0 FROM song WHERE path LIKE ?1 ESCAPE '\\' UNION ALL SELECT path, 1 FROM unparsed WHERE path LIKE ?1 ESCAPE '\\'");
         defer sel.deinit();
@@ -409,8 +401,7 @@ pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: 
     return stats;
 }
 
-/// The roots no other root holds, each once: a folder added inside another would be scanned
-/// and listed twice.
+/// Else a folder added inside another root would be scanned and listed twice.
 pub fn outerRoots(a: std.mem.Allocator, roots: []const []const u8) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     for (roots, 0..) |r, i| {
@@ -422,7 +413,6 @@ pub fn outerRoots(a: std.mem.Allocator, roots: []const []const u8) ![]const []co
     return out.toOwnedSlice(a);
 }
 
-/// `path` is `dir` itself or inside it.
 pub fn holds(dir: []const u8, path: []const u8) bool {
     return std.mem.eql(u8, dir, path) or isUnder(path, dir);
 }
@@ -469,7 +459,6 @@ pub const Song = struct {
     ex: u32,
     miss: i64,
     played: u32,
-    /// Symbol and level from a difficulty table, empty when the chart is in none.
     table_level: []const u8 = "",
 
     /// A table's level says more than the number the chart's author chose.
@@ -525,7 +514,7 @@ pub fn readSong(a: std.mem.Allocator, st: Stmt) !Song {
     };
 }
 
-/// By chart hash, so a favorite survives moving the files. Returns whether it is one now.
+/// By chart hash, so a favorite survives moving the files.
 pub fn toggleFavorite(d: Db, sha256: []const u8) !bool {
     const del = try d.prepare("DELETE FROM favorite WHERE sha256=?1");
     defer del.deinit();
@@ -572,9 +561,7 @@ pub const ScoreIn = struct {
     source: []const u8 = "",
 };
 
-/// Keeps per-field bests, like beatoraja's ScoreData.update. Local plays add to the play counts; an import
-/// of a source already taken in repeats its totals, so it only raises them.
-// shortcut: a row remembers one source, so alternating two imports still adds up, keep counts per source if that is reported.
+/// As beatoraja's ScoreData.update. shortcut: a row remembers one source, so alternating two imports adds counts twice, keep counts per source if that is reported.
 pub fn recordScore(d: Db, s: ScoreIn) !void {
     const st = try d.prepare(
         \\INSERT INTO score(sha256,clear,ex,pg,gr,gd,bd,pr,ms,max_combo,min_bp,playcount,clearcount,date,source,mode)
@@ -612,7 +599,7 @@ pub fn recordScore(d: Db, s: ScoreIn) !void {
 
 pub const ImportStats = struct { imported: u32 = 0, skipped: u32 = 0 };
 
-/// Imports a beatoraja/lr2oraja player score.db. The source is opened read-only.
+/// The source is opened read-only.
 pub fn importBeatoraja(gpa: std.mem.Allocator, d: Db, path: []const u8) !ImportStats {
     const src = try Db.open(path, gpa, true);
     defer src.close();
@@ -645,8 +632,7 @@ pub fn importBeatoraja(gpa: std.mem.Allocator, d: Db, path: []const u8) !ImportS
     return stats;
 }
 
-/// Imports an LR2 score database. LR2 keys scores by MD5, so a chart must be scanned first to
-/// learn its SHA-256; unknown charts are skipped (same as ScoreDataImporter).
+/// LR2 keys scores by MD5, so unscanned charts are skipped, as in ScoreDataImporter.
 pub fn importLr2(gpa: std.mem.Allocator, d: Db, path: []const u8) !ImportStats {
     const clears = [_]u8{ 0, 1, 4, 5, 6, 8, 9 };
     const src = try Db.open(path, gpa, true);

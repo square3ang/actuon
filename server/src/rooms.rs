@@ -1,13 +1,10 @@
-//! Versus rooms. They live in memory only: a room lasts one sitting, and scores reach the database through
-//! the usual replay check. What a player reports during a song is only ever shown, never ranked: the
-//! winner comes from `final_ex`, which only a verified replay sets.
+//! Live reports are only shown: the winner is `final_ex`, set only by a verified replay.
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 pub const MAX_ROOMS: usize = 1000;
 pub const MAX_PLAYERS: usize = 8;
-/// Time for every player's chart to load, and a countdown after it.
 pub const START_DELAY: Duration = Duration::from_secs(8);
 /// Clients report several times a second, so this much silence means gone.
 const PLAYER_TIMEOUT: Duration = Duration::from_secs(30);
@@ -26,7 +23,6 @@ pub enum RoomError {
 }
 
 impl RoomError {
-    /// As an HTTP status and words, for the client to show.
     pub fn status(&self) -> (u16, &'static str) {
         match self {
             RoomError::NotFound => (404, "no such room"),
@@ -74,7 +70,6 @@ pub struct Room {
     pub sha256: String,
     pub title: String,
     pub round: u32,
-    /// What this round plays: the room's chart may have changed since.
     pub round_sha256: String,
     pub seed: u64,
     pub starts_at: Option<Instant>,
@@ -86,7 +81,7 @@ pub struct Rooms {
     rooms: HashMap<String, Room>,
 }
 
-/// What a client reports each tick. The numbers are clamped, as they end up on other players' screens.
+/// Clamped: the numbers end up on other players' screens.
 pub struct Report {
     pub round: u32,
     pub has_chart: bool,
@@ -121,7 +116,6 @@ fn player(user: i64, name: &str, now: Instant) -> Player {
 }
 
 impl Rooms {
-    /// Silent players leave, and the host's seat passes on to whoever is left.
     fn prune(&mut self, now: Instant) {
         self.rooms.retain(|_, room| {
             room.players
@@ -191,7 +185,6 @@ impl Rooms {
         Ok(())
     }
 
-    /// Takes the player out of whatever room they are in, and hands the host's seat on.
     pub fn leave(&mut self, user: i64) {
         self.rooms.retain(|_, room| {
             room.players.retain(|p| p.user != user);
@@ -281,14 +274,12 @@ impl Rooms {
         Ok(view(code, room, user, now))
     }
 
-    /// The room as one player sees it.
     pub fn view_of(&self, code: &str, user: i64, now: Instant) -> Result<Value, RoomError> {
         let room = self.rooms.get(code).ok_or(RoomError::NotFound)?;
         Ok(view(code, room, user, now))
     }
 
-    /// Only the replay check calls this, with the score it computed. The seed ties a replay to this
-    /// round, and the first one counts, so neither an old best nor a second try can win.
+    /// Only the replay check calls this. The seed ties a replay to this round and the first counts, so no old best or retry wins.
     pub fn record_final(&mut self, code: &str, user: i64, sha256: &str, seed: u64, ex: u32) {
         let Some(room) = self.rooms.get_mut(code) else {
             return;
@@ -379,7 +370,6 @@ mod tests {
         let later = now + START_DELAY;
         rooms.start("AAAAAA", 1, 8, later).unwrap();
         let v = rooms.report("AAAAAA", 2, &report(10), later).ok().unwrap();
-        // Round 1's report no longer counts in round 2.
         assert_eq!(v["players"][1]["ex"], 0);
     }
 

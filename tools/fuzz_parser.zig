@@ -1,5 +1,4 @@
-//! Mutation fuzzer for everything that reads untrusted bytes. Run in ReleaseSafe: a safety panic
-//! or a leak is a bug. Usage: fuzz_parser <list-file> <iterations> [seed]
+//! Usage: fuzz_parser <list-file> <iterations> [seed]. Run in ReleaseSafe: any safety panic or leak is a bug.
 const std = @import("std");
 const core = @import("actuon_core");
 
@@ -34,7 +33,6 @@ pub fn main(init: std.process.Init) !void {
         var chart = (if (seed.bmson) core.bmson.parse(gpa, buf[0..cut]) else core.bms.parse(gpa, buf[0..cut], .{ .seed = r.int(u64) })) catch continue;
         defer chart.deinit();
         ok += 1;
-        // Feed the result through the sim too: hostile timing must not panic it either.
         const s = try core.sim.Sim.create(gpa, &chart, .{});
         defer s.destroy();
         var t: i64 = 0;

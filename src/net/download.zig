@@ -1,4 +1,3 @@
-//! Built-in chart downloader: fetches a package, extracts it safely, and lets the scanner pick it up.
 const std = @import("std");
 const c = @import("c");
 const http = @import("../platform/http.zig");
@@ -13,12 +12,11 @@ pub fn initLocale() void {
     }
 }
 
-/// Fills the "{md5}" placeholder of a download URL template.
 pub fn expand(a: std.mem.Allocator, template: []const u8, md5: []const u8) ![]u8 {
     return std.mem.replaceOwned(u8, a, template, "{md5}", md5);
 }
 
-/// Rejects anything that could land outside the extraction folder. Archives are untrusted.
+/// Archives are untrusted: nothing may land outside the extraction folder.
 pub fn safeEntry(name: []const u8) bool {
     if (name.len == 0 or name[0] == '/' or name[0] == '\\') return false;
     if (name.len >= 2 and name[1] == ':') return false;
@@ -89,8 +87,7 @@ pub const Job = struct {
     extracting: std.atomic.Value(bool) = .init(false),
     thread: ?*c.SDL_Thread = null,
 
-    /// For giving up on a stalled download or at exit. A read blocked on a dead connection cannot
-    /// be interrupted, so if the thread does not finish in time it is left behind with its job.
+    /// A read blocked on a dead connection cannot be interrupted, so a late thread is left behind with its job.
     pub fn abandon(j: *Job) void {
         j.progress.cancel.store(true, .release);
         for (0..60) |_| {
@@ -144,7 +141,6 @@ fn run(j: *Job) !void {
     try unpack(a, archive, dest, .{});
 }
 
-/// A package that fails halfway leaves nothing, but a folder from an earlier download stays.
 fn unpack(a: std.mem.Allocator, archive: []const u8, dest: []const u8, limits: Limits) !void {
     const fresh = !fs.exists(dest);
     errdefer if (fresh) fs.removeTree(dest);
@@ -229,7 +225,6 @@ test "lookup answers name the archive" {
     try std.testing.expect((try packageUrl(a, "{\"downloadURL\":\"file:///etc/passwd\"}")) == null);
 }
 
-/// "12.3 / 148.0 MB", or "12.3 MB" when the server names no size.
 pub fn formatProgress(buf: []u8, done: u64, total: u64) []const u8 {
     const mb = 1024.0 * 1024.0;
     const d = @as(f64, @floatFromInt(done)) / mb;

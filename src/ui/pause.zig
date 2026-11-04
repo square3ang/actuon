@@ -1,5 +1,4 @@
-//! Pause overlay: "PAUSED" slides in from the left, the menu from the right. Resuming plays it
-//! backwards and counts down, so the chart does not restart under the player's hands.
+//! Resuming counts down so the chart does not restart under the player's hands.
 const std = @import("std");
 const c = @import("c");
 const gfx = @import("gfx.zig");
@@ -23,7 +22,6 @@ pub const State = struct {
     last_my: f32 = -1,
 };
 
-/// Fast start, soft landing.
 fn easeOut(x: f32) f32 {
     const k = 1 - std.math.clamp(x, 0, 1);
     return 1 - k * k * k;
@@ -67,7 +65,6 @@ fn activate(a: *App, act: Action) void {
 pub fn key(a: *App, sc: u32) void {
     const p = &a.pause;
     if (p.closing_at != null) {
-        // Change of mind during the countdown: straight back to the menu.
         if (sc == c.SDL_SCANCODE_ESCAPE) {
             p.closing_at = null;
             p.opened_at = c.SDL_GetTicks();
@@ -94,7 +91,7 @@ pub fn key(a: *App, sc: u32) void {
     }
 }
 
-/// Draws over the play scene. The session may be gone afterwards, when a menu click ended it.
+/// The session may be gone afterwards, when a menu click ended it.
 pub fn tick(a: *App) void {
     const p = &a.pause;
     const g = &a.g;
@@ -106,12 +103,10 @@ pub fn tick(a: *App) void {
 
     g.rect(0, 0, g.w, g.h, gfx.well.alpha(@intFromFloat(190 * k)));
 
-    // Left: the word, entering from off screen.
     const word_w = 520 * u;
     _ = g.text(tr("PAUSED"), 72 * u - word_w * (1 - k), g.h * 0.5 - 62 * u, g.scaled(96), gfx.white);
     if (a.record) _ = g.text(tr("Resuming will leave this play unrecorded"), 76 * u - word_w * (1 - k), g.h * 0.5 + 56 * u, g.scaled(20), gfx.amber);
 
-    // Right: the menu on a band of its own, each row landing just after the one above.
     const band_w = 380 * u;
     const row_h = 64 * u;
     const n = itemCount(a);
@@ -156,7 +151,6 @@ pub fn tick(a: *App) void {
         }
         var buf: [4]u8 = undefined;
         const digit = std.fmt.bufPrint(&buf, "{d}", .{left * 3 / count_ms + 1}) catch "";
-        // Each number lands big and settles early in its second.
         const slot = count_ms / 3;
         const age: f32 = @floatFromInt(slot - @min(left % slot, slot));
         const scale = 1 + 0.7 * (1 - easeOut(age / 350));

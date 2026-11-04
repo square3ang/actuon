@@ -1,4 +1,4 @@
-//! BMSON decoder, following jbms-parser's BMSONDecoder.
+//! Follows jbms-parser's BMSONDecoder.
 const std = @import("std");
 const types = @import("../core/types.zig");
 const hash = @import("hash.zig");
@@ -84,8 +84,7 @@ const Timelines = struct {
         return tl;
     }
 
-    /// Adds a point for every y at once. One `get` per y would shift the list on each out-of-order insert,
-    /// which takes minutes on a hostile file of reversed positions.
+    /// One `get` per y would take minutes on a hostile file of reversed positions.
     fn addAll(self: *Timelines, ys: []i64) !void {
         std.mem.sort(i64, ys, {}, std.sort.asc(i64));
         const old = self.items.items;
@@ -254,14 +253,11 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
             return sp.start < y;
         }
     };
-    // per lane, kept sorted by start so lookups are binary searches
     var spans: [types.max_lanes]std.ArrayList(Lnr) = @splat(.empty);
     var placed: std.ArrayList(Placed) = .empty;
-    // per lane, sorted y of every placed note, so LN blocking is a binary search
     var taken: [types.max_lanes]std.ArrayList(i64) = @splat(.empty);
     const take = struct {
-        /// Notes out of order shift the list on every insert; real charts hold a few thousand a lane.
-        /// shortcut: inserts stay O(n) under this cap, move to a balanced tree if a real chart needs more.
+        /// shortcut: inserts stay O(n) under this cap (real charts hold a few thousand a lane), move to a balanced tree if a real chart needs more.
         const max_notes = 1 << 15;
         fn f(alloc: std.mem.Allocator, list: *std.ArrayList(i64), y: i64) !void {
             if (list.items.len >= max_notes) return error.TooBig;
@@ -278,8 +274,6 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
             return (@as(u128, lane) << 64) | @as(u64, @bitCast(y));
         }
     }.f;
-    // late-defined "up" sounds for LN ends
-    // keyed by occKey; a later "up" at the same spot overwrites, as the old last-match scan did
     var ups: std.AutoHashMapUnmanaged(u128, struct { wav: i32, start: i64, dur: i64 }) = .empty;
 
     var id: i32 = 0;
@@ -337,7 +331,6 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
                             }
                         }
                     } else if (occupied.contains(occKey(lane, n.y))) {
-                        // layered note: the extra sound still has to play
                         try bg.append(a, .{ .time_us = tl.micro, .wav = id, .wav_start_us = start_time, .wav_dur_us = dur });
                     } else {
                         try occupied.put(a, occKey(lane, n.y), {});
@@ -375,7 +368,6 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
     }
     chart.wavs = try wavs.toOwnedSlice(a);
 
-    // BGA ids are remapped to header order.
     var bmps: std.ArrayList([]const u8) = .empty;
     var bga_ids: std.AutoHashMapUnmanaged(i64, i32) = .empty;
     for (root.bga.bga_header, 0..) |h, i| {
@@ -394,7 +386,6 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
         }
     }
 
-    // All timelines exist now, so scroll positions can be computed.
     const items = tls.items.items;
     const timelines = try a.alloc(types.Timeline, items.len);
     var ypos: f64 = 0;

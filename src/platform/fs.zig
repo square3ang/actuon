@@ -14,7 +14,6 @@ pub fn write(path: []const u8, data: []const u8) !void {
     return Dir.cwd().writeFile(io, .{ .sub_path = path, .data = data });
 }
 
-/// Write-then-rename, so a crash cannot leave a half-written config or database copy.
 pub fn writeAtomic(gpa: std.mem.Allocator, path: []const u8, data: []const u8) !void {
     const tmp = try std.fmt.allocPrint(gpa, "{s}.tmp", .{path});
     defer gpa.free(tmp);
@@ -86,14 +85,12 @@ pub fn stat(path: []const u8) ?Stat {
     };
 }
 
-/// The path with every symlink resolved, so two names for one directory compare equal.
 pub fn realPath(a: std.mem.Allocator, path: []const u8) ![]u8 {
     return Dir.cwd().realPathFileAlloc(io, path, a);
 }
 
 pub const Entry = struct { name: []const u8, is_dir: bool };
 
-/// Lists one directory; names live in `a`. Missing or unreadable directories list as empty.
 pub fn list(a: std.mem.Allocator, path: []const u8) ![]Entry {
     return listChecked(a, path) catch |e| switch (e) {
         error.OutOfMemory => error.OutOfMemory,
@@ -101,7 +98,6 @@ pub fn list(a: std.mem.Allocator, path: []const u8) ![]Entry {
     };
 }
 
-/// `list` for callers that must tell an empty directory from one they could not read.
 pub fn listChecked(a: std.mem.Allocator, path: []const u8) ![]Entry {
     var out: std.ArrayList(Entry) = .empty;
     var dir = try Dir.cwd().openDir(io, path, .{ .iterate = true });
@@ -120,7 +116,6 @@ pub fn listChecked(a: std.mem.Allocator, path: []const u8) ![]Entry {
 
 pub const test_data_dir = ".zig-cache/tmp/actuon-test-data";
 
-/// Per-user data directory with a trailing separator.
 pub fn dataDir(gpa: std.mem.Allocator) ![]u8 {
     // Tests must never touch the player's settings and scores.
     if (@import("builtin").is_test) return gpa.dupe(u8, test_data_dir ++ "/");
@@ -129,7 +124,6 @@ pub fn dataDir(gpa: std.mem.Allocator) ![]u8 {
     return gpa.dupe(u8, std.mem.span(p));
 }
 
-/// Shows a folder in the system file manager, making it first so a new player sees where things go.
 pub fn openFolder(gpa: std.mem.Allocator, path: []const u8) !void {
     try mkdirs(path);
     const url = try folderUrl(gpa, path, @import("builtin").os.tag == .windows);
@@ -137,8 +131,7 @@ pub fn openFolder(gpa: std.mem.Allocator, path: []const u8) !void {
     if (!c.SDL_OpenURL(url)) return error.OpenFailed;
 }
 
-/// Windows opens a plain path, which keeps non-ASCII user names intact. macOS needs a file URL,
-/// and the space in "Application Support" must be escaped there.
+/// A plain path keeps non-ASCII Windows user names; macOS needs an escaped file URL ("Application Support").
 fn folderUrl(gpa: std.mem.Allocator, path: []const u8, windows: bool) ![:0]u8 {
     if (windows) return gpa.dupeSentinel(u8, path, 0);
     var out: std.ArrayList(u8) = .empty;
@@ -160,8 +153,7 @@ test "a folder opens as an escaped file URL, and as a plain path on Windows" {
     try std.testing.expectEqualStrings("C:\\Users\\\xec\x95\x84\\", win);
 }
 
-/// Finds a referenced asset beside the chart: exact, then case-insensitive, then other extensions
-/// (charts often say .wav where the package ships .ogg).
+/// Exact, then case-insensitive, then other extensions: charts often say .wav where the package ships .ogg.
 pub fn resolveAsset(a: std.mem.Allocator, dir: []const u8, rel: []const u8, exts: []const []const u8) !?[]u8 {
     // Reject escapes: chart files are untrusted and must not read outside their folder.
     if (std.fs.path.isAbsolute(rel) or climbs(rel)) return null;

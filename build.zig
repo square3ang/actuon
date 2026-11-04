@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core })).step);
 
-    // libactuon_core: same judge code for the Rust IR server. Always bounds-checked: it reads uploads.
+    // Always bounds-checked: the IR server feeds it uploads.
     const core_lib = b.addLibrary(.{
         .name = "actuon_core",
         .linkage = .static,
@@ -75,7 +75,6 @@ pub fn build(b: *std.Build) void {
     build_options.addOption([]const u8, "version", @import("build.zig.zon").version);
     mod.addOptions("build_options", build_options);
     const os = target.result.os.tag;
-    // Shaders are WGSL. Vulkan reads naga's SPIR-V; spirv-cross turns that into what the other backends read.
     const shaders = [_][]const u8{ "sprite.vert", "sprite.frag", "upscale.vert", "upscale.frag", "fsrcnnx_unpack.frag", "fsrcnnx_0.frag", "fsrcnnx_1.frag", "fsrcnnx_2.frag", "fsrcnnx_3.frag", "fsrcnnx_4.frag", "fsrcnnx_5.frag", "fsrcnnx_6.frag", "fsrcnnx_7.frag", "fsrcnnx_8.frag", "fsrcnnx_9.frag", "fsrcnnx_10.frag", "fsrcnnx_11.frag", "fsrcnnx_12.frag" };
     for (shaders) |name| {
         const naga = b.addSystemCommand(&.{ "naga", "--keep-coordinate-space" });
@@ -114,8 +113,7 @@ pub fn build(b: *std.Build) void {
         mod.linkFramework("IOKit", .{});
         mod.linkFramework("CoreFoundation", .{});
     }
-    // pkgconf hides MSYS2's own include and lib folders as defaults, but zig does not search them.
-    // translate-c gets include paths only: on Windows, -l fails with "coff does not support linking multiple objects".
+    // zig does not search MSYS2's default folders; translate-c gets includes only, as -l fails on coff there.
     if (os == .windows) {
         const prefix = std.mem.trim(u8, b.run(&.{ "pkg-config", "--variable=prefix", "sdl3" }), "\r\n");
         const include: std.Build.LazyPath = .{ .cwd_relative = b.pathJoin(&.{ prefix, "include" }) };

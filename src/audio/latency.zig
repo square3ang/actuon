@@ -1,5 +1,4 @@
-//! Latency measurement: audio loopback round trip and input-to-judge delay.
-//! Loopback needs the output physically wired to an input (or a monitor source selected as input).
+//! Loopback needs the output wired to an input, or a monitor source selected as input.
 const std = @import("std");
 const c = @import("c");
 const input = @import("../input/input.zig");
@@ -23,7 +22,6 @@ fn loopCb(in: ?*const anyopaque, out: ?*anyopaque, count: c_ulong, _: [*c]const 
     const i: [*]const f32 = @ptrCast(@alignCast(in));
     for (0..count) |f| {
         const pos = l.t % period;
-        // A short full-scale square burst is easy to detect and survives any resampling.
         const v: f32 = if (pos < 48) (if (pos % 8 < 4) @as(f32, 0.9) else -0.9) else 0;
         o[f * 2] = v;
         o[f * 2 + 1] = v;
@@ -90,7 +88,6 @@ fn report(name: []const u8, ns: []u64) void {
 
 const bench_events = 2000;
 
-/// Pushes from its own thread, as the OS input paths do.
 fn benchPusher(_: ?*anyopaque) callconv(.c) c_int {
     for (0..bench_events) |_| {
         c.SDL_DelayPrecise(1_000_000);
@@ -99,7 +96,6 @@ fn benchPusher(_: ?*anyopaque) callconv(.c) c_int {
     return 0;
 }
 
-/// Same wait loop as Session.simThread: enqueue to pop is the delay the judge sees on top of the OS.
 fn queueBench() void {
     const pusher = c.SDL_CreateThread(benchPusher, "bench-push", null) orelse return;
     defer c.SDL_WaitThread(pusher, null);

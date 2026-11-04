@@ -1,4 +1,3 @@
-//! Application shell: SDL setup, event pump, scene switching.
 const std = @import("std");
 const c = @import("c");
 const core = @import("actuon_core");
@@ -53,7 +52,6 @@ pub const App = struct {
     sfx_ready: std.atomic.Value(bool) = .init(false),
     sounds: skin_sound.Player = undefined,
     preview: preview_mod.Preview = undefined,
-    /// The skin's own system sounds, in place of the rendered ones.
     sfx_skin: [std.enums.values(menu_sound.Sfx).len]?*skin_sound.Entry = @splat(null),
     bgm_thread: ?*c.SDL_Thread = null,
     bgm_data: []const f32 = &.{},
@@ -62,7 +60,6 @@ pub const App = struct {
     bgm_slot: u8 = 0,
     /// What slot 0 is looping, so a different skin's music can take over.
     bgm_playing: []const f32 = &.{},
-    /// The skins' own music, in place of the rendered loop.
     bgm_skin: ?*skin_sound.Entry = null,
     sfx_option_open: ?*skin_sound.Entry = null,
     sfx_option_close: ?*skin_sound.Entry = null,
@@ -70,10 +67,9 @@ pub const App = struct {
     sfx_play_ready: ?*skin_sound.Entry = null,
     decide_bgm: ?*skin_sound.Entry = null,
     decide_bgm_on: bool = false,
-    /// A key press a click asked for. Applied after drawing, because keys can replace what is being drawn.
+    /// Applied after drawing, because keys can replace what is being drawn.
     click_key: ?u32 = null,
     last_pump_ns: u64 = 0,
-    /// When the next frame may start under the FPS limit.
     next_frame_ns: u64 = 0,
     db: db_mod.Db,
     scene: Scene = .select,
@@ -92,29 +88,24 @@ pub const App = struct {
     load_total: std.atomic.Value(usize) = .init(0),
     load_done: std.atomic.Value(bool) = .init(false),
     load_parsed: session_mod.Parsed = .{},
-    /// The skin's loading screen is up; 0 until the chart is parsed.
+    /// 0 until the chart is parsed.
     load_skin_at: u64 = 0,
-    /// When loading began, for the skin's scene clock.
     load_at: u64 = 0,
     load_err: bool = false,
     load_thread: ?*c.SDL_Thread = null,
     load_params: session_mod.Params = .{ .path = "" },
     load_result: ?*Session = null,
-    /// Text input routed to whichever scene asked for it.
     text: std.ArrayList(u8) = .empty,
     text_active: bool = false,
     joy_axis: [32]i16 = @splat(0),
     joy_axis_at: [32]u64 = @splat(0),
-    /// Headless capture for tests: save a frame after N ms, then quit.
     practice: practice.State = .{},
     versus: versus.State = .{},
     shot_wanted: bool = false,
-    /// A short message over any screen.
     notice: []const u8 = "",
     notice_until: u64 = 0,
     shot_path: ?[:0]const u8 = null,
     shot_after_ms: u64 = 0,
-    /// Keys the capture presses first, so it can reach any screen.
     shot_keys: std.mem.TokenIterator(u8, .scalar) = std.mem.tokenizeScalar(u8, "", ','),
     shot_key_at: u64 = shot_keys_start_ms,
     start_ms: u64 = 0,
@@ -128,11 +119,9 @@ pub const App = struct {
     select_skin_root: []const u8 = "",
     select_skin_loaded: bool = false,
     select_state: skin_scene.State = .{},
-    /// When song select was entered, its last frame, and the row the skin last showed.
     select_at: u64 = 0,
     select_seen: u64 = 0,
     select_row: usize = 0,
-    /// The finished chart's text and graphs, for the result skin.
     kept: std.heap.ArenaAllocator = undefined,
     /// The banner decode runs beside decide, which doesn't wait for it.
     stagefile_thread: ?*c.SDL_Thread = null,
@@ -141,7 +130,6 @@ pub const App = struct {
     stagefile_w: c_int = 0,
     stagefile_h: c_int = 0,
     stagefile_done: std.atomic.Value(bool) = .init(false),
-    /// Decide runs over the load: sounds decode while it shows. 0 when it is not up.
     want_decide: bool = false,
     decide_at: u64 = 0,
     decide_fade_at: u64 = 0,
@@ -151,16 +139,15 @@ pub const App = struct {
     skin_state: skin_scene.State = .{},
     skin_poll_ms: u64 = 0,
     editor_poll_ms: u64 = 0,
-    /// Editor preview: the file and measure to replay when the editor saves.
     preview_buf: [4096]u8 = undefined,
-    /// The chart being played from song select; `load_params.path` and the session point here.
+    /// `load_params.path` and the session point here.
     play_path_buf: [4096]u8 = undefined,
     play_level_buf: [64]u8 = undefined,
     play_table_buf: [128]u8 = undefined,
     preview_path: []const u8 = "",
     preview_measure: i32 = 0,
     preview_mtime: i64 = 0,
-    /// Set when a preview must start on the next frame, after any running session ends.
+    /// Deferred to the next frame, so any running session ends first.
     preview_pending: bool = false,
 
     pub fn startText(a: *App, initial: []const u8) void {
@@ -175,7 +162,6 @@ pub const App = struct {
         _ = c.SDL_StopTextInput(a.g.win);
     }
 
-    /// A sound only a set has; without one, the rendered sound nearest it.
     pub fn sfxOr(a: *App, entry: ?*skin_sound.Entry, fallback: menu_sound.Sfx) void {
         if (entry) |e| if (e.ready.load(.acquire) and e.data.len > 0) {
             a.engine.uiPlay(skin_sound.nextSlot(&a.sfx_slot), e.data, false, a.cfg.sfx_volume);
@@ -193,7 +179,7 @@ pub const App = struct {
         a.engine.uiPlay(skin_sound.nextSlot(&a.sfx_slot), a.sfx_data[@backingInt(which)], false, a.cfg.sfx_volume);
     }
 
-    /// Lua's audio calls, kept to files inside the skin.
+    /// Skin Lua is untrusted: it may only play files inside a skin folder.
     fn skinAudio(ud: *anyopaque, path: []const u8, op: skin_sound.Op, gain: f32) void {
         const a: *App = @ptrCast(@alignCast(ud));
         if (fs.climbs(path)) return;
@@ -224,11 +210,9 @@ pub const App = struct {
         a.decide_bgm = a.musicSound(al, .decide, "decide");
     }
 
-    /// The picked sound set's file, else the skin's.
     fn systemSound(a: *App, al: std.mem.Allocator, name: []const u8) ?*skin_sound.Entry {
         if (a.cfg.sound_path.len > 0) if (skin_sound.findIn(al, a.cfg.sound_path, name)) |p| return a.sounds.entry(p);
-        // Song select may be built in while the other screens use a skin that brings the sounds.
-        // A skin picked for one other screen only keeps its sounds to itself.
+        // A built-in song select borrows a full skin's sounds; a skin picked for one other screen keeps its own.
         for (std.enums.values(config.SkinSlot)) |slot| {
             if (slot != .select and a.cfg.skins.get(slot).len > 0) continue;
             if (name.len > 0) if (a.skinSound(al, slot, name)) |e| return e;
@@ -236,20 +220,18 @@ pub const App = struct {
         return null;
     }
 
-    /// The picked music set's file, else the skin's.
     fn musicSound(a: *App, al: std.mem.Allocator, slot: config.SkinSlot, name: []const u8) ?*skin_sound.Entry {
         if (a.cfg.bgm_path.len > 0) if (skin_sound.findIn(al, a.cfg.bgm_path, name)) |p| return a.sounds.entry(p);
         return a.skinSound(al, slot, name);
     }
 
-    /// After the music set changes; what plays changes once the new file has decoded.
+    /// What plays changes only once the new file has decoded.
     pub fn refreshBgm(a: *App) void {
         var tmp = std.heap.ArenaAllocator.init(a.gpa);
         defer tmp.deinit();
         a.loadSkinSfx(tmp.allocator());
     }
 
-    /// A sound set's file by beatoraja's name, in the slot's skin; music may have a folder of its own.
     fn skinSound(a: *App, al: std.mem.Allocator, slot: config.SkinSlot, name: []const u8) ?*skin_sound.Entry {
         const dir = a.skinDir(slot);
         if (dir.len == 0) return null;
@@ -260,8 +242,6 @@ pub const App = struct {
         return null;
     }
 
-    /// The menu music: the skin's, else the rendered loop, started the first time it is needed.
-    /// Null while it isn't ready.
     fn menuBgm(a: *App) ?[]const f32 {
         if (a.scene == .select and a.preview.current.len > 0) return a.preview.current;
         if (a.bgm_skin) |e| {
@@ -272,7 +252,6 @@ pub const App = struct {
         return if (a.bgm_ready.load(.acquire)) a.bgm_data else null;
     }
 
-    /// Decide's music plays once, and stops with the screen.
     fn startDecideBgm(a: *App) void {
         const e = a.decide_bgm orelse return;
         if (!e.ready.load(.acquire) or e.data.len == 0) return;
@@ -298,8 +277,7 @@ pub const App = struct {
         return 0;
     }
 
-    /// The loop is rendered off the main thread the first time a menu shows, so a chart launched
-    /// straight from the command line never pays for it.
+    /// The loop renders when a menu first shows, so a chart launched from the command line never pays for it.
     fn tickBgm(a: *App) void {
         a.sounds.tick();
         if (a.scene != .result) if (a.res.music_slot) |s| {
@@ -325,7 +303,7 @@ pub const App = struct {
         }
     }
 
-    /// During play. Under HS auto adjust the green number then refers to the BPM playing now.
+    /// Under HS auto adjust the green number then refers to the BPM playing now.
     pub fn moveCover(a: *App, by: f32) void {
         a.cfg.setCover(a.cfg.lane_cover + by);
         const s = a.session orelse return;
@@ -334,7 +312,6 @@ pub const App = struct {
 
     pub fn startPlay(a: *App, params: session_mod.Params, record: bool) void {
         if (a.load_thread != null) return;
-        // The rendered sound stands in only when no set or skin brings its own for starting a song.
         if ((a.scene == .select or a.scene == .versus) and a.sfx_play_ready == null and a.decide_bgm == null) a.sfx(.start);
         a.load_params = params;
         a.record = record and !params.autoplay and params.replay == null;
@@ -356,7 +333,6 @@ pub const App = struct {
         a.load_thread = c.SDL_CreateThread(loadThread, "loader", a);
     }
 
-    /// A play picked by hand, which opens on the skin's decide screen if it has one.
     pub fn decidePlay(a: *App, params: session_mod.Params, record: bool) void {
         a.startPlay(params, record);
         a.want_decide = true;
@@ -396,7 +372,6 @@ pub const App = struct {
         a.startPlay(.{ .path = a.preview_path, .autoplay = true, .start_us = start_us }, false);
     }
 
-    /// Heartbeat, editor commands, and replay on save. Runs a few times a second, not per frame.
     fn pollEditor(a: *App) void {
         const now = c.SDL_GetTicks();
         if (now - a.editor_poll_ms < 250) return;
@@ -489,7 +464,6 @@ pub const App = struct {
         return 0;
     }
 
-    /// Joins the decode; with `show`, what it made goes up as the banner.
     fn finishStagefile(a: *App, show: bool) void {
         c.SDL_WaitThread(a.stagefile_thread, null);
         a.stagefile_thread = null;
@@ -500,7 +474,6 @@ pub const App = struct {
         if (show) a.skin_state.stagefile = a.g.textureFromPixels(px, a.stagefile_w, a.stagefile_h, @intCast(a.stagefile_w * 4));
     }
 
-    /// Starts the fade out of decide, which ends it.
     fn decideLeave(a: *App, cancel: bool) void {
         if (a.decide_fade_at != 0) return;
         a.decide_fade_at = c.SDL_GetTicks();
@@ -515,7 +488,6 @@ pub const App = struct {
         if (c.SDL_GetTicks() - a.decide_at >= @as(u64, @intCast(@max(sk.input_ms, 0)))) a.decideLeave(false);
     }
 
-    /// Draws decide; false once it is over and the load's own screen takes over.
     fn tickDecide(a: *App) bool {
         const sk = a.decide_skin.?;
         const now = c.SDL_GetTicks();
@@ -633,7 +605,6 @@ pub const App = struct {
         }
     }
 
-    /// No-op without a configured skin. A broken skin falls back to the built-in look rather than blocking play.
     fn reloadSkins(a: *App, mode: core.types.Mode) void {
         a.dropSkins();
         a.skin_mode = mode;
@@ -651,7 +622,6 @@ pub const App = struct {
         a.result_skin = a.loadSlot(al, .result, mode);
     }
 
-    /// A slot's skin; a missing or broken one means the built-in look rather than blocking play.
     fn loadSlot(a: *App, al: std.mem.Allocator, slot: config.SkinSlot, mode: core.types.Mode) ?*skin_mod.model.Skin {
         const root = a.cfg.skinFor(slot);
         if (root.len == 0) return null;
@@ -665,7 +635,6 @@ pub const App = struct {
         };
     }
 
-    /// Brings the song select skin in line with the config; textures stay cached across a reload.
     pub fn syncSelectSkin(a: *App) void {
         const root = a.cfg.skinFor(.select);
         if (a.select_skin_loaded and std.mem.eql(u8, root, a.select_skin_root)) return;
@@ -717,7 +686,6 @@ pub const App = struct {
         a.result_skin = null;
     }
 
-    /// Hot reload, polled once a second.
     fn pollSkin(a: *App, mode: core.types.Mode) void {
         const now = c.SDL_GetTicks();
         if (now - a.skin_poll_ms < 1000) return;
@@ -748,7 +716,6 @@ pub const App = struct {
         if (s.done.load(.acquire)) a.finishPlay(s.snapshot(), true);
     }
 
-    /// Throws the current play away, unrecorded, and loads the same chart again.
     pub fn retryPlay(a: *App) void {
         const s = a.session.?;
         s.stop();
@@ -857,8 +824,7 @@ pub const App = struct {
         }
     }
 
-    /// Clicking anywhere jumps to that fraction of the song, in autoplay.
-    /// Hidden while playing. The pause menu and autoplay's click-to-seek still need it.
+    /// Hidden while playing; the pause menu and autoplay's click-to-seek still need it.
     fn applyCursor(a: *App) void {
         const autoplay = if (a.session) |s| s.params.autoplay else false;
         const hide = a.scene == .play and !a.pause.open and !autoplay;
@@ -944,8 +910,7 @@ pub const App = struct {
         select.tickPad(a, c.SDL_GetTicks());
     }
 
-    // Turntables report an ever-moving axis, so a direction press is any movement and the release
-    // is a short pause in movement.
+    // Turntables report an ever-moving axis: any movement is a press, a short pause in it the release.
     const axis_release_ns = 60 * std.time.ns_per_ms;
 
     fn joyInput(a: *App, code: u16, ts: u64, down: bool) void {
@@ -1005,7 +970,6 @@ pub const App = struct {
         a.running = false;
     }
 
-    /// The screenshot key: the frame just drawn, into the data folder.
     fn saveScreenshot(a: *App) void {
         var ok = false;
         defer a.showNotice(if (ok) tr("Screenshot saved") else tr("Screenshot failed"));
@@ -1142,7 +1106,6 @@ fn screenshotPath(gpa: std.mem.Allocator) ![:0]u8 {
 const shot_keys_start_ms = 2000;
 const shot_key_gap_ms = 300;
 
-/// The black over the built-in song select as it comes in.
 fn fadeInAlpha(age_ms: u64) u8 {
     if (age_ms >= select_fade_ms) return 0;
     return @intCast(255 - age_ms * 255 / select_fade_ms);

@@ -1,6 +1,4 @@
-//! Lua skins: runs the script, converts the returned table for the JSON loader, and keeps the state
-//! alive so functions (draw conditions, values, timers) stay callable. Skins are untrusted: io and
-//! the dangerous parts of os are absent, and module loading stays inside the skin folder.
+//! Lua skins, untrusted: no io or dangerous os, and modules load only from inside the skin folder.
 const std = @import("std");
 const c = @import("c");
 const fs = @import("../platform/fs.zig");
@@ -9,7 +7,6 @@ const skin_sound = @import("../audio/skin_sound.zig");
 const jsonskin = @import("jsonskin.zig");
 const J = std.json.Value;
 
-/// Set while a scene draws, read by the main_state bindings.
 pub var ctx: ?*const m.Ctx = null;
 
 /// How many values one returned table may expand to: `t = {t, t}` doubles at every level.
@@ -69,7 +66,7 @@ fn toJson(l: *c.lua_State, a: std.mem.Allocator, idx: c_int, depth: u32, nodes: 
     }
 }
 
-/// A number id from a skin; out of range it names nothing, like any other unknown id.
+/// An out-of-range id names nothing, like any other unknown id.
 fn checkId(l: ?*c.lua_State) i32 {
     return @intCast(std.math.clamp(c.luaL_checkinteger(l, 1), std.math.minInt(i32), std.math.maxInt(i32)));
 }
@@ -113,7 +110,7 @@ fn msText(l: ?*c.lua_State) callconv(.c) c_int {
 
 const timer_off: i64 = std.math.minInt(i64);
 
-/// Micro-seconds like beatoraja's main_state.timer; Long.MIN_VALUE when off.
+/// Microseconds like beatoraja's main_state.timer; Long.MIN_VALUE when off.
 fn msTimer(l: ?*c.lua_State) callconv(.c) c_int {
     const cx = ctx orelse {
         c.lua_pushinteger(l, timer_off);
@@ -155,14 +152,14 @@ fn msRate(l: ?*c.lua_State) callconv(.c) c_int {
     return 1;
 }
 
-/// main_state.judge(i): the count of judge i, PG first.
+/// Judge i counts from PG = 0.
 fn msJudge(l: ?*c.lua_State) callconv(.c) c_int {
     const i = checkId(l);
     c.lua_pushinteger(l, if (ctx) |cx| cx.num(cx.ud, if (i == 5) 420 else 110 +| i) orelse 0 else 0);
     return 1;
 }
 
-/// Where audio_play goes. While `audio_quiet`, as during a load ahead of the scene, it only decodes.
+/// While `audio_quiet`, as during a load ahead of the scene, audio_play only decodes.
 pub const AudioHook = struct { ud: *anyopaque, f: *const fn (*anyopaque, []const u8, skin_sound.Op, f32) void };
 pub var audio_hook: ?AudioHook = null;
 pub var audio_quiet: bool = false;
@@ -220,11 +217,11 @@ fn registerMainState(l: *c.lua_State) void {
     c.lua_setglobal(l, "main_state");
 }
 
-/// The running skin's `filepath` list, for get_path. Skins load on one thread at a time.
+/// A global is safe: skins load on one thread at a time.
 var path_files: []const J = &.{};
 var path_arena: ?std.mem.Allocator = null;
 
-/// skin_config.get_path(rel): an absolute, real path, since skins pass it to dofile.
+/// Absolute, since skins pass the path to dofile.
 fn getPath(l: ?*c.lua_State) callconv(.c) c_int {
     var n: usize = 0;
     const p = c.luaL_checklstring(l, 1, &n);
@@ -243,7 +240,7 @@ fn getPath(l: ?*c.lua_State) callconv(.c) c_int {
     return 1;
 }
 
-/// Lua side of beatoraja's helper modules; timers are µs, off is TIMER_OFF.
+/// Timers are µs; off is TIMER_OFF.
 const prelude =
     \\local skin_dir = string.gsub((...), "\\", "/")
     \\-- Locals, since a skin can replace anything in `string`.
@@ -446,7 +443,7 @@ fn runFile(l: *c.lua_State, a: std.mem.Allocator, path: []const u8) !J {
     return root;
 }
 
-/// Runs the script without skin_config, which makes beatoraja Lua skins return just their header.
+/// Without skin_config, beatoraja Lua skins return just their header.
 pub fn header(a: std.mem.Allocator, path: []const u8) !J {
     const l = try newState(a, std.fs.path.dirname(path) orelse ".");
     defer c.lua_close(l);
@@ -518,7 +515,6 @@ pub fn callBool(skin: *m.Skin, r: i32) bool {
     return c.lua_toboolean(l, -1) != 0;
 }
 
-/// Calls a text's value function; the result is copied to `buf`, cut if too long.
 pub fn callStr(skin: *m.Skin, r: i32, buf: []u8) []const u8 {
     const l = skin.lua orelse return "";
     _ = c.lua_rawgeti(l, c.LUA_REGISTRYINDEX, r);

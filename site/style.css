@@ -1,5 +1,4 @@
 /* Hallmark · v2.0.0 · theme: actuon design system (by request) · copy: verbatim · posture: restrained · genre: atmospheric · job: try · hero: split, head beside the play screen · nav: edge-aligned · footer: one line of links · signature: the game's own play screen, captured from the build */
-/* critique: the charts are generated demos with stand-in photographs, so a real pack's art would show the game's world better. */
 :root {
   --well: #050810; --plate: #0f1628; --rule: #222e48; --white: #ecf0f8; --cyan: #b0d4ff; --sky: #82beff; --accent: #265cf0;
   --suite: "SUITE", "Noto Sans CJK JP", "Hiragino Sans GB", "Apple SD Gothic Neo", "Yu Gothic", "Microsoft YaHei", Meiryo, sans-serif;

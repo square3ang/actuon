@@ -1,14 +1,11 @@
-//! A versus room on the IR server: one thread holds the player's WebSocket, sends commands and the score, and
-//! keeps the room the server answers with. Nothing about a room goes over plain HTTP.
+//! Nothing about a room goes over plain HTTP.
 const std = @import("std");
 const c = @import("c");
 const http = @import("../platform/http.zig");
 
 pub const code_len = 6;
 pub const max_players = 8;
-/// How often the score goes out, and the room comes back.
 const report_ms = 100;
-/// Tries to reconnect in a row before the room counts as lost.
 const reconnect_tries = 5;
 const reconnect_ms = 1000;
 /// Far above any room: eight names and a title.
@@ -47,7 +44,6 @@ pub const View = struct {
     start_tick: u64 = 0,
     start_round: u32 = 0,
     host: bool = false,
-    /// The server did not take the host's last start or chart.
     order_failed: bool = false,
     players: [max_players]Player = @splat(.{}),
     count: u8 = 0,
@@ -181,7 +177,7 @@ pub const Room = struct {
         return r;
     }
 
-    /// Lets go of the room. A hung request cannot hold the game: the thread cleans up after itself.
+    /// A hung request cannot hold the game: the thread cleans up after itself.
     pub fn leave(r: *Room) void {
         r.quit.store(true, .release);
     }
@@ -224,7 +220,6 @@ pub const Room = struct {
         return std.json.Stringify.valueAlloc(a, fields, .{});
     }
 
-    /// One command and its answer: the room, applied, or the status of an error.
     fn ask(r: *Room, a: std.mem.Allocator, ws: *http.WebSocket, buf: []u8, text: []const u8) !u16 {
         try ws.send(text);
         const body = try ws.receive(buf);
@@ -239,7 +234,7 @@ pub const Room = struct {
         return 200;
     }
 
-    /// The host's start or chart. Refused, it is not sent again: by then the host may want something else.
+    /// Refused, it is not sent again: by then the host may want something else.
     fn order(r: *Room, a: std.mem.Allocator, ws: *http.WebSocket, buf: []u8, text: []const u8) !void {
         if (try r.ask(a, ws, buf, text) == 200) return;
         _ = c.SDL_LockMutex(r.lock);
@@ -247,7 +242,7 @@ pub const Room = struct {
         r.view.order_failed = true;
     }
 
-    /// Enters the room, then reports until the game lets go. Null when the server refused the room.
+    /// Null when the server refused the room.
     fn session(r: *Room, step: *std.heap.ArenaAllocator, ws: *http.WebSocket, entered: *bool, misses: *u32) !?Status {
         var buf: [max_message]u8 = undefined;
         const a = step.allocator();

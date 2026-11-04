@@ -1,4 +1,3 @@
-//! Skin values for the play and result scenes, and the skinned play renderer.
 const std = @import("std");
 const room = @import("../net/room.zig");
 const c = @import("c");
@@ -27,7 +26,6 @@ fn shownDifficulty(ch: *const core.types.Chart) i32 {
 
 const graph_bins = 512;
 
-/// One row of song select as a skin's song bars show it.
 pub const Bar = struct {
     label: []const u8,
     kind: enum(u8) { song, folder, table, grade, missing, command, search },
@@ -45,7 +43,6 @@ pub const BarList = struct {
     at: *const fn (ud: *anyopaque, row: usize) Bar,
 };
 
-/// What song select adds to the state: the selected row's score and where it is.
 pub const SelectInfo = struct {
     kind: @TypeOf(@as(Bar, undefined).kind) = .song,
     clear: u8 = 0,
@@ -57,16 +54,14 @@ pub const SelectInfo = struct {
     search: []const u8 = "",
     /// Which option panel is open: 0 none, 1 play, 2 assist, 3 detail.
     panel: u8 = 0,
-    /// The play options the skin's option buttons show.
     cfg: config.Config = .{},
     mode_index: i64 = 0,
     sort_index: i64 = 0,
-    /// Saved replays of the selected chart, and the slot picked among them.
     replays: u8 = 0,
     replay_slot: u8 = 0,
 };
 
-/// The image a beatoraja option button shows, in beatoraja's order for each.
+/// Values follow beatoraja's order for each button.
 fn optionButton(cfg: *const config.Config, button: i64) ?i64 {
     const on = struct {
         fn f(b: bool) i64 {
@@ -129,15 +124,12 @@ pub const State = struct {
     hidden: f32 = 0,
     clear: core.types.Clear = .no_play,
     show_clear: bool = false,
-    /// The lamp held before this play, on the result screen.
     best_clear: u8 = 0,
     best_ex: u32 = 0,
-    /// What the play is measured against: a pace target, or the live score of a versus opponent.
     target_ex: u32 = 0,
     target_label: []const u8 = "MAX",
     /// The opponent's EX is already where they stand now, so it is not scaled to the song's progress.
     target_live: bool = false,
-    /// The room of a versus round, for skins that show every player.
     versus: ?*const room.View = null,
     last_judge_at: i64 = -1,
     last_seen_judge_at: i64 = std.math.minInt(i64),
@@ -147,24 +139,21 @@ pub const State = struct {
     difficulty: i32 = 0,
     has_bga: bool = false,
     judge_offset_ms: i32 = 0,
-    /// False while the chart's sounds load.
     loaded: bool = true,
     load_frac: f32 = 1,
-    /// How long the loading screen ran; the scene clock carries on from it.
+    /// The scene clock carries on from the loading screen's time.
     load_ms: i64 = 0,
-    /// #STAGEFILE, owned by the app.
+    /// The textures are owned by the app.
     stagefile: ?*gfx.Texture = null,
-    /// #BACKBMP and #BANNER, owned by the app.
     backbmp: ?*gfx.Texture = null,
     banner: ?*gfx.Texture = null,
     notes: []const core.types.Note = &.{},
     timelines: []const core.types.Timeline = &.{},
     graph_end_us: i64 = 0,
     note_counts: [4]i64 = @splat(0),
-    /// Judged notes per graph bin and judge, folded from the snapshot's hits.
     graph_judged: [graph_bins][6]u16 = @splat(@splat(0)),
     hits_seen: u32 = 0,
-    /// This play's upload and ranking, owned by the result screen.
+    /// Owned by the result screen.
     ir_board: ?*ir.Board = null,
 
     pub fn fromSession(st: *State, s: *const Session, cfg: *const config.Config) void {
@@ -175,8 +164,6 @@ pub const State = struct {
         st.timers[40] = st.load_ms;
     }
 
-    /// What can be shown from the parsed chart alone. Called on the loading screen too.
-    /// Copies what points into the chart, so a skin can still read it once the session is gone.
     pub fn keepChart(st: *State, al: std.mem.Allocator) void {
         for ([_]*[]const u8{ &st.title, &st.subtitle, &st.artist, &st.subartist, &st.genre }) |f| {
             f.* = al.dupe(u8, f.*) catch "";
@@ -252,7 +239,7 @@ pub const State = struct {
         return @as(i32, side) * 10 + (if (sc) @as(i32, 0) else idx + 1);
     }
 
-    /// Advances timers from a fresh snapshot. All timer times are scene ms.
+    /// All timer times are scene ms.
     pub fn update(st: *State, snap: Snapshot) void {
         st.snap = snap;
         const now = st.sceneMs(snap.time_us);
@@ -300,7 +287,6 @@ pub const State = struct {
         if (st.bpm > 0 or st.max_bpm > 0) {
             const bpm = if (st.bpm > 0) st.bpm else st.max_bpm;
             const beat: i64 = @intFromFloat(60_000.0 / bpm);
-            // This timer runs 0 to 1000 over each beat, whatever the tempo.
             st.timers[140] = @max(now - @divTrunc(@mod(now, @max(beat, 1)) * 1000, @max(beat, 1)), 0);
         }
     }
@@ -432,7 +418,6 @@ pub const State = struct {
     }
 
     fn scoreRate(st: *const State) f32 {
-        // Song select has no play running: the rate shown is the best score's.
         if (st.select != null) return st.bestRate();
         if (st.total_notes == 0) return 0;
         return @as(f32, @floatFromInt(st.snap.score.exScore())) / @as(f32, @floatFromInt(st.total_notes * 2));
@@ -523,7 +508,6 @@ pub const State = struct {
             407 => @intFromFloat(@mod(sn.gauge * 10, 10)),
             150, 170 => st.best_ex,
             108, 128, 172 => @as(i64, sc.exScore()) - st.best_ex,
-            // Against the pace so far, not the whole song.
             152 => @as(i64, sc.exScore()) - @as(i64, @intFromFloat(@as(f32, @floatFromInt(st.best_ex)) * st.judgedShare())),
             161 => @divTrunc(elapsed, 60),
             162 => @mod(elapsed, 60),
@@ -669,8 +653,7 @@ fn drawNotes(r: *const m.Renderer, s: *Session, view: *play.View, snap: *const S
             .ln_start => {
                 if (note.pair < 0) continue;
                 const pair: usize = @intCast(note.pair);
-                // As beatoraja, it stays until its end passes, whatever was judged: the head waits on the
-                // line under the body, held or not.
+                // As beatoraja, the head waits on the line until the end passes, held or not.
                 if (chart.notes[pair].time_us < t) continue;
                 const active = snap.holding[note.lane] == note.pair;
                 const end = chart.notes[pair];
@@ -701,7 +684,6 @@ fn drawNotes(r: *const m.Renderer, s: *Session, view: *play.View, snap: *const S
     }
 }
 
-/// The JUDGE AREA and BPM GUIDE assists, across every lane the skin places.
 fn drawAssistLines(r: *const m.Renderer, chart: *const core.types.Chart, sc: play.Scroll, cfg: *const config.Config, aids: config.Assists) void {
     if (!aids.judge_area and !aids.bpm_guide) return;
     var left = std.math.inf(f32);
@@ -744,7 +726,6 @@ const graph_colors = [6]gfx.Color{
     .{ .r = 110, .g = 30, .b = 30 },
 };
 
-/// Notes per second as bars: gray until judged, then the judge's color. A line marks where the song is.
 fn drawNotesGraph(g: *gfx.Gfx, st: *const State, d: c.SDL_FRect, now_us: i64) void {
     if (st.graph_end_us <= 0 or d.w <= 0) return;
     var totals: [graph_bins]u16 = @splat(0);
@@ -777,7 +758,6 @@ fn drawNotesGraph(g: *gfx.Gfx, st: *const State, d: c.SDL_FRect, now_us: i64) vo
     g.rect(d.x + d.w * f, d.y, 2, d.h, gfx.white);
 }
 
-/// BPM over the song, the middle height when it never changes.
 fn drawBpmGraph(g: *gfx.Gfx, st: *const State, d: c.SDL_FRect) void {
     if (st.graph_end_us <= 0 or st.timelines.len == 0) return;
     const col: gfx.Color = .{ .r = 0, .g = 255, .b = 0 };
@@ -803,8 +783,6 @@ fn drawBpmGraph(g: *gfx.Gfx, st: *const State, d: c.SDL_FRect) void {
     g.rect(from, yOf(d, bpm, st.min_bpm, span), d.x + d.w - from, 2, col);
 }
 
-/// Recent hits as lines around zero: over the judge windows' bands, or bare for a hit error meter.
-/// A negative width mirrors it, as the skin's destination asks.
 fn drawTiming(g: *gfx.Gfx, o: *const m.Object, st: *const State, snap: *const Snapshot, box: c.SDL_FRect) void {
     const dir: f32 = if (box.w < 0) -1 else 1;
     const half = @abs(box.w) / 2;
@@ -844,7 +822,6 @@ fn drawStagefile(g: *gfx.Gfx, image: ?*gfx.Texture, d: c.SDL_FRect, alpha: f32) 
     g.sprite(tex, fitted.src, fitted.dst, .{ .col = gfx.Color{ .r = 255, .g = 255, .b = 255, .a = @intFromFloat(std.math.clamp(alpha, 0, 255)) } });
 }
 
-/// A screen that only knows the parsed chart: the skin's loading screen, or decide.
 pub fn drawLoading(g: *gfx.Gfx, skin: *m.Skin, st: *State, now_ms: i64) void {
     st.timers[1] = 0;
     const ctx = st.ctx(skin, now_ms);
@@ -864,7 +841,6 @@ pub fn drawLoading(g: *gfx.Gfx, skin: *m.Skin, st: *State, now_ms: i64) void {
     };
 }
 
-/// Draws a whole play frame with a skin. Returns the snapshot used.
 pub fn drawPlay(g: *gfx.Gfx, skin: *m.Skin, st: *State, s: *Session, view: *play.View, cfg: *const config.Config) Snapshot {
     const snap = s.snapshotInto(view.render_state);
     st.bpm = s.chart.bpmAt(snap.time_us);
@@ -901,8 +877,7 @@ pub fn drawPlay(g: *gfx.Gfx, skin: *m.Skin, st: *State, s: *Session, view: *play
     return snap;
 }
 
-/// Which `text` entry a row uses, as ModernChic lists them: general, song, folder, table, grade,
-/// missing, command, search. A shorter list falls back on its first entry.
+/// `text` entries in ModernChic order (general, song, folder, table, grade, missing, command, search), else the first.
 fn barTextIndex(kind: @TypeOf(@as(Bar, undefined).kind), have: usize) usize {
     const at: usize = switch (kind) {
         .song => 2,
@@ -916,12 +891,10 @@ fn barTextIndex(kind: @TypeOf(@as(Bar, undefined).kind), have: usize) usize {
     return if (at < have) at else 0;
 }
 
-/// Which row a place shows, wrapping around the list like beatoraja's.
 fn barRow(scroll_floor: i64, place: usize, center: usize, len: usize) usize {
     return @intCast(@mod(scroll_floor + @as(i64, @intCast(place)) - @as(i64, @intCast(center)), @as(i64, @intCast(len))));
 }
 
-/// Returns the row a click landed on.
 fn drawBars(r: *const m.Renderer, list_obj: *const m.SongList, bars: BarList) ?usize {
     if (bars.len == 0) return null;
     const base = @floor(bars.scroll);
@@ -934,7 +907,6 @@ fn drawBars(r: *const m.Renderer, list_obj: *const m.SongList, bars: BarList) ?u
         const selected = i == list_obj.center and resting and i < list_obj.on.len;
         const place = if (selected) &list_obj.on[i] else off;
         var k = r.visible(place) orelse continue;
-        // On its way to the place above.
         if (!resting and i > 0) if (r.visible(&list_obj.off[i - 1])) |to| {
             k.x += (to.x - k.x) * frac;
             k.y += (to.y - k.y) * frac;
@@ -976,7 +948,6 @@ fn drawBars(r: *const m.Renderer, list_obj: *const m.SongList, bars: BarList) ?u
     return clicked;
 }
 
-/// Song select: the skin's objects with the song bars. Returns the row a click landed on.
 pub fn drawSelect(g: *gfx.Gfx, skin: *m.Skin, st: *State, now_ms: i64, bars: BarList) ?usize {
     const ctx = st.ctx(skin, now_ms);
     skin_mod.setLuaCtx(&ctx);
@@ -1009,7 +980,6 @@ test "a short text list falls back on its first entry" {
     try std.testing.expectEqual(@as(usize, 0), barTextIndex(.folder, 2));
 }
 
-/// Static scene (result): draws all objects against a frozen state.
 pub fn drawStatic(g: *gfx.Gfx, skin: *m.Skin, st: *State, now_ms: i64) void {
     const ctx = st.ctx(skin, now_ms);
     skin_mod.setLuaCtx(&ctx);

@@ -1,7 +1,3 @@
-//! Versus play: a screen of its own, laid out after osu!lazer's multiplayer. A lounge creates or joins a room;
-//! in the room the players are on the left, the chart on the right and the actions in the footer.
-//! It also starts each round and shows the scores during and after it.
-//! Against one player their score fills the skin's target slot, so existing skins show it unchanged.
 const std = @import("std");
 const c = @import("c");
 const gfx = @import("gfx.zig");
@@ -25,21 +21,16 @@ pub const State = struct {
     view: room_mod.View = .{},
     /// The lounge's cursor is on joining, not creating.
     join_row: bool = false,
-    /// Typing a room's code.
     joining: bool = false,
-    /// On song select to choose the room's chart.
     picking: bool = false,
-    /// The round already started here.
     played_round: u32 = 0,
-    /// The room's chart in the library, null when it is not there.
     chart: ?db_mod.Song = null,
     chart_arena: ?std.heap.ArenaAllocator = null,
     chart_checked: [64]u8 = @splat(0),
-    /// In a round started here, from loading to the result screen.
+    /// From loading to the result screen.
     in_round: bool = false,
-    /// When this round's song starts. The view's clock moves as soon as the host starts another.
+    /// Kept here because the view's clock moves as soon as the host starts another round.
     start_tick: u64 = 0,
-    /// When this round's result screen opened, 0 before it.
     result_at: u64 = 0,
     message: []const u8 = "",
     report: room_mod.Report = .{},
@@ -49,7 +40,6 @@ fn signedIn(a: *const App) bool {
     return a.cfg.ir_url.len > 0 and a.cfg.ir_token.len > 0;
 }
 
-/// Lets go of the room and its chart, back to the lounge.
 pub fn leave(a: *App) void {
     const v = &a.versus;
     if (v.room) |r| r.leave();
@@ -82,7 +72,7 @@ fn joinRoom(a: *App) void {
     };
 }
 
-/// The versus key on song select: opens the versus screen, and a host's selected chart becomes the room's.
+/// A host's selected chart becomes the room's.
 pub fn openScreen(a: *App) void {
     const v = &a.versus;
     if (!signedIn(a)) {
@@ -98,7 +88,6 @@ pub fn openScreen(a: *App) void {
     if (!std.mem.eql(u8, song.sha256, &v.view.sha256)) r.setChart(song.sha256, song.title);
 }
 
-/// The host's way to change the chart: song select, where opening a chart hands it to the room.
 fn startPicking(a: *App) void {
     a.versus.picking = true;
     a.sel.status = tr("Open a chart to play it in the room. Esc goes back to the room.");
@@ -169,7 +158,6 @@ pub fn key(a: *App, sc: u32) void {
     }
 }
 
-/// The room's chart from the library, read again when the room changes it or a rescan may have.
 fn loadChart(a: *App) void {
     const v = &a.versus;
     if (std.mem.eql(u8, &v.chart_checked, &v.view.sha256)) return;
@@ -242,7 +230,6 @@ fn startRound(a: *App) void {
     a.skin_state.versus = &v.view;
 }
 
-/// The other player highest on the board, for the target slot. Null with nobody else there.
 pub fn opponent(v: *const room_mod.View) ?*const room_mod.Player {
     var best: ?*const room_mod.Player = null;
     for (v.players[0..v.count]) |*p| {
@@ -291,7 +278,7 @@ fn shownEx(p: *const room_mod.Player) u32 {
     return p.final_ex orelse p.ex;
 }
 
-/// A small board for what skins have no place for: more than one opponent, an opponent with no target slot, or a lost connection.
+/// For what skins have no place for: more than one opponent, no target slot, or a lost connection.
 pub fn drawPlayBoard(a: *App) void {
     const v = &a.versus;
     if (!v.in_round) return;
@@ -324,7 +311,7 @@ fn drawBoard(a: *App, x: f32, y: f32) void {
     }
 }
 
-/// Who won the last round, once the replays are checked. A score not checked yet is shown, and cannot win.
+/// A score not checked yet is shown, and cannot win.
 pub fn drawResult(a: *App) void {
     const v = &a.versus;
     if (!v.in_round) return;
@@ -348,12 +335,10 @@ pub fn drawResult(a: *App) void {
     }
 }
 
-/// The winner, once every score is in or the wait for one is over.
 fn roundWinner(v: *const State, list: []const *const room_mod.Player) ?*const room_mod.Player {
     return winner(list, v.result_at != 0 and c.SDL_GetTicks() - v.result_at >= winner_wait_ms);
 }
 
-/// Only a checked score counts, and nobody has won until everyone's is in or `waited_out`.
 fn winner(list: []const *const room_mod.Player, waited_out: bool) ?*const room_mod.Player {
     var best: ?*const room_mod.Player = null;
     if (!waited_out) for (list) |p| {
@@ -373,7 +358,7 @@ fn hasChart(v: *const room_mod.View) bool {
 
 const Seat = enum { idle, no_chart, playing, results, winner };
 
-/// What a player's row says, from what the room already sends: it keeps no ready state.
+/// Derived from what the room already sends: it keeps no ready state.
 fn seatOf(p: *const room_mod.Player, v: *const room_mod.View, top: ?*const room_mod.Player) Seat {
     if (top == p) return .winner;
     if (!p.has_chart) return if (hasChart(v)) .no_chart else .idle;
@@ -382,7 +367,6 @@ fn seatOf(p: *const room_mod.Player, v: *const room_mod.View, top: ?*const room_
     return if (p.judged > 0) .playing else .idle;
 }
 
-/// The same frame as the other menus: a title, panels of rows, and the keys along the bottom.
 pub fn draw(a: *App) void {
     const g = &a.g;
     const v = &a.versus;
@@ -405,7 +389,6 @@ pub fn draw(a: *App) void {
     select.drawCommands(a, &.{.{ .sc = c.SDL_SCANCODE_ESCAPE, .label = tr("Esc Leave") }});
 }
 
-/// Settings' frame: panels from under the title down to the help box, which sits over the commands.
 const Frame = struct { x: f32, w: f32, top: f32, bottom: f32, help_y: f32 };
 
 fn frame(a: *const App) Frame {
@@ -414,10 +397,9 @@ fn frame(a: *const App) Frame {
     return .{ .x = 14 * u, .w = a.g.w - 28 * u, .top = 72 * u, .bottom = help_y - 8 * u, .help_y = help_y };
 }
 
-/// Settings' row pitch, in 720p units. A panel's heading takes one.
+/// Settings' row pitch, in 720p units.
 const menu_row = 54;
 
-/// A settings row: the label on the left, the value on the right, over `fill` when it has one.
 fn drawRow(g: *gfx.Gfx, x: f32, y: f32, w: f32, label: []const u8, label_col: gfx.Color, value: []const u8, value_col: gfx.Color, fill: ?gfx.Color) void {
     const u = g.h / 720;
     const h = (menu_row - 4) * u;
@@ -430,13 +412,12 @@ fn drawRow(g: *gfx.Gfx, x: f32, y: f32, w: f32, label: []const u8, label_col: gf
     g.textClip(value, @max(value_x, right - g.measure(value, g.scaled(14))), ty + u, right - value_x, g.scaled(14), value_col);
 }
 
-/// The cursor's row is filled, as is one under the mouse.
 fn rowFill(g: *const gfx.Gfx, on: bool, x: f32, y: f32, w: f32) ?gfx.Color {
     if (on) return gfx.accent;
     return if (g.hit(x, y, w, (menu_row - 4) * g.h / 720)) gfx.rule else null;
 }
 
-/// osu!lazer lists open rooms here. These rooms are private, so a code takes the list's place.
+/// Rooms are private, so a code takes the place of osu!lazer's room list.
 fn drawLounge(a: *App) void {
     const g = &a.g;
     const v = &a.versus;
@@ -454,7 +435,6 @@ fn drawLounge(a: *App) void {
         const value_col = if (on) gfx.white else gfx.dim;
         const value = if (join) (if (v.joining) "" else tr("Room code")) else if (song) |s| s.title else tr("No chart yet");
         drawRow(g, rx, ry, rw, label, gfx.white, value, value_col, rowFill(g, on, rx, ry, rw));
-        // Settings' text field, over the value.
         if (join and v.joining) {
             const rh = (menu_row - 4) * u;
             const fx = rx + 260 * u;
@@ -481,7 +461,6 @@ fn drawLounge(a: *App) void {
     });
 }
 
-/// The help box under settings' rows: what this does, then a message.
 fn drawHelp(a: *App, help: []const u8, message: []const u8) void {
     const g = &a.g;
     const u = g.h / 720;
@@ -518,7 +497,6 @@ fn drawRoom(a: *App) void {
         g.textRight(tr("LEVEL"), rx + rw - 26 * u - g.measure(song.shownLevel(), g.scaled(24)), f.top + 18 * u, g.scaled(14), gfx.dim);
     }
     drawChart(a, rx + 8 * u, f.top + menu_row * u, rw - 16 * u);
-    // The round's start, as a row at the foot of the chart.
     const sy = f.bottom - 8 * u - (menu_row - 4) * u;
     if (!v.view.host) {
         drawRow(g, rx + 8 * u, sy, rw - 16 * u, tr("Waiting for the host"), gfx.dim, "", gfx.dim, null);
@@ -544,13 +522,11 @@ fn drawRoom(a: *App) void {
     });
 }
 
-/// A row: the name, then what the player is doing, then the score.
 fn drawPlayer(a: *App, p: *const room_mod.Player, top_player: ?*const room_mod.Player, x: f32, y: f32, w: f32) void {
     const g = &a.g;
     const u = g.h / 720;
     const v = &a.versus.view;
     const seat = seatOf(p, v, top_player);
-    // Nothing to show for a player who has not played this round. A score not checked yet is the live tag's colour.
     var buf: [16]u8 = undefined;
     const score = if (v.round == 0 or (p.final_ex == null and p.judged == 0)) "" else std.fmt.bufPrint(&buf, "{d}", .{shownEx(p)}) catch "";
     const score_col = if (seat == .winner) gfx.amber else if (p.final_ex == null) gfx.sky else gfx.white;
@@ -568,7 +544,6 @@ fn drawPlayer(a: *App, p: *const room_mod.Player, top_player: ?*const room_mod.P
     _ = g.text(tag[0], tx, ty, g.scaled(14), tag[1]);
 }
 
-/// The chart's facts as rows, under the panel's heading.
 fn drawChart(a: *App, x: f32, y: f32, w: f32) void {
     const g = &a.g;
     const v = &a.versus;
@@ -585,7 +560,6 @@ fn drawChart(a: *App, x: f32, y: f32, w: f32) void {
     _ = select.drawSongData(g, song, x + 10 * u, y, w - 20 * u);
 }
 
-/// The clock of a round about to start, over the loading screen.
 pub fn drawCountdown(a: *App) void {
     const v = &a.versus;
     if (!v.in_round) return;

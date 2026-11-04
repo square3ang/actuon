@@ -1,5 +1,3 @@
-//! The multiplayer connection: one WebSocket per player carries every room command and score, so nothing
-//! about a room goes over plain HTTP. Each command gets exactly one answer, the room or an error.
 use crate::rooms::{self, Report, RoomError, Rooms};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -87,7 +85,6 @@ impl Session {
         let user = self.user;
         match command {
             Command::Create { sha256, title } => {
-                // A room may open with no chart yet: the host picks one inside it.
                 if !(sha256.is_empty() && title.is_empty()) {
                     check_chart(&sha256, &title)?;
                 }
@@ -137,7 +134,6 @@ impl Session {
     }
 }
 
-/// Runs one player's connection until it closes. `stream` has already been upgraded.
 pub fn serve<S: Read + Write>(stream: S, rooms: &Mutex<Rooms>, mut session: Session) {
     let config = WebSocketConfig::default()
         .max_message_size(Some(MAX_MESSAGE))

@@ -1,4 +1,4 @@
-// Checks the site's language redirect and that every page links to every language. Usage: node tests/site_lang.mjs
+// Usage: node tests/site_lang.mjs
 import assert from "node:assert";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";

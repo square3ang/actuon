@@ -1,4 +1,3 @@
-//! The public IR page: server-rendered HTML over the IR server's JSON, with no script in the browser.
 //! Usage: actuon-web ADDR IR_URL
 
 use serde::{de::DeserializeOwned, Deserialize};
@@ -23,7 +22,7 @@ const CLEAR_NAMES: [&str; 11] = [
     "PERFECT",
     "MAX",
 ];
-/// EASY in beatoraja's numbering, as the server counts clears: NO PLAY, FAILED and the assist lamps come before it.
+/// EASY in beatoraja's clear numbering, which the server uses.
 const FIRST_CLEAR: usize = 4;
 const WORKERS: usize = 4;
 
@@ -106,7 +105,6 @@ fn esc(s: &str) -> String {
     out
 }
 
-/// The cabinet's fixed digit cells: leading zeros stay, dimmed.
 fn digits(n: u32, cells: usize) -> String {
     let text = format!("{n:0cells$}");
     let lit = text.trim_start_matches('0');
@@ -138,7 +136,6 @@ fn lookup(refused: bool) -> String {
     )
 }
 
-/// A chart the server could not name still needs a link to click.
 fn chart_name(title: &str, sha: &str) -> String {
     esc(if title.is_empty() { &sha[..16] } else { title })
 }

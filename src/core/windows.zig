@@ -1,5 +1,4 @@
-//! LR2 judge windows. Port of JudgeProperty.LR2 / JudgeWindowRule.createLR2 from lr2oraja-endlessdream (GPLv3).
-//! Values are {late bound, early bound} in microseconds, with dmtime = note time - input time.
+//! LR2 judge windows {late, early} in µs of note - input time, ported from lr2oraja-endlessdream's JudgeProperty (GPLv3).
 
 pub const Window = [2]i64;
 

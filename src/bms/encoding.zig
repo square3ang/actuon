@@ -1,4 +1,3 @@
-//! Text decoding for BMS files: UTF-8 / BOM / EUC-KR (CP949) / Shift-JIS (CP932).
 const std = @import("std");
 const tables = @import("enc_tables.zig");
 
@@ -30,8 +29,7 @@ fn isStrictEucKr(bytes: []const u8) bool {
     return true;
 }
 
-/// Same priority as beatoraja's detector (EUC-KR before MS932), with UTF-8 checked first
-/// because valid multi-byte UTF-8 essentially never round-trips as legacy text.
+/// beatoraja's order (EUC-KR before MS932), after UTF-8, which legacy text almost never passes as.
 pub fn detect(bytes: []const u8) Encoding {
     if (std.mem.startsWith(u8, bytes, "\xEF\xBB\xBF")) return .utf8;
     if (std.mem.startsWith(u8, bytes, "\xFF\xFE")) return .utf16le;
@@ -49,7 +47,6 @@ pub fn detect(bytes: []const u8) Encoding {
     return .sjis;
 }
 
-/// Decodes to UTF-8. Undecodable bytes become U+FFFD; never fails on content.
 pub fn toUtf8(gpa: std.mem.Allocator, bytes: []const u8, enc: Encoding) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);

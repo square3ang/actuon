@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backup and restore round trip against a local rclone remote. Usage: backup_check.py BACKUP_SH WORKDIR"""
+"""Usage: backup_check.py BACKUP_SH WORKDIR"""
 import glob, os, sqlite3, subprocess, sys
 
 script, work = os.path.abspath(sys.argv[1]), sys.argv[2]

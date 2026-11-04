@@ -1,4 +1,3 @@
-//! One play of one chart: loads assets, runs the sim thread, records the replay.
 const std = @import("std");
 const c = @import("c");
 const core = @import("actuon_core");
@@ -13,7 +12,6 @@ const Note = core.types.Note;
 
 pub const audio_exts: []const []const u8 = &.{ "wav", "ogg", "flac", "mp3" };
 
-/// One judged note, for skins that chart recent timing.
 pub const Hit = struct {
     at_us: i64 = 0,
     fast_us: i32 = 0,
@@ -22,11 +20,9 @@ pub const Hit = struct {
 };
 pub const hit_ring = 64;
 
-/// One judged press, kept for the whole play so the result can chart its timing.
 pub const TimedHit = struct { fast_us: i32, judge: u8 };
 
-/// What the loader knows once the chart is parsed, before its sounds decode.
-/// The chart's slices live until the session does; only a load that then fails frees them.
+/// The chart's slices live as long as the session; only a failed load frees them.
 pub const Parsed = struct {
     chart: Chart = undefined,
     ready: std.atomic.Value(bool) = .init(false),
@@ -49,22 +45,21 @@ pub const Snapshot = struct {
     finished: bool = false,
     held: [core.types.max_lanes]bool = @splat(false),
     processing: [core.types.max_lanes]bool = @splat(false),
-    /// The end note of the long note each lane is holding, -1 when none. A plain long note leaves
-    /// its head note's state untouched while held, so this is how a renderer knows it was hit.
+    /// End note of the LN each lane holds, -1 for none: a held plain LN leaves its head untouched, so renderers look here.
     holding: [core.types.max_lanes]i32 = @splat(-1),
     flash_at_us: [core.types.max_lanes]i64 = @splat(-10_000_000),
     bomb_at_us: [core.types.max_lanes]i64 = @splat(-10_000_000),
     bomb_judge: [core.types.max_lanes]u8 = @splat(0),
 };
 
-/// A section of a chart to loop, at another speed and judge. Times are the chart's own.
+/// Times are the chart's own.
 pub const Practice = struct {
     pub const min_freq = 50;
     pub const max_freq = 200;
 
     start_us: i64,
     end_us: i64,
-    /// Percent of the normal speed; the pitch moves with it, as beatoraja's FREQ does.
+    /// Percent; the pitch moves with it, as beatoraja's FREQ does.
     freq: u32 = 100,
     /// Percent, 0 for the chart's own.
     judgerank: i32 = 0,
@@ -75,7 +70,6 @@ fn scaled(t: i64, freq: u32) i64 {
     return @divTrunc(t *| 100, @as(i64, freq));
 }
 
-/// Leaves only the section's notes to judge, their sounds still playing, and moves every time to the new speed.
 /// shortcut: BGA video runs at its own speed under another FREQ; slow the decoder clock if players mind.
 pub fn applyPractice(chart: *Chart, p: Practice) !void {
     const al = chart.arena.allocator();
@@ -91,7 +85,6 @@ pub fn applyPractice(chart: *Chart, p: Practice) !void {
     var last_note: i64 = 0;
     chart.total_notes = 0;
     for (chart.notes, new_index) |n, *ni| {
-        // A long note must lie wholly inside, or it could not be held to its end.
         const whole = inSection(n, p) and (n.pair < 0 or inSection(chart.notes[@intCast(n.pair)], p));
         if (!whole) {
             ni.* = -1;
@@ -143,24 +136,21 @@ pub fn applyPractice(chart: *Chart, p: Practice) !void {
 }
 
 pub const Params = struct {
-    /// Loop this section instead of playing the chart. Never recorded.
+    /// Never recorded.
     practice: ?Practice = null,
     path: []const u8,
-    /// The options a replay records. Its chart and events are filled in when the replay is made.
+    /// Chart and events are filled in when the replay is made.
     rec: core.replay.Replay = .{},
-    /// What a replay cannot record: a play with any of it is not saved.
+    /// A play with any of it is not saved.
     assist: config.Assist = .{},
-    /// Difficulty table level to show instead of the chart's own, when it has one.
     table_level: []const u8 = "",
     table_name: []const u8 = "",
     autoplay: bool = false,
-    /// Replay to play back instead of live input.
     replay: ?core.replay.Replay = null,
     start_us: i64 = 0,
     selected_random: ?[]const i32 = null,
     judge_offset_us: i64 = 0,
     allow_input: bool = true,
-    /// Course play carries the gauge over from the previous stage.
     initial_gauge: ?f32 = null,
 };
 
@@ -202,12 +192,11 @@ pub const Session = struct {
     last_event_t: i64 = std.math.minInt(i64),
     end_us: i64,
     load_warnings: u32 = 0,
-    /// Copy of sim.state for the render thread, guarded by `lock`.
+    /// Guarded by `lock`.
     vis: []u8,
 
     const no_seek = std.math.minInt(i64);
-    /// Judged time stays this far behind the clock, so a press that took a while to get here is still judged when it happened.
-    // shortcut: an event later than this counts from when it arrived, raise it if SDL input on a slow frame loses timing.
+    /// shortcut: judging lags the clock by this, so later events count from arrival; raise it if SDL input on slow frames loses timing.
     const input_grace_us = 20_000;
 
     pub fn parseFile(gpa: std.mem.Allocator, path: []const u8, selected: ?[]const i32, seed: u64) !Chart {
@@ -263,7 +252,7 @@ pub const Session = struct {
         return @max(rate * 100 / p.freq, 1);
     }
 
-    /// Blocking: runs on a loader thread. `progress` counts decoded sounds.
+    /// Blocking: runs on a loader thread.
     pub fn create(gpa: std.mem.Allocator, engine: *engine_mod.Engine, cfg: *const config.Config, params: Params, progress: *std.atomic.Value(usize), total: *std.atomic.Value(usize), parsed: *Parsed) !*Session {
         var chart = try parseFile(gpa, params.path, params.selected_random orelse if (params.replay) |r| r.bms_random else null, params.rec.seed);
         errdefer chart.deinit();
@@ -383,8 +372,7 @@ pub const Session = struct {
     }
 
     fn applyInput(s: *Session, t_in: i64, lane: u8, key: u8, down: bool) void {
-        // keep the stream ordered: replays and the sim both depend on it
-        // Nor may it fall behind judged time: a replay judges every event before stepping past it.
+        // Replays and the sim need events ordered and never behind judged time, which a replay steps past.
         const t = @max(t_in, s.last_event_t, s.sim.grid_t);
         s.last_event_t = t;
         const ev: core.sim.Event = .{ .time_us = t, .lane = lane, .key = key, .down = down };
@@ -481,7 +469,6 @@ pub const Session = struct {
         return 0;
     }
 
-    /// Back to the top of the practice section, with a clean score.
     fn restartSection(s: *Session, snap: *Snapshot) void {
         const fresh = Sim.create(s.gpa, &s.chart, simConfig(s.params, false)) catch return;
         s.engine.stopAll();
@@ -513,7 +500,7 @@ pub const Session = struct {
         snap.* = .{};
     }
 
-    /// Snapshot plus per-note state, copied atomically into `dst`.
+    /// Copied atomically into `dst`.
     pub fn snapshotInto(s: *Session, dst: []u8) Snapshot {
         _ = c.SDL_LockMutex(s.lock);
         defer _ = c.SDL_UnlockMutex(s.lock);
@@ -535,7 +522,6 @@ pub const Session = struct {
         s.engine.pause(true);
     }
 
-    /// Every note is judged by now, so only the rest of the music is left.
     pub fn canSkip(s: *const Session, snap: Snapshot) bool {
         return s.params.practice == null and snap.time_us > s.chart.last_note_us + 1_000_000;
     }
@@ -571,19 +557,16 @@ fn isTimedHit(judge: u8) bool {
     return judge < 4;
 }
 
-/// Where the audio clock begins: a play from the top gets a lead-in, one from mid-chart has its own.
 fn firstUs(start_us: i64) i64 {
     return start_us - (if (start_us > 0) @as(i64, 0) else preroll_us);
 }
 
-/// A chart can stop placing notes long before its music does: play on until the sound ends.
-/// A practice section ends where it was set, whatever the sound does.
+/// Notes can end long before the music, so play on until the sound ends; a practice section ends where set.
 fn playEnd(chart: *const Chart, samples: []const decode.Sample, rate: u32, practice: bool) i64 {
     if (practice) return chart.last_time_us;
     return @max(chart.last_time_us, chartAudioEnd(chart, samples, rate));
 }
 
-/// Song time at which a sound started at `time_us` stops playing.
 fn soundEnd(time_us: i64, wav: i32, start_us: i64, dur_us: i64, samples: []const decode.Sample, rate: u32) i64 {
     if (wav < 0 or wav >= samples.len) return time_us;
     const frames: i64 = @intCast(samples[@intCast(wav)].frames());
@@ -610,7 +593,6 @@ test "an input older than judged time scores the same when resimulated" {
     s.events = try .initCapacity(gpa, 4);
     defer s.events.deinit(gpa);
     const note_t = chart.notes[0].time_us;
-    // The note has become a miss when the press, stamped right on it, arrives.
     s.sim.advance(note_t + 1_000_000);
     s.applyInput(note_t, chart.notes[0].lane, 0, true);
     try std.testing.expectEqual(note_t + 1_000_000, s.events.items[0].time_us);

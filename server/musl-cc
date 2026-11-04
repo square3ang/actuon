@@ -1,5 +1,5 @@
 #!/bin/sh
-# The C compiler for static builds: cc-rs passes Rust's target triple, which zig cc cannot read, so zig's own goes instead.
+# cc-rs passes Rust's target triple, which zig cc cannot read, so zig's own goes instead.
 for arg; do
 	shift
 	case $arg in --target=*) ;; *) set -- "$@" "$arg" ;; esac

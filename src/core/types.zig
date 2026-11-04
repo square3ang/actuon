@@ -1,4 +1,4 @@
-//! Shared chart model. Pure data: no I/O, usable from client, replay verifier and tools.
+//! No I/O: the replay verifier and tools use this too.
 const std = @import("std");
 
 pub const max_lanes = 18;
@@ -27,7 +27,6 @@ pub const Mode = enum(u8) {
     pub fn players(m: Mode) u8 {
         return if (m == .beat10 or m == .beat14) 2 else 1;
     }
-    /// Scratch index of a lane, or -1 when the lane is a plain key.
     pub fn scratchOf(m: Mode, lane: u8) i8 {
         return switch (m) {
             .beat5 => if (lane == 5) 0 else -1,
@@ -120,7 +119,7 @@ pub const Chart = struct {
         c.arena.deinit();
     }
 
-    /// The last timeline at or before `t`, else the first. There must be at least one.
+    /// There must be at least one timeline.
     fn timelineAt(c: *const Chart, t: i64) usize {
         const tl = c.timelines;
         var lo: usize = 0;
@@ -132,7 +131,6 @@ pub const Chart = struct {
         return lo;
     }
 
-    /// Scroll position for a chart time (render only).
     pub fn yAt(c: *const Chart, t: i64) f64 {
         const tl = c.timelines;
         if (tl.len == 0) return 0;
@@ -145,7 +143,7 @@ pub const Chart = struct {
         return a.y + measures * a.scroll;
     }
 
-    /// #SPEED lane scale (render only): eases towards the next point, holding through a stop.
+    /// #SPEED lane scale, for rendering only.
     pub fn speedAt(c: *const Chart, t: i64) f64 {
         const tl = c.timelines;
         if (tl.len == 0) return 1;

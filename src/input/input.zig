@@ -1,7 +1,3 @@
-//! Input capture. Each OS path timestamps events as close to the hardware as it can and hands them
-//! to the sim thread through a queue, so judgment never depends on the render loop:
-//! Linux evdev when the player turns it on (kernel timestamps), Windows RawInput thread, macOS IOKit HID
-//! callback; SDL events (their own timestamps) are the fallback and carry joystick input everywhere.
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("c");
@@ -36,7 +32,6 @@ pub fn push(ev: Raw) void {
 /// Counts pushes, for the futex the sim thread sleeps on.
 var pushes: std.atomic.Value(u32) = .init(0);
 
-/// Sleeps up to `ns`, less once an event is queued, so a press is judged without waiting out the sim's tick.
 pub fn wait(ns: u64) void {
     const seen = pushes.load(.acquire);
     if (q_tail.load(.monotonic) != q_head.load(.acquire)) return;
@@ -58,14 +53,13 @@ pub fn clear() void {
     while (pop()) |_| {}
 }
 
-/// Sampling rate during play. 0 leaves the OS event paths in charge.
+/// Hz; 0 leaves the OS event paths in charge.
 var poll_hz: std.atomic.Value(u32) = .init(0);
 
 pub fn setPollRate(hz: u32) void {
     poll_hz.store(@min(hz, 8000), .release);
 }
 
-/// True once a direct keyboard path runs; the SDL keyboard events are then ignored during play.
 pub var direct_keyboard: std.atomic.Value(bool) = .init(false);
 /// Direct paths see input system-wide, so they only deliver while our window has focus.
 pub var focused: std.atomic.Value(bool) = .init(false);
@@ -121,8 +115,7 @@ extern fn actuon_input_wait_start() void;
 extern fn actuon_input_wait(ns: u64) void;
 extern fn actuon_input_wake() void;
 
-/// False when the OS path is unavailable and SDL's key events stay in charge, which on Linux means
-/// no read access to /dev/input: SDL's keys then reach play only once per frame.
+/// False leaves SDL keys in charge, read once per frame; on Linux that means no read access to /dev/input.
 pub fn startDirect() bool {
     switch (builtin.os.tag) {
         .linux => {
@@ -157,7 +150,6 @@ fn sample(bits: *KeyBits) void {
     }
 }
 
-/// Pushes every key that differs between two samples, stamped with the sample time.
 fn pushEdges(prev: *const KeyBits, cur: *const KeyBits, ns: u64) void {
     for (prev, cur, 0..) |p, n, byte| {
         var changed = p ^ n;
@@ -169,14 +161,12 @@ fn pushEdges(prev: *const KeyBits, cur: *const KeyBits, ns: u64) void {
     }
 }
 
-/// The usual rhythm game loop: read the whole key state on a fixed clock.
 fn pollThread(_: ?*anyopaque) callconv(.c) c_int {
     _ = c.SDL_SetCurrentThreadPriority(c.SDL_THREAD_PRIORITY_TIME_CRITICAL);
     var prev: KeyBits = @splat(0);
     var was_on = false;
     var next: u64 = 0;
     while (true) {
-        // Without a direct path (Linux evdev off) there is nothing to sample.
         const hz = if (direct_keyboard.load(.acquire)) poll_hz.load(.acquire) else 0;
         if (hz == 0) {
             was_on = false;
@@ -186,11 +176,9 @@ fn pollThread(_: ?*anyopaque) callconv(.c) c_int {
         var cur: KeyBits = @splat(0);
         sample(&cur);
         const now = c.SDL_GetTicksNS();
-        // A key already held when sampling starts is not a press.
         if (was_on and focused.load(.acquire)) pushEdges(&prev, &cur, now);
         prev = cur;
         was_on = true;
-        // After a stall, carry on from now instead of sampling in a burst to catch up.
         next = @max(next + 1_000_000_000 / @as(u64, hz), now);
         c.SDL_DelayPrecise(next -| c.SDL_GetTicksNS());
     }
@@ -212,9 +200,7 @@ const evdev = if (builtin.os.tag == .linux) struct {
     const rescan_ns = 5 * std.time.ns_per_s;
 
     var fds: [32]linux.pollfd = undefined;
-    /// The /dev/input number behind each slot of fds.
     var event_nums: [fds.len]u8 = undefined;
-    /// Keys each slot has pushed as down, for when its device goes with them still held.
     var held: [fds.len]std.StaticBitSet(set1_to_sdl.len) = @splat(.empty);
     /// The sampler reads this while the evdev thread adds devices.
     var n: std.atomic.Value(usize) = .init(0);
@@ -233,7 +219,6 @@ const evdev = if (builtin.os.tag == .linux) struct {
         return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
     }
 
-    /// The first slot an unplugged device left, else the next unused one.
     fn freeSlot(used: []const linux.pollfd) ?usize {
         for (used, 0..) |f, i| if (f.fd < 0) return i;
         return if (used.len < fds.len) used.len else null;
@@ -247,14 +232,12 @@ const evdev = if (builtin.os.tag == .linux) struct {
         }
     }
 
-    /// When a node last came or went, or null if that cannot be read.
     fn nodesChangedAt() ?i64 {
         var st: linux.Statx = undefined;
         if (linux.errno(linux.statx(linux.AT.FDCWD, "/dev/input", 0, .{ .MTIME = true }, &st)) != .SUCCESS) return null;
         return st.mtime.sec;
     }
 
-    /// /dev/input/event`i` opened, if it is a keyboard this user may read.
     fn openKeyboard(i: usize) ?i32 {
         var path_buf: [32]u8 = undefined;
         const path = std.fmt.bufPrintSentinel(&path_buf, "/dev/input/event{d}", .{i}, 0) catch return null;
@@ -277,7 +260,6 @@ const evdev = if (builtin.os.tag == .linux) struct {
         return false;
     }
 
-    /// Opens every keyboard not open yet, so one plugged in during play works at once.
     fn openKeyboards() void {
         var open: std.StaticBitSet(max_events) = .empty;
         for (fds[0..n.load(.monotonic)], event_nums[0..n.load(.monotonic)]) |f, num| if (f.fd >= 0) open.set(num);
@@ -418,7 +400,6 @@ test "a queued event cuts the sim's wait short" {
     while (q_tail.load(.monotonic) == q_head.load(.acquire)) wait(5 * std.time.ns_per_s);
     c.SDL_WaitThread(t, null);
     try std.testing.expect(c.SDL_GetTicksNS() - start < std.time.ns_per_s);
-    // Already queued: no sleep at all.
     const again = c.SDL_GetTicksNS();
     wait(5 * std.time.ns_per_s);
     try std.testing.expect(c.SDL_GetTicksNS() - again < std.time.ns_per_s);

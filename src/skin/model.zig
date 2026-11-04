@@ -1,5 +1,4 @@
-//! Skin object model shared by native, beatoraja JSON/Lua and LR2 CSV skins, and its renderer.
-//! IDs for timers, options, numbers and strings are the LR2 numeric ones, as in beatoraja's SkinProperty.
+//! Ids are LR2's numeric ones, as in beatoraja's SkinProperty.
 const std = @import("std");
 const c = @import("c");
 const core = @import("actuon_core");
@@ -34,17 +33,15 @@ pub const Src = struct {
     /// The frames split into this many runs, of which the number `ref` picks the one that plays.
     len: i32 = 1,
     ref: i32 = 0,
-    /// A set of alternatives chosen by a number ref (imageset).
     set: []const Src = &.{},
     set_ref: i32 = 0,
-    /// Solid colour with no texture (beatoraja negative system image ids).
+    /// For beatoraja's negative system image ids, which have no texture.
     solid: ?[3]u8 = null,
 };
 
 pub const Kind = enum { songlist, image, number, text, graph, slider, gauge, notes, judge, bga, notes_graph, bpm_graph, timing, stagefile, backbmp, banner, hidden_cover, lift_cover };
 
-/// beatoraja's song bars. Every list but `on` and `off` is placed relative to its bar and indexed
-/// by the row's state; `on` and `off` have one bar per place, `center` being the selected one.
+/// beatoraja's song bars: `on`/`off` hold one bar per place; other lists sit relative to a bar, by row state.
 pub const SongList = struct {
     center: usize = 0,
     on: []const Object = &.{},
@@ -59,51 +56,44 @@ pub const Object = struct {
     kind: Kind = .image,
     songlist: ?*const SongList = null,
     src: Src = .{},
-    /// number/text/graph/slider: which value it shows.
     ref: i32 = 0,
     digits: i32 = 0,
     align_: i32 = 0,
     zero_pad: bool = false,
-    /// Number source has separate glyphs for negative values (24 glyph layout).
+    /// 24-glyph layout, with separate glyphs for negative values.
     signed: bool = false,
     /// graph: 0 horizontal, 1 vertical. slider: 0 up, 1 right, 2 down, 3 left.
     dir: i32 = 0,
     range: f32 = 0,
-    /// slider: the mouse can move it.
     changeable: bool = false,
     font_size: u16 = 24,
-    /// bga: beatoraja's stretch type, -1 when the skin gives none.
+    /// beatoraja's stretch type, -1 when the skin gives none.
     stretch: i32 = -1,
-    /// timing: half the width in ms, and the PG, GR, GD, BD, PR colors.
+    /// Half the width in ms; colors are PG, GR, GD, BD, PR.
     timing_ms: i32 = 150,
     timing_colors: [5]gfx.Color = @splat(gfx.white),
-    /// timing: no bands behind the lines; a line's color, its judge's when clear; lines kept;
-    /// lines fade with age; a moving average is drawn in `ema_color` unless clear.
+    /// timing: bare = no bands, window = lines kept, decay = fade; clear line/ema color = judge's / no average.
     timing_bare: bool = false,
     line_color: gfx.Color = .{ .r = 0, .g = 0, .b = 0, .a = 0 },
     ema_color: gfx.Color = .{ .r = 0, .g = 0, .b = 0, .a = 0 },
     window: u32 = 64,
     decay: bool = false,
-    /// number: one image per digit (an osu! font), in place of `src`'s frames.
     digit_srcs: []const Src = &.{},
-    /// How far each digit overlaps the last, in skin pixels (an osu! font's overlap).
+    /// Overlap of each digit on the last, in skin pixels.
     digit_gap: f32 = 0,
-    /// graph: in BMS gauge colors (an osu! gauge).
     gauge_tint: bool = false,
-    /// Moves up with the judge line (beatoraja's offset 3).
+    /// beatoraja's offset 3: moves up with the judge line.
     lifted: bool = false,
-    /// hidden_cover, lift_cover: skin y below which it is cut, bottom-up; negative never cuts.
+    /// Skin y, bottom-up; negative never cuts.
     disappear_line: f32 = -1,
-    /// text: the skin's font file, null for the built-in one.
+    /// Null for the built-in font.
     font: ?[:0]const u8 = null,
-    /// text: the skin's bitmap font, drawn instead of `font`.
     bitmap: ?*const bitfont.BitmapFont = null,
-    /// text constant
     constant: []const u8 = "",
-    /// gauge: 4 node images (front red, front green, back red, back green)
+    /// Front red, front green, back red, back green.
     nodes: []const Src = &.{},
     parts: i32 = 50,
-    /// judge: index 0..5 = PG..MS images, and their combo numbers
+    /// Index 0..5 = PG..MS.
     judge_images: []const Object = &.{},
     judge_numbers: []const Object = &.{},
     shift: bool = false,
@@ -113,11 +103,11 @@ pub const Object = struct {
     blend: u8 = 1,
     center: u8 = 0,
     ops: []const i32 = &.{},
-    /// Lua function references: draw condition and dynamic value.
+    /// Lua registry refs.
     lua_draw: i32 = 0,
     lua_value: i32 = 0,
     lua_timer: i32 = 0,
-    /// Drawn only while the mouse is in this rectangle: x, y, w, h from the object's bottom-left, bottom-up.
+    /// x, y, w, h from the object's bottom-left, bottom-up.
     mouse_rect: ?[4]f32 = null,
 };
 
@@ -134,7 +124,7 @@ pub const NoteSet = struct {
     ln_osu: bool = false,
     /// osu!: skin pixels the whole body image spans from the tail down, cut by the LN's length; 0 stretches it.
     ln_body_span: f32 = 0,
-    /// top-left coordinates: x, judge line y, width, note height
+    /// Top-left coordinates: x, judge line y, width, note height.
     lane: [core.types.max_lanes]?[4]f32 = @splat(null),
 };
 
@@ -153,14 +143,12 @@ pub const Skin = struct {
     path: []const u8 = "",
     mtime: i64 = 0,
     fadeout_ms: i32 = 0,
-    /// The least time the skin wants its loading screen up.
     loadend_ms: i32 = 0,
     /// The format has no loading screen, so the built-in one stands in.
     plain_loading: bool = false,
-    /// How long a timed scene (decide) runs, and when a key may cut it short.
     scene_ms: i32 = 0,
     input_ms: i32 = 0,
-    /// Set for Lua skins; keeps the state alive for dynamic values.
+    /// Kept alive so dynamic values stay callable.
     lua: ?*c.lua_State = null,
 
     pub fn deinit(s: *Skin) void {
@@ -183,7 +171,6 @@ pub fn clampDigits(d: i32) i32 {
     return std.math.clamp(d, 0, 32);
 }
 
-/// What a scene exposes to skins.
 pub const Ctx = struct {
     ud: *anyopaque,
     now_ms: i64,
@@ -202,8 +189,7 @@ pub const Ctx = struct {
     lua_call_str: ?*const fn (skin: *Skin, r: i32, buf: []u8) []const u8 = null,
 };
 
-/// Where a point on a slider's track puts it, from 0 at the resting place to 1, as in beatoraja's
-/// SkinSlider. Null off the track. Dragging is this on every frame the button is down.
+/// Slider position 0..1 from its resting place for a point, null off the track, as beatoraja's SkinSlider.
 fn sliderValue(dir: i32, range: f32, k: Key, x: f32, y: f32) ?f32 {
     if (range <= 0) return null;
     const across = if (dir == 0 or dir == 2) x >= k.x and x <= k.x + k.w else y >= k.y and y <= k.y + k.h;
@@ -228,7 +214,6 @@ test "slider tracks run from the resting place" {
     try std.testing.expectEqual(@as(?f32, 0.5), sliderValue(3, 100, k, 50, 210));
 }
 
-/// Whether a point in skin pixels is in a mouseRect, given bottom-up from the drawn object's bottom-left.
 fn mouseIn(mr: [4]f32, k: Key, x: f32, y: f32) bool {
     const left = k.x + mr[0];
     const top = k.y + k.h - mr[1] - mr[3];
@@ -302,12 +287,10 @@ pub fn sample(keys: []const Key, t_in: i64, loop: i32) ?Key {
     };
 }
 
-/// Private float ids for the gauge object, outside LR2's id range.
 /// Added to an option button's ref, as `imageRef` does.
 pub const button_index: i32 = 91000;
 
-/// beatoraja keeps image values apart from numbers: 390 is a ranking row's clear here, its place
-/// elsewhere, and 12 the sort button here, the judge timing elsewhere.
+/// beatoraja keeps image values apart from numbers: image 390 is a ranking row's clear, number 390 its place.
 fn imageRef(ref: i32) i32 {
     return switch (ref) {
         390...399 => ref + 10000,
@@ -315,6 +298,7 @@ fn imageRef(ref: i32) i32 {
         else => ref,
     };
 }
+/// Private float ids for the gauge object, outside LR2's id range.
 pub const gauge_value: i32 = 90107;
 pub const gauge_border: i32 = 90108;
 /// Private number id: the gauge type, as main_state.gauge_type returns it.
@@ -334,7 +318,6 @@ pub const versus_present: i32 = 90230;
 const center_x = [_]f32{ 0.5, 0, 0.5, 1, 0, 0.5, 1, 0, 0.5, 1 };
 const center_y = [_]f32{ 0.5, 1, 1, 1, 0.5, 0.5, 0.5, 0, 0, 0 };
 
-/// The frame `t` ms in, of the run `row` out of `len` runs that split `n` frames.
 fn runFrame(n: i32, len: i32, row: i64, t: i64, cycle: i32) i32 {
     const runs = std.math.clamp(len, 1, n);
     const per = @divTrunc(n, runs);
@@ -392,7 +375,6 @@ pub const Renderer = struct {
         }
         // Smoothing a sliver of an atlas, such as a gauge cell, or a piece blown up, blends in the neighbouring art.
         const sliver = sr.w <= 8 or sr.h <= 8 or @abs(dst.w) >= sr.w * 8 or @abs(dst.h) >= sr.h * 8;
-        // A negative size draws the image mirrored, growing the other way.
         var d = dst;
         const flip_x = d.w < 0;
         const flip_y = d.h < 0;
@@ -436,11 +418,9 @@ pub const Renderer = struct {
         const width: usize = if (o.digits > 0) @intCast(o.digits) else n;
         if (n > width) n = width;
         const base = r.frameOf(&o.src);
-        // Frames are laid out as digit rows: one row per animation step.
         const per_row = glyphsPerRow(o.signed, @max(o.src.divx, 1) * @max(o.src.divy, 1));
         const row = @divTrunc(base, @max(per_row, 1));
         const sign_rows: i32 = if (o.signed and value < 0) 12 else 0;
-        // The sign takes a place of its own, right before the digits.
         if (o.signed and n >= width and width > 1) n = width - 1;
         const used = n + @intFromBool(o.signed);
         const pad = width -| used;
@@ -500,7 +480,7 @@ pub const Renderer = struct {
         }
     }
 
-    /// Glyphs from the font's pages, in `fit` squeezed into the text's width as SkinTextImage does.
+    /// `fit` squeezes the line into the text's width, as SkinTextImage does.
     fn drawBitmapText(r: *const Renderer, font: *const bitfont.BitmapFont, o: *const Object, k: Key, s: []const u8, col: gfx.Color, align_: i32, fit: bool) void {
         if (!std.unicode.utf8ValidateSlice(s)) return;
         // LR2 sizes by the text's height, a BMFont by the size the skin asks for.
@@ -530,7 +510,6 @@ pub const Renderer = struct {
         }
     }
 
-    /// A song bar's text, cut to the width the skin gives it.
     pub fn drawBarText(r: *const Renderer, o: *const Object, k: Key, s: []const u8) void {
         if (s.len == 0 or k.a <= 0) return;
         const col: gfx.Color = .{ .r = byte(k.r), .g = byte(k.g), .b = byte(k.b), .a = byte(k.a) };
@@ -540,7 +519,6 @@ pub const Renderer = struct {
         r.g.textClip(s, k.x * r.sx, k.y * r.sy, k.w * r.sx, fontSize(k.h * r.sy), col);
     }
 
-    /// A horizontal fill in BMS gauge colors: green below the border, red from it up.
     fn drawTintedFill(r: *const Renderer, o: *const Object, k: Key, v: f32) void {
         const border = std.math.clamp(r.ctx.float(r.ctx.ud, gauge_border), 0, 1); // 0 when all red
         const split = @min(v, border);
@@ -600,7 +578,7 @@ pub const Renderer = struct {
         return k;
     }
 
-    /// Slides up out of its disappear line, as SkinHidden: only what is above the line shows.
+    /// As SkinHidden: only what is above the disappear line shows.
     fn drawCover(r: *const Renderer, o: *const Object, k: Key) void {
         var kk = k;
         var line = r.s.h - o.disappear_line;
@@ -615,7 +593,6 @@ pub const Renderer = struct {
         r.blit(&o.src, r.frameOf(&o.src), kk, o.blend, o.center, .{ 0, 0, 1, h / k.h });
     }
 
-    /// Draws one non-note object.
     pub fn drawObject(r: *const Renderer, o: *const Object) void {
         const k = r.visible(o) orelse return;
         switch (o.kind) {
@@ -657,7 +634,6 @@ pub const Renderer = struct {
         }
     }
 
-    /// The judge object: image for the current judge, with the combo beside it.
     pub fn drawJudge(r: *const Renderer, o: *const Object, judge: u8, combo: u32) void {
         if (judge >= o.judge_images.len) return;
         const img = &o.judge_images[judge];
@@ -704,7 +680,6 @@ test "keyframe sampling" {
     try std.testing.expectEqual(@as(f32, 50), sample(&keys, 50, 0).?.x);
     try std.testing.expectEqual(@as(f32, 100), sample(&keys, 500, 100).?.x);
     try std.testing.expect(sample(&keys, 101, -1) == null);
-    // loop back to the start of the animation
     try std.testing.expectEqual(@as(f32, 25), sample(&keys, 125, 0).?.x);
     var acc = keys;
     acc[0].acc = 1;

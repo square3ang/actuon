@@ -1,4 +1,3 @@
-// Prints a one-line fingerprint per chart using beatoraja's parser (jbms-parser).
 // Run: javac -cp LR2oraja.jar -d /tmp/x DumpChart.java && java -cp LR2oraja.jar:/tmp/x DumpChart <list-file>
 import bms.model.*;
 import java.nio.file.*;

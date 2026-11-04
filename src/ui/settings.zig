@@ -1,4 +1,3 @@
-//! Settings: a flat list of editable items.
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("c");
@@ -308,11 +307,9 @@ pub const State = struct {
     message: []const u8 = "",
     message_buf: [512]u8 = undefined,
     message_fade: select.Fade = .{},
-    /// Which button of which bind group is being captured.
     capture_slot: ?u8 = null,
     capture_group: Item = .bind_7k,
     capture_buf: [128]u8 = undefined,
-    /// False while choosing a tab; true once inside one.
     inside: bool = false,
     table_row: usize = 0,
     table_first: usize = 0,
@@ -326,7 +323,6 @@ pub const State = struct {
     drop_values: []const []const u8 = &.{},
     sync: ?*ir.Sync = null,
     account: ?*ir.Account = null,
-    /// Set once the name is typed: the row then takes the password.
     account_name: ?[]const u8 = null,
     update: ?*update.Job = null,
     update_seen: update.Phase = .checking,
@@ -343,7 +339,6 @@ const poll_names = blk: {
 };
 const fps_limits = [_]u32{ 0, 30, 60, 75, 90, 120, 144, 165, 180, 200, 240, 280, 300, 360, 480, 500, 540, 600, 720, 1000 };
 
-/// A limit typed into config.json shows as the nearest choice at or below it.
 fn fpsIndex(fps: u32) usize {
     var best: usize = 0;
     for (fps_limits, 0..) |f, i| {
@@ -353,7 +348,6 @@ fn fpsIndex(fps: u32) usize {
 }
 const resolutions = [_][2]u32{ .{ 1280, 720 }, .{ 1600, 900 }, .{ 1920, 1080 }, .{ 2560, 1440 }, .{ 3840, 2160 } };
 
-/// A size typed into config.json or dragged steps to the nearest choice in that direction.
 fn stepResolution(w: u32, h: u32, dir: i32) [2]u32 {
     var i: usize = 0;
     while (i + 1 < resolutions.len and resolutions[i][0] < w) i += 1;
@@ -362,7 +356,6 @@ fn stepResolution(w: u32, h: u32, dir: i32) [2]u32 {
     return resolutions[@intCast(std.math.clamp(@as(i32, @intCast(i)) + dir, 0, resolutions.len - 1))];
 }
 
-/// A rate typed into config.json shows as the nearest choice at or below it.
 fn pollIndex(hz: u32) usize {
     var best = event_index;
     for (poll_rates, 0..) |r, i| {
@@ -555,7 +548,6 @@ fn startEditing(a: *App, it: Item) void {
     });
 }
 
-/// beatoraja's key config key lands here.
 pub fn openControls(a: *App) void {
     a.set.cursor = firstOf(a, .controls);
     a.set.inside = true;
@@ -575,7 +567,6 @@ fn firstOf(a: *const App, sec: Section) usize {
     return 0;
 }
 
-/// The next shown row of the same tab in `dir`, wrapping round.
 fn stepRow(a: *const App, from: usize, dir: isize) usize {
     const sec = items[from].section();
     var i = from;
@@ -604,7 +595,6 @@ pub fn keyName(code: u16, buf: []u8) []const u8 {
     return if (name.len > 0) name else "-";
 }
 
-/// Returns the value the mouse is dragging it to.
 fn drawSlider(g: *gfx.Gfx, right: f32, y: f32, h: f32, v: f32, on: bool) ?f32 {
     const u = g.h / 720;
     const w = 220 * u;
@@ -649,7 +639,6 @@ fn drawChoices(g: *gfx.Gfx, right: f32, y: f32, h: f32, names: []const []const u
     return chosen;
 }
 
-/// The current value of a row that lists its choices; clicking it opens the list.
 fn drawDropValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, value: []const u8, on: bool) void {
     const g = &a.g;
     const u = g.h / 720;
@@ -737,7 +726,6 @@ fn openDrop(a: *App, it: Item) void {
     s.drop.show(&a.g, labels.items, cursor);
 }
 
-/// Takes the row's value; the entry past the values is the dialog.
 fn chooseDrop(a: *App, i: usize) void {
     const s = &a.set;
     const it = s.drop_for;
@@ -945,7 +933,6 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
     }
 }
 
-/// Tabs down the left. A tab is picked first, then entered to reach its items.
 fn drawNav(a: *App, current: Section, nav_w: f32) void {
     const g = &a.g;
     const s = &a.set;
@@ -979,7 +966,6 @@ fn drawRows(a: *App, current: Section, px: f32, pw: f32, help_y: f32) void {
     for (items) |it| {
         if (it.section() == current and rowShown(a, it) and it != .table_list) rows += 1;
     }
-    // A tab with more rows than the panel holds packs them closer instead of running under the help.
     const row_h = @min(54 * u, (help_y - 8 * u - y) / rows);
     for (items, 0..) |it, i| {
         if (it.section() != current or !rowShown(a, it)) continue;
@@ -1057,7 +1043,6 @@ pub fn draw(a: *App) void {
     }
 }
 
-/// The on/off rows that are just a config flag.
 fn flagOf(cfg: *config.Config, it: Item) ?*bool {
     return switch (it) {
         .hs_auto_adjust => &cfg.hs_auto_adjust,
@@ -1072,17 +1057,14 @@ fn flagOf(cfg: *config.Config, it: Item) ?*bool {
     };
 }
 
-/// Rows where a click on the row itself does what Enter does.
 fn rowActs(it: Item) bool {
     return switch (it) {
-        // Lists open from their value or with Enter, not from anywhere on the row.
         .volume, .bgm_volume, .sfx_volume, .audio_rate, .audio_frames, .audio_device, .resolution, .vsync, .fps_limit, .reflex, .language, .input_poll, .lift, .hidden, .judge_offset, .visual_offset, .skin, .bgm_set, .sound_set => false,
         .bga, .random, .random2, .double_option, .gauge, .gauge_auto_shift, .gas_floor, .hs_fix, .ln_mode, .judge_algorithm, .pace_target, .lane_cover => false,
         else => true,
     };
 }
 
-/// A first click only selects a row; a click on the selected one acts on it.
 fn clickActs(selected: bool, it: Item) bool {
     return selected and rowActs(it);
 }
@@ -1206,7 +1188,6 @@ fn cycleSet(a: *App, path: *[]const u8, root: []const u8, list: SetList, dir: i3
     if (path.len > 0) say(a, "Set picked. A long song takes a moment to load before it plays.", .{});
 }
 
-/// A picked folder: its first set takes effect at once.
 fn pickSetRoot(a: *App, path: *[]const u8, root: *[]const u8, v: []const u8, list: SetList) void {
     root.* = v;
     var tmp = std.heap.ArenaAllocator.init(a.gpa);
@@ -1222,7 +1203,6 @@ fn pickSetRoot(a: *App, path: *[]const u8, root: *[]const u8, v: []const u8, lis
     say(a, "No sets in that folder", .{});
 }
 
-/// Steps through Built-in and the skins folder. A skin picked from elsewhere counts as Built-in's place.
 fn cycleSkin(a: *App, dir: i32) void {
     var tmp = std.heap.ArenaAllocator.init(a.gpa);
     defer tmp.deinit();
@@ -1290,7 +1270,6 @@ fn tableAdded(a: *App, url: []const u8) bool {
     return false;
 }
 
-/// Presets first, then every other added table, named by its address.
 fn tableRow(a: *App, row: usize) ?Preset {
     if (row < presets.len) return presets[row];
     var left = row - presets.len;
@@ -1356,7 +1335,6 @@ fn toggleTableRow(a: *App) void {
     if (tableAdded(a, row.url)) removeTable(a, row.url) else addTable(a, row.url);
 }
 
-/// The one list here that grows with the data, so it scrolls inside the panel.
 fn drawTableList(a: *App, item_index: usize, x: f32, w: f32, top: f32, bottom: f32) void {
     const g = &a.g;
     const s = &a.set;
@@ -1401,7 +1379,6 @@ fn trimSep(dir: []const u8) []const u8 {
     return d;
 }
 
-/// Adds a folder, dropping folders inside it: the new one holds their charts.
 fn withRoot(al: std.mem.Allocator, roots: []const []const u8, dir: []const u8) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     for (roots) |r| if (!db_mod.isUnder(r, dir)) try out.append(al, r);
@@ -1521,7 +1498,6 @@ fn keyEditing(a: *App, it: Item, sc: u32) void {
     }
 }
 
-/// Picking a tab, before going into it.
 fn keyTabs(a: *App, it: Item, sc: u32) void {
     const s = &a.set;
     const sections = std.enums.values(Section);
@@ -1550,10 +1526,8 @@ fn keyTabs(a: *App, it: Item, sc: u32) void {
     }
 }
 
-/// What Enter does on a row.
 fn activate(a: *App, it: Item) void {
     const s = &a.set;
-    // Arrow rows step with Left/Right and their arrows only.
     switch (it) {
         .lift, .hidden, .lane_cover, .judge_offset, .visual_offset => return,
         else => {},
@@ -1669,7 +1643,6 @@ test "a typed green number comes back exactly" {
     try std.testing.expectEqual(@as(u32, green_max), greenShown(greenMs(99999)));
 }
 
-/// Opens settings at a row, as song select's option tabs do.
 pub fn openItem(a: *App, it: Item) void {
     a.set.cursor = std.mem.indexOfScalar(Item, items, it).?;
     a.set.inside = true;
@@ -1915,7 +1888,6 @@ test "a folder comes out of the library alone, or all of them" {
     chooseDrop(a, 0);
     try std.testing.expectEqual(@as(usize, 1), a.cfg.roots.len);
     try std.testing.expectEqualStrings("/other", a.cfg.roots[0]);
-    // Song select shows the change without waiting for a scan.
     try std.testing.expectEqualStrings("other", a.sel.rows[0].label);
     chooseDrop(a, 2);
     try std.testing.expectEqual(@as(usize, 0), a.cfg.roots.len);
@@ -1935,7 +1907,6 @@ test "up and down never land on a row the platform hides" {
     const a = try testing.open();
     defer testing.close(a);
     input.direct_keyboard.store(false, .release);
-    // Only Windows samples keys without evdev.
     try std.testing.expectEqual(builtin.os.tag == .windows, rowShown(a, .input_poll));
     openControls(a);
     for (0..items.len) |_| {

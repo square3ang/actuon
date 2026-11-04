@@ -1,5 +1,4 @@
-//! actuon internet ranking server. Clients never report scores: they upload a replay and the chart
-//! it needs, and the score is what re-simulating that replay with the shared Zig core produces.
+//! Clients never report scores: the score comes from re-simulating their uploaded replay with the shared Zig core.
 mod core;
 mod play;
 mod rooms;
@@ -62,11 +61,9 @@ CREATE VIEW best AS
 struct Ctx {
     /// shortcut: per-process and lost on restart, move to a shared store if the server ever runs multiple instances
     attempts: Mutex<HashMap<String, (Instant, u32)>>,
-    /// The players with a check running, so one player cannot hold every slot.
     checks: Mutex<HashSet<i64>>,
     hashes: AtomicUsize,
     rooms: Mutex<rooms::Rooms>,
-    /// Open multiplayer connections per player: each holds a thread.
     online: Mutex<HashMap<i64, usize>>,
 }
 
@@ -75,7 +72,6 @@ const MAX_PLAYERS_ONLINE: usize = 1024;
 /// A dropped connection stays open here until the proxy gives up on it, so a reconnect overlaps it.
 const MAX_CONNECTIONS_PER_PLAYER: usize = 4;
 
-/// A place among the running chart and replay checks, given back when dropped.
 struct CheckSlot<'a> {
     checks: &'a Mutex<HashSet<i64>>,
     user: i64,
@@ -102,7 +98,7 @@ impl Drop for CheckSlot<'_> {
     }
 }
 
-/// A place among the running password hashes: each takes 19 MiB and a core.
+/// Each running password hash takes 19 MiB and a core.
 struct HashSlot<'a>(&'a AtomicUsize);
 
 impl<'a> HashSlot<'a> {
@@ -199,8 +195,7 @@ fn auth(req: &Request, db: &Connection) -> Result<i64, ApiError> {
         .ok_or(ApiError::new(401, "bad token"))
 }
 
-/// Who a request is from when throttling. nginx sets X-Real-IP (docs/ir.md), and only it can reach this port.
-/// An IPv6 client owns a whole /64, so that is what counts as one client.
+/// Only nginx reaches this port and it sets X-Real-IP (docs/ir.md). An IPv6 client owns a whole /64.
 fn client_key(real_ip: Option<&str>, peer: Option<IpAddr>) -> String {
     match real_ip.and_then(|ip| ip.trim().parse().ok()).or(peer) {
         Some(IpAddr::V6(ip)) => format!("{:x?}", &ip.segments()[..4]),
@@ -228,7 +223,6 @@ fn query_of(url: &str) -> HashMap<String, String> {
     out
 }
 
-/// A path segment as the client meant it, so names outside ASCII can travel in a URL.
 fn percent_decode(s: &str) -> Result<String, ApiError> {
     let bad = || ApiError::new(400, "bad name");
     let b = s.as_bytes();
@@ -252,8 +246,7 @@ struct Credentials {
     password: String,
 }
 
-/// Letters of any script, digits and a few marks: invisible or direction-changing characters and edge spaces
-/// would let one name pass for another in rankings.
+/// Invisible or direction-changing characters and edge spaces would let one name pass for another in rankings.
 fn valid_name(n: &str) -> bool {
     (1..=32).contains(&n.chars().count())
         && n.trim() == n
@@ -307,7 +300,6 @@ struct NewName {
     name: String,
 }
 
-/// Everything else points at the id, so scores and rivals follow. The login name changes with it.
 fn rename(req: &mut Request, db: &Connection) -> ApiResult {
     let user = auth(req, db)?;
     let q: NewName = serde_json::from_slice(&read_body(req, MAX_JSON)?)
@@ -418,7 +410,7 @@ fn run_child(
     }
 }
 
-/// Checks the chart and replays the replay in a child. The upload is the chart then the replay.
+/// The upload is the chart then the replay.
 fn verify_isolated(
     format: u8,
     chart_len: usize,
@@ -481,7 +473,6 @@ fn lock_rooms(ctx: &Ctx) -> std::sync::MutexGuard<'_, rooms::Rooms> {
     ctx.rooms.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The player's place on a chart (0 when they have no score there), the row count, and the clear counts.
 fn standing(
     db: &Connection,
     sha: &str,
@@ -502,7 +493,6 @@ fn standing(
     Ok((rank, total, clears))
 }
 
-/// A token is optional here: with one, the answer also says which row and rank are the caller's.
 fn ranking(req: &Request, db: &Connection, sha: &str, url: &str) -> ApiResult {
     let me = auth(req, db).ok();
     let limit: i64 = query_of(url)
@@ -530,7 +520,7 @@ fn ranking(req: &Request, db: &Connection, sha: &str, url: &str) -> ApiResult {
     )
 }
 
-/// The newest verified scores, for the web page. Claims stay out: nothing has checked them.
+/// Claims stay out: nothing has checked them.
 fn recent(db: &Connection, url: &str) -> ApiResult {
     let limit: i64 = query_of(url)
         .get("limit")
@@ -546,8 +536,7 @@ fn recent(db: &Connection, url: &str) -> ApiResult {
     Ok(json!({"scores": scores}))
 }
 
-/// Every row the caller holds, for IR sync. A chart can have both a verified score and a claim:
-/// the client must see the verified one to know which replays are still worth sending.
+/// For IR sync: the client must see a verified score beside a claim to know which replays are still worth sending.
 fn my_scores(req: &Request, db: &Connection) -> ApiResult {
     let user = auth(req, db)?;
     let mut st = db.prepare_cached(
@@ -576,8 +565,7 @@ struct Claims {
     scores: Vec<Claim>,
 }
 
-/// Scores without a replay, such as ones imported from another player. Nothing checks them, so they
-/// rank below every verified score under an unverified label, and any verified score replaces them.
+/// Scores without a replay are unchecked: they rank below every verified score, and any verified score replaces them.
 fn add_claims(req: &mut Request, db: &Connection) -> ApiResult {
     let user = auth(req, db)?;
     let q: Claims = serde_json::from_slice(&read_body(req, MAX_JSON)?)
@@ -653,7 +641,6 @@ fn rivals(req: &Request, db: &Connection) -> ApiResult {
     Ok(json!({"rivals": names}))
 }
 
-/// The caller and their rivals on one chart.
 fn rival_scores(req: &Request, db: &Connection, sha: &str) -> ApiResult {
     let user = auth(req, db)?;
     let mut st = db.prepare_cached(&format!(
@@ -673,15 +660,13 @@ struct TableQuery {
     sha256: Vec<String>,
 }
 
-/// Standings across a difficulty table's charts: the client sends the chart list it resolved.
 fn table_ranking(req: &mut Request, db: &Connection) -> ApiResult {
     let q: TableQuery = serde_json::from_slice(&read_body(req, MAX_JSON)?)
         .map_err(|_| ApiError::new(400, "bad json"))?;
     if q.sha256.len() > 8192 || !q.sha256.iter().all(|s| valid_sha(s)) {
         return Err(ApiError::new(400, "bad chart list"));
     }
-    // Verified scores only: one unchecked claim could otherwise outweigh a whole table.
-    // 4 is EASY in beatoraja's clear numbering, the first real clear.
+    // Verified only, so one claim cannot outweigh a table. clear>=4 is EASY or better in beatoraja numbering.
     let mut st = db.prepare_cached(
         "SELECT u.name,SUM(s.ex),COUNT(*) FILTER (WHERE s.clear>=4),COUNT(*) FROM score s JOIN user u ON u.id=s.user
          WHERE s.sha256 IN (SELECT value FROM json_each(?1)) GROUP BY u.name ORDER BY 3 DESC, 2 DESC, 1 LIMIT 1000",
@@ -817,8 +802,7 @@ fn worker(server: Arc<Server>, ctx: Arc<Ctx>, db: Connection) {
     }
 }
 
-/// Called once the input is read. A hostile chart must not use up the host, and a parser bug it reaches
-/// must find no way to open a file or socket. The core's allocations then just fail.
+/// Called once input is read: a hostile chart must not exhaust the host or let a parser bug open a file or socket.
 fn confine_child() {
     let limits = [
         (libc::RLIMIT_AS, CHILD_MEMORY_BYTES),
@@ -837,8 +821,7 @@ fn confine_child() {
     }
 }
 
-/// Child mode of verify_isolated: format and chart length in argv, chart then replay on stdin,
-/// the chart's name and the result as JSON on stdout.
+/// Child of verify_isolated: format and chart length in argv, chart then replay on stdin, name and result JSON on stdout.
 fn verify_main(args: &[String]) -> i32 {
     let (Some(format), Some(chart_len)) = (
         args.get(2).and_then(|f| f.parse::<u8>().ok()),
@@ -976,7 +959,6 @@ mod tests {
         assert!(core::check_chart(b"#BPM 0.001\n#WAV01 a.wav\n#00511:01\n", 1).is_err());
     }
 
-    /// A version 2 replay of plain options with one key press at `time_us`.
     fn replay_with_press(chart: &[u8], time_us: u64) -> Vec<u8> {
         let mut out = b"ACTR\x02".to_vec();
         out.extend_from_slice(core::chart_sha256(chart).as_bytes());

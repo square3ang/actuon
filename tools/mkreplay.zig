@@ -1,4 +1,3 @@
-//! Writes a perfect-play replay for a chart: used by the IR end-to-end test and parity checks.
 const std = @import("std");
 const core = @import("actuon_core");
 

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds zig-out/actuon-windows.zip from an MSYS2 UCRT64 shell with zig 0.17 and the libraries from README.md.
+# Run from an MSYS2 UCRT64 shell.
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"

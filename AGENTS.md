@@ -8,7 +8,7 @@ Rules for anyone changing this repository, human or agent. README.md says what i
 - **One job per function.** Split when a function mixes jobs, not because it is long. Never add a helper only to shorten a function.
 - **One rule in one place.** Near-copies that must change together become one function. The same goes across layers: ranking order lives in `RANK_ORDER`, file access in `src/platform/fs.zig`, HTTP in `src/platform/http.zig`.
 - **Names say what a thing is.** Use the surrounding file's words. BMS and beatoraja terms (EX, BP, LN, gauge) are fine.
-- **Comments say why.** Write what the code cannot show, in one line. A known limit gets `shortcut: <the limit>, <when to upgrade>`.
+- **Comment only where needed, in one line.** Write a comment only for the why the code cannot show: a hidden constraint, a non-obvious reason, a trap, a unit or sentinel the type hides. Never write what-comments: no function summaries, field descriptions, module headers or section banners. Do not explain what a reader can work out from the code itself. When unsure, leave it out. A known limit gets `shortcut: <the limit>, <when to upgrade>`.
 - **No dead code.** Remove unused declarations, columns and flags in the change that orphans them. Do not comment code out.
 - **Handle every error on purpose.** A failure that loses data must reach the player or the log. Never report a save that did not happen.
 - **Cleanup keeps behaviour.** Keep it apart from feature work. Leave `third_party/` and the generated `src/bms/enc_tables.zig` alone.

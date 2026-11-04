@@ -1,4 +1,4 @@
-//! Practice setup over song select: a section of the chart, its speed and judge, looped until left. Never recorded.
+//! Practice plays are never recorded.
 const std = @import("std");
 const c = @import("c");
 const core = @import("actuon_core");
@@ -27,7 +27,6 @@ pub const State = struct {
     judgerank: i32 = 0,
 };
 
-/// Settings stay while the same chart is practised again.
 pub fn open(a: *App, song: db_mod.Song) void {
     const p = &a.practice;
     const same = std.mem.eql(u8, &p.sha256, song.sha256);

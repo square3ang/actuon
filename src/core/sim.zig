@@ -1,7 +1,4 @@
-//! Deterministic judge simulation: a port of lr2oraja-endlessdream's JudgeManager (GPLv3) under the LR2 rule.
-//! It never reads a clock. Input is timestamped events in, results in a ring out, stepped on an
-//! absolute 1 ms grid, so frame rate and call cadence cannot change the outcome and replays and
-//! the IR verifier reproduce a play exactly. No allocation after init.
+//! Clock-free judge sim on a 1 ms grid, a port of lr2oraja-endlessdream's JudgeManager (GPLv3) under the LR2 rule.
 const std = @import("std");
 const types = @import("types.zig");
 const windows = @import("windows.zig");
@@ -42,7 +39,6 @@ pub const Score = struct {
     pub fn exScore(s: *const Score) u32 {
         return s.count(.pg) * 2 + s.count(.gr);
     }
-    /// Combo-breaking misses: BD + PR + MS, the "miss count" shown on results.
     pub fn missCount(s: *const Score) u32 {
         return s.count(.bd) + s.count(.pr) + s.count(.ms);
     }
@@ -71,18 +67,15 @@ const ring_size = 1024;
 pub const Config = struct {
     gauge: gauge_mod.Type = .normal,
     autoplay: bool = false,
-    /// Gauge auto shift. Under select to under, `gauge` is the top gauge.
+    /// Under select to under, `gauge` is the top gauge.
     gas: options.Gas = .none,
-    /// The lowest gauge a shift may fall to.
     gas_floor: gauge_mod.Type = .assist_easy,
     algorithm: options.Algorithm = .combo,
     /// beatoraja's EXPAND JUDGE assist: GREAT reaches as far as GOOD did, PGREAT as far as GREAT.
     expand_judge: bool = false,
-    /// Scratch lanes play themselves, for BATTLE AS.
     auto_scratch: bool = false,
 };
 
-/// Best clear looks from EX HARD down, or from HAZARD when that was picked.
 fn gasTop(cfg: Config) gauge_mod.Type {
     if (cfg.gas != .best_clear) return cfg.gauge;
     return @fromBackingInt(@max(@backingInt(cfg.gauge), @backingInt(gauge_mod.Type.exhard)));
@@ -90,8 +83,7 @@ fn gasTop(cfg: Config) gauge_mod.Type {
 
 pub const Sim = struct {
     notes: []const Note,
-    /// 0 = unjudged, otherwise judge + 1. Written only by the sim thread; render reads it racily,
-    /// which at worst shows a note for one extra frame.
+    /// 0 = unjudged, else judge + 1. Render reads it racily: at worst a note shows one extra frame.
     state: []u8,
     lane_notes: [types.max_lanes][]u32,
     lanes: [types.max_lanes]LaneState = @splat(.{}),
@@ -206,7 +198,6 @@ pub const Sim = struct {
         return ls.down[0] or ls.down[1];
     }
 
-    /// The best gauge from the top down to the floor that would clear now, else the best one still alive.
     fn shiftGauge(s: *Sim) void {
         var alive: ?usize = null;
         var i: usize = @backingInt(s.gas_top) + 1;
@@ -235,7 +226,7 @@ pub const Sim = struct {
         if (s.gauge().value == 0 and s.gas != .continue_play) s.failed = true;
     }
 
-    /// Advances to `t`. Everything between now and `t` happens on the absolute 1 ms grid.
+    /// Steps the absolute 1 ms grid, so call cadence cannot change the outcome.
     pub fn advance(s: *Sim, t: i64) void {
         while (s.grid_t + 1000 <= t and !s.failed) {
             s.grid_t += 1000;
@@ -243,8 +234,7 @@ pub const Sim = struct {
         }
     }
 
-    /// Applies one input event. Events must arrive in time order; late ones are clamped forward
-    /// so a replay of the recorded stream sees exactly the same sequence.
+    /// Events must come in time order; late ones are clamped forward so a replay sees the same sequence.
     pub fn input(s: *Sim, ev: Event) void {
         s.advance(ev.time_us);
         if (s.failed or ev.lane >= s.lane_count) return;
@@ -464,7 +454,6 @@ pub const Sim = struct {
                 s.judgeNote(lane, tnote, judge, tdm, vanish);
             }
         } else {
-            // no judgment: replay the nearest earlier keysound on this lane
             var n_idx: i32 = if (list.len > 0) @intCast(list[0]) else -1;
             for (list) |li| {
                 const n = s.notes[li];
@@ -553,7 +542,6 @@ pub const Sim = struct {
         }
     }
 
-    /// Lets go of the long note a lane is holding, once its end has been judged.
     fn endHold(s: *Sim, lane: u8) void {
         const ls = &s.lanes[lane];
         s.sound(ls.processing);
@@ -570,7 +558,6 @@ pub const Sim = struct {
         while (ls.mark < list.len and s.notes[list[ls.mark]].time_us < from) ls.mark += 1;
     }
 
-    /// LN completion and missed-note POORs.
     fn endPhase(s: *Sim, t: i64) void {
         const w = &s.judge_w;
         for (0..s.lane_count) |l| {
@@ -756,8 +743,7 @@ test "auto scratch plays the scratch and ignores its keys" {
     try testing.expectEqual(@as(u32, 0), s.score.count(.ms));
 }
 
-// Timing parity vectors: each row is {offset from note in ms (positive = late), expected judge}
-// at the published window edges for #RANK 3 (EASY 21/60/120/200).
+// Rows are {ms from note (positive = late), judge} at the #RANK 3 window edges (EASY 21/60/120/200).
 test "judge windows at rank edges" {
     const src =
         \\#BPM 120
@@ -801,7 +787,6 @@ test "missed note becomes POOR after BAD window, frame cadence does not matter" 
     try testing.expectEqual(@as(u32, 0), a.score.count(.pr));
     a.advance(2_300_000);
     try testing.expectEqual(@as(u32, 1), a.score.count(.pr));
-    // same end state when stepped in tiny increments
     const b = try Sim.create(testing.allocator, &c, .{});
     defer b.destroy();
     var t: i64 = 0;

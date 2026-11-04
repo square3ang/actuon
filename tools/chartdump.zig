@@ -1,4 +1,4 @@
-//! Prints the same fingerprint as tools/golden/DumpChart.java, for parity checks.
+//! Must print the same fingerprint as tools/golden/DumpChart.java.
 const std = @import("std");
 const core = @import("actuon_core");
 

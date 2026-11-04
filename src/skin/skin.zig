@@ -1,4 +1,3 @@
-//! Skin discovery, loading and hot reload.
 const std = @import("std");
 const c = @import("c");
 const core = @import("actuon_core");
@@ -59,7 +58,7 @@ pub fn playSlot(mode: core.types.Mode) config.SkinSlot {
     };
 }
 
-/// Types whose options the settings screen offers; the rest are never drawn.
+/// Other types are never drawn, so their options would do nothing.
 fn offersOptions(t: i64) bool {
     return t <= 4 or t == type_select or t == type_decide or t == type_result;
 }
@@ -102,7 +101,6 @@ fn hasType(a: std.mem.Allocator, path: []const u8, want: i32) bool {
     return typeOfFile(a, path) == want;
 }
 
-/// Folders inside `dir` that hold a skin, directly or one level down, sorted by name.
 pub fn listSkins(a: std.mem.Allocator, dir: []const u8) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     for (try fs.list(a, dir)) |e| {
@@ -136,7 +134,6 @@ fn addFile(a: std.mem.Allocator, out: *std.ArrayList(SkinFile), path: []const u8
     } else if (typeOfFile(a, path)) |t| try out.append(a, .{ .path = path, .type = t });
 }
 
-/// Every skin file under the skins folder, up to one level inside each skin, with its type.
 pub fn allFiles(a: std.mem.Allocator) ![]const SkinFile {
     const root = try skinsDir(a);
     var out: std.ArrayList(SkinFile) = .empty;
@@ -156,13 +153,11 @@ pub fn allFiles(a: std.mem.Allocator) ![]const SkinFile {
     return out.items;
 }
 
-/// Where skin folders go.
 pub fn skinsDir(a: std.mem.Allocator) ![]const u8 {
     const data = try fs.dataDir(a);
     return std.fmt.allocPrint(a, "{s}skins", .{data});
 }
 
-/// `root` is a skin file, or a folder searched two levels deep for the first file of the wanted type.
 /// A file of another type stands for its folder: its siblings cover the other key modes.
 pub fn find(a: std.mem.Allocator, root: []const u8, want: i32) ?[]const u8 {
     const st = fs.stat(root) orelse return null;
@@ -187,11 +182,9 @@ pub fn find(a: std.mem.Allocator, root: []const u8, want: i32) ?[]const u8 {
 
 pub const Conf = jsonskin.Conf;
 
-/// One thing a skin lets the player set. An offset axis is a row of its own.
 pub const Option = struct {
     kind: enum { property, file, offset },
     name: []const u8,
-    /// property: item names. file: names the wildcard can stand for.
     choices: []const []const u8 = &.{},
     def: []const u8 = "",
     /// offset: which field of jsonskin.Offset.
@@ -215,7 +208,6 @@ fn sharedConfPath(a: std.mem.Allocator, root: []const u8) ![]const u8 {
     return std.fmt.allocPrint(a, "{s}skinconf/{x}.json", .{ data, std.hash.Wyhash.hash(0, confRoot(root)) });
 }
 
-/// A missing or damaged file means the skin's own defaults.
 pub fn loadConf(a: std.mem.Allocator, root: []const u8, want: i32) Conf {
     const p = confPath(a, root, want) catch return .{};
     const bytes = fs.readAlloc(a, p, 1 << 22) catch blk: {
@@ -271,7 +263,6 @@ fn addOptions(a: std.mem.Allocator, out: *std.ArrayList(Option), dir: []const u8
     }
 }
 
-/// An option a file declares twice shows once, with all its choices.
 fn addOption(a: std.mem.Allocator, out: *std.ArrayList(Option), o: Option) !void {
     for (out.items) |*e| if (e.kind == o.kind and e.field == o.field and std.mem.eql(u8, e.name, o.name)) {
         var merged: std.ArrayList([]const u8) = .empty;
@@ -306,10 +297,8 @@ fn addFileOptions(a: std.mem.Allocator, out: *std.ArrayList(Option), dir: []cons
 
 pub const scratchRight = osuskin.scratchRight;
 
-/// The built-in skin's single play options; its root is "".
 const builtin_options = [_]Option{.{ .kind = .property, .name = osuskin.scratch_side_name, .choices = &osuskin.scratch_side_choices, .def = "Left" }};
 
-/// What the file `root` uses for screen `want` lets the player set, in the order it declares it.
 /// shortcut: LR2 #CUSTOMFILE and #CUSTOMOFFSET are not offered, their wildcards take the first match.
 pub fn options(a: std.mem.Allocator, root: []const u8, want: i32) ![]const Option {
     if (root.len == 0) return if (want == playType(.beat7) or want == playType(.beat5)) &builtin_options else &.{};
@@ -319,7 +308,6 @@ pub fn options(a: std.mem.Allocator, root: []const u8, want: i32) ![]const Optio
     return out.items;
 }
 
-/// Parses and uploads a skin. Caller owns the result.
 const CachedTexture = struct { tex: *gfx.Texture, size: [2]f32, mtime: i128 };
 /// By path: skins are rebuilt per song, as their scripts read it, but their images need not be.
 var texture_cache: std.StringHashMapUnmanaged(CachedTexture) = .empty;
@@ -397,7 +385,6 @@ pub fn destroy(gpa: std.mem.Allocator, s: *Skin) void {
     gpa.destroy(s);
 }
 
-/// Hot reload check: true when the skin file changed on disk.
 pub fn changed(s: *const Skin) bool {
     const st = fs.stat(s.path) orelse return false;
     return st.mtime != s.mtime;

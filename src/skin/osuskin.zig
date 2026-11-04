@@ -1,5 +1,4 @@
-//! osu!mania skins (skin.ini), as the osu! wiki and lazer's legacy mania pieces define them.
-//! Laid out in stable's 480-high space; an image counts 1.6 px to the unit, as on lazer's 768-high stage.
+//! Stable's 480-high space; an image counts 1.6 px per unit, as on lazer's 768-high stage.
 const std = @import("std");
 const c = @import("c");
 const core = @import("actuon_core");
@@ -18,7 +17,6 @@ pub fn isIni(path: []const u8) bool {
     return std.ascii.eqlIgnoreCase(std.fs.path.basename(path), "skin.ini");
 }
 
-/// A skin only for other osu! modes has nothing to draw mania with.
 pub fn hasMania(a: std.mem.Allocator, path: []const u8) bool {
     const text = fs.readAlloc(a, path, 1 << 22) catch return false;
     if (std.ascii.findIgnoreCase(text, "[Mania]") != null) return true;
@@ -43,7 +41,7 @@ fn get(sec: []const u8, key: []const u8) ?[]const u8 {
     return found;
 }
 
-/// The first section of that name; for mania, the first whose `Keys` matches, which may come anywhere in it.
+/// Mania repeats its section per key count, and `Keys` may come anywhere in one.
 fn section(text: []const u8, name: []const u8, keys: ?u8) []const u8 {
     var it = std.mem.splitScalar(u8, text, '\n');
     // As osu!, what comes before any header counts as [General].
@@ -83,7 +81,6 @@ fn number(sec: []const u8, key: []const u8, def: f32) f32 {
     return std.fmt.parseFloat(f32, v) catch def;
 }
 
-/// A column's value in a comma list; past the list's end the default, an unreadable entry 0.
 fn listAt(sec: []const u8, key: []const u8, i: usize, def: f32) f32 {
     var it = std.mem.splitScalar(u8, get(sec, key) orelse return def, ',');
     var n: usize = 0;
@@ -141,7 +138,7 @@ fn pixelSize(path: []const u8) ?[2]f32 {
     return .{ @floatFromInt(w), @floatFromInt(h) };
 }
 
-/// An image with its size as osu! counts it, @2x halved.
+/// Size as osu! counts it: @2x halved.
 const Image = struct {
     tex: i32,
     w: f32,
@@ -168,7 +165,6 @@ const Build = struct {
         return .{ .tex = @intCast(b.paths.items.len - 1), .w = size[0] / f.scale, .h = size[1] / f.scale };
     }
 
-    /// The file the ini names under `key`, else osu!'s default name.
     fn image(b: *Build, key: []const u8, def: []const u8, animated: bool) !?Image {
         return b.file(get(b.mania, key) orelse def, animated);
     }
@@ -205,7 +201,6 @@ fn columnKind(col: usize, n: usize) u8 {
     return if (@min(col, n - 1 - col) % 2 == 0) '1' else '2';
 }
 
-/// Which key timers a lane runs on: scratch is 0, keys count from 1.
 fn timerCode(mode: core.types.Mode, lane: u8) i32 {
     return if (mode.scratchOf(lane) >= 0) 0 else lane + @as(i32, 1);
 }
@@ -358,7 +353,7 @@ fn addCombo(b: *Build, fonts: []const u8, l: *const Layout) !void {
     });
 }
 
-/// LegacyScoreCounter and LegacyAccuracyCounter, at the top right. The score shown is the EX score.
+/// The score shown is the EX score.
 fn addScore(b: *Build, fonts: []const u8) !void {
     const prefix = get(fonts, "ScorePrefix") orelse "score";
     const overlap = number(fonts, "ScoreOverlap", 0);
@@ -400,7 +395,7 @@ fn addScore(b: *Build, fonts: []const u8) !void {
     try b.objects.append(b.a, .{ .kind = .number, .ref = m.acc_whole, .digit_srcs = font.digits, .digit_gap = agap, .digits = 3, .keys = try b.fixed(right, y, aw, ah, white) });
 }
 
-/// LegacyHealthDisplay, at the top left. A marker image makes it the new style, placed a little differently.
+/// A marker image makes it LegacyHealthDisplay's new style, placed a little differently.
 fn addGauge(b: *Build, conf: jsonskin.Conf) !void {
     const bg = try b.file("scorebar-bg", false) orelse return;
     try b.sprite(bg, 0, 0, bg.w / unit, bg.h / unit);
@@ -467,12 +462,12 @@ pub fn scratchRight(conf: jsonskin.Conf) bool {
     return std.mem.eql(u8, pick, "Right");
 }
 
-/// bga.fit's types: keep the shape and fit inside, keep it and crop, or fill the screen out of shape.
 fn gaugeColorOn(conf: jsonskin.Conf) bool {
     const pick = conf.property.map.get(gauge_color_name) orelse return true;
     return !std.mem.eql(u8, pick, "Off");
 }
 
+/// bga.fit's types: keep the shape and fit inside, keep it and crop, or fill the screen out of shape.
 fn stretchOf(conf: jsonskin.Conf) i32 {
     const pick = conf.property.map.get(bga_stretch_name) orelse return 1;
     if (std.mem.eql(u8, pick, "Fill")) return 3;
@@ -480,7 +475,6 @@ fn stretchOf(conf: jsonskin.Conf) i32 {
     return 1;
 }
 
-/// The black over the BGA as an alpha, from "50%". A pick not on offer is no dim.
 fn dimAlpha(conf: jsonskin.Conf) f32 {
     const pick = conf.property.map.get(bga_dim_name) orelse return 0;
     for (bga_dim_choices) |ch| {
@@ -570,7 +564,6 @@ test "the section for the key count is found, with keys set before its Keys line
     try std.testing.expectEqual(@as(usize, 0), section(text, "Mania", 7).len);
     try std.testing.expect(modern(section(text, "General", null)));
     try std.testing.expect(!modern(""));
-    // Junk before the header does not hide the section.
     try std.testing.expect(modern(section("sss[General]\nVersion: 2.7\n[Mania]\nKeys: 4\n", "General", null)));
 }
 

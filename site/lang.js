@@ -1,4 +1,3 @@
-// Sends a first visit to the root page to the visitor's language. A language picked on the page wins.
 (function () {
   var pages = ["ko", "ja", "zh"];
 

@@ -1,5 +1,3 @@
-//! A preview for a chart that ships none: a few seconds of its own sounds from a third of the way in.
-//! Mixed live, not cached: one window's sounds decode in well under a second, and a cache could go stale.
 const std = @import("std");
 const c = @import("c");
 const core = @import("actuon_core");
@@ -16,7 +14,7 @@ const max_sound_bytes = 64 << 20;
 
 const Hit = struct { time_us: i64, wav: i32, start_us: i64, dur_us: i64 };
 
-/// Interleaved stereo at `rate`, owned by `out_gpa`. Gives up with error.Canceled once `cancel` is set.
+/// Owned by `out_gpa`.
 pub fn render(gpa: std.mem.Allocator, out_gpa: std.mem.Allocator, path: []const u8, rate: u32, cancel: *const std.atomic.Value(bool)) ![]f32 {
     const bytes = try fs.readAlloc(gpa, path, max_chart_bytes);
     defer gpa.free(bytes);
@@ -45,7 +43,6 @@ pub fn render(gpa: std.mem.Allocator, out_gpa: std.mem.Allocator, path: []const 
         .lock = c.SDL_CreateMutex() orelse return error.NoMutex,
     };
     defer c.SDL_DestroyMutex(mix.lock);
-    // As a chart's load does: decoding is nearly all the time, and each sound is its own work.
     var threads: [15]?*c.SDL_Thread = @splat(null);
     const extra: usize = @intCast(std.math.clamp(c.SDL_GetNumLogicalCPUCores() - 1, 0, threads.len));
     for (threads[0..extra]) |*t| t.* = c.SDL_CreateThread(Mix.run, "clip", &mix);
@@ -57,13 +54,11 @@ pub fn render(gpa: std.mem.Allocator, out_gpa: std.mem.Allocator, path: []const 
     return out;
 }
 
-/// One clip's mix, shared by the threads that decode its sounds.
 const Mix = struct {
     gpa: std.mem.Allocator,
     dir: []const u8,
     wavs: []const []const u8,
     hits: []const Hit,
-    /// Where each sound's hits begin in `hits`, then its end.
     groups: []const usize,
     start_us: i64,
     rate: u32,
@@ -92,7 +87,6 @@ const Mix = struct {
     }
 };
 
-/// Every sound the chart starts before `end_us`, grouped by sound and in time order within each.
 fn collectHits(gpa: std.mem.Allocator, chart: *const core.types.Chart, end_us: i64) ![]Hit {
     var hits: std.ArrayList(Hit) = .empty;
     errdefer hits.deinit(gpa);
@@ -108,28 +102,22 @@ fn collectHits(gpa: std.mem.Allocator, chart: *const core.types.Chart, end_us: i
     return hits.toOwnedSlice(gpa);
 }
 
-/// Only `span` of the sound. Null when the file is missing, too big or not audio, or ends before
-/// the span: the clip plays on without it.
 fn loadSound(gpa: std.mem.Allocator, dir: []const u8, name: []const u8, rate: u32, span: Span) ?decode.Sample {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const p = (fs.resolveAsset(arena.allocator(), dir, name, session.audio_exts) catch null) orelse return null;
     const bytes = fs.readAlloc(gpa, p, max_sound_bytes) catch return null;
     defer gpa.free(bytes);
-    // The header is far cheaper than a decode, and most sounds before the clip have ended.
     if (decode.lengthUs(bytes)) |len| if (len <= span.from_us) return null;
     return decode.decodeSpan(gpa, bytes, p, rate, span.from_us, span.len_us) catch null;
 }
 
-/// One sound's time-ordered hits that can still sound from `start_us`. Each cuts the one before,
-/// so of those before it only the last.
 fn heardHits(hits: []const Hit, start_us: i64) []const Hit {
     var i = hits.len;
     while (i > 0 and hits[i - 1].time_us >= start_us) i -= 1;
     return hits[i -| 1..];
 }
 
-/// Where in the sound the clip from `start_us` to `end_us` reads it, so the rest is never decoded.
 const Span = struct { from_us: i64, len_us: i64 };
 
 fn soundSpan(hits: []const Hit, start_us: i64, end_us: i64) Span {
@@ -150,14 +138,11 @@ fn toFrames(us: i64, rate: u32) i64 {
     return @intCast(std.math.clamp(f, std.math.minInt(i64), std.math.maxInt(i64)));
 }
 
-/// Adds one sound's hits into the clip that starts at `start_us`, from `data` that begins `skip_us`
-/// into the sound. A hit stops when the same sound starts again, as the engine does.
 fn mixHits(out: []f32, data: []const f32, hits: []const Hit, start_us: i64, rate: u32, skip_us: i64) void {
     const total: i64 = @intCast(data.len / 2);
     const out_frames: i64 = @intCast(out.len / 2);
     for (hits, 0..) |h, k| {
         const at = toFrames(h.time_us -| start_us, rate);
-        // Where in `data` the hit starts; before it for a hit begun before the clip.
         const src = toFrames(@max(h.start_us, 0) -| skip_us, rate);
         var to = @min(out_frames, at -| src +| total);
         if (h.dur_us > 0) to = @min(to, at +| toFrames(h.dur_us, rate));
@@ -189,7 +174,6 @@ fn fade(out: []f32, rate: u32) void {
 test "a sound stops where the same sound starts again, and the clip starts at its window" {
     const data: [20]f32 = @splat(1); // 10 frames
     var out: [16]f32 = @splat(0); // 8 frames
-    // At 1 MHz a frame is a microsecond. Starts before the window, cut 3 frames later.
     const hits = [_]Hit{
         .{ .time_us = 8, .wav = 0, .start_us = 0, .dur_us = 0 },
         .{ .time_us = 11, .wav = 0, .start_us = 0, .dur_us = 2 },
@@ -199,7 +183,6 @@ test "a sound stops where the same sound starts again, and the clip starts at it
 }
 
 test "only the part of a sound the clip hears is decoded, and it mixes where it belongs" {
-    // At 1 MHz a frame is a microsecond; the clip runs from 10 to 18.
     const hits = [_]Hit{
         .{ .time_us = 0, .wav = 0, .start_us = 0, .dur_us = 0 },
         .{ .time_us = 5, .wav = 0, .start_us = 2, .dur_us = 0 },
@@ -207,9 +190,7 @@ test "only the part of a sound the clip hears is decoded, and it mixes where it 
     };
     const heard = heardHits(&hits, 10);
     try std.testing.expectEqual(@as(usize, 2), heard.len);
-    // The hit at 5 is 7 into the sound at 10 and cut at 9; the one at 12 reads 0 to 6.
     try std.testing.expectEqual(Span{ .from_us = 0, .len_us = 9 }, soundSpan(heard, 10, 18));
-    // Alone, the hit at 5 reads 7 to 15: the sound's own frame numbers, from 7.
     try std.testing.expectEqual(Span{ .from_us = 7, .len_us = 8 }, soundSpan(heard[0..1], 10, 18));
     var data: [16]f32 = undefined;
     for (0..8) |i| data[i * 2] = @floatFromInt(7 + i);
@@ -232,7 +213,6 @@ test "a chart's sounds become a faded clip, and a huge or soundless chart is ref
     defer gpa.free(wav);
     var cancel: std.atomic.Value(bool) = .init(false);
 
-    // Names a sound that isn't there yet: nothing to hear.
     try fs.write(chart, "#BPM 120\n#WAV01 a.wav\n#00101:01\n");
     try std.testing.expectError(error.Silent, render(gpa, gpa, chart, 1000, &cancel));
 
@@ -266,7 +246,6 @@ test "a chart's sounds become a faded clip, and a huge or soundless chart is ref
     @memset(huge, '#');
     try fs.write(chart, huge);
     try std.testing.expectError(error.StreamTooLong, render(gpa, gpa, chart, 1000, &cancel));
-    // Garbage parses to a chart with no sounds, or fails to parse; either way nothing plays.
     try fs.write(chart, "\x00\xff#WAVZZ\n#99999:ZZ\n#BPM -0\n");
     if (render(gpa, gpa, chart, 1000, &cancel)) |x| {
         gpa.free(x);

@@ -1,5 +1,4 @@
-//! The options a skin offers: choices, files and offsets. Saved per screen and key mode as they change;
-//! play skins load at play start, so a change shows from the next play, and song select's on return.
+//! A change shows only when that skin next loads.
 const std = @import("std");
 const c = @import("c");
 const gfx = @import("gfx.zig");
@@ -19,7 +18,6 @@ pub const State = struct {
     conf: skin_mod.Conf = .{},
     cursor: usize = 0,
     first: usize = 0,
-    /// The skin these options belong to, and where Esc goes.
     root: []const u8 = "",
     want: i32 = 0,
     back: app_mod.Scene = .settings,
@@ -48,7 +46,6 @@ fn pickMap(s: *State, kind: @TypeOf(@as(Option, undefined).kind)) *std.StringArr
     return if (kind == .property) &s.conf.property.map else &s.conf.file.map;
 }
 
-/// The picked name, or the skin's default. A pick the skin no longer offers counts as unset.
 fn picked(s: *State, o: Option) []const u8 {
     const name = pickMap(s, o.kind).get(o.name) orelse o.def;
     for (o.choices) |ch| if (std.mem.eql(u8, ch, name)) return ch;

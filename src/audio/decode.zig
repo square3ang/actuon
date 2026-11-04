@@ -1,5 +1,4 @@
-//! Decodes keysounds fully into memory as interleaved stereo f32 at the device rate, so playback
-//! does no disk I/O and no allocation.
+//! Decoded fully up front at the device rate, so playback does no I/O and no allocation.
 const std = @import("std");
 const c = @import("c");
 
@@ -10,11 +9,9 @@ pub const Sample = struct {
     }
 };
 
-/// Longer than any song a chart plays.
 const max_seconds = 30 * 60;
 
-/// Samples a decode may hold before resampling: max_seconds of 48 kHz stereo. A small file of
-/// silence can unpack into gigabytes, so decoders stop here instead of after.
+/// Decoders stop here, before resampling: a small file of silence can unpack into gigabytes.
 const max_raw_samples = max_seconds * 48000 * 2;
 
 const Raw = struct { samples: []f32, channels: u32, rate: u32 };
@@ -75,7 +72,6 @@ fn decodeRaw(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8) !Raw {
     return error.UndecodableAudio;
 }
 
-/// Reads a whole stream in chunks. Null when it holds nothing, so the next decoder gets a try.
 fn readAll(gpa: std.mem.Allocator, dec: anytype, channels: u32, rate: u32, comptime read: anytype) !?Raw {
     if (channels == 0 or rate == 0) return null;
     const chunk = 4096;
@@ -86,7 +82,6 @@ fn readAll(gpa: std.mem.Allocator, dec: anytype, channels: u32, rate: u32, compt
         const got: usize = @intCast(@min(read(dec, chunk, room.ptr), chunk));
         out.shrinkRetainingCapacity(out.items.len - (chunk - got) * channels);
         if (got == 0) break;
-        // Longer than max_seconds would fail at the resample anyway, so stop reading now.
         if (out.items.len > max_raw_samples or out.items.len / channels > max_seconds * @as(usize, rate)) return error.UndecodableAudio;
     }
     if (out.items.len == 0) {
@@ -106,7 +101,6 @@ const Ogg = struct {
     }
 };
 
-/// How long a sound lasts, from its header alone. Null when only decoding can tell, as for mp3 and flac.
 pub fn lengthUs(bytes: []const u8) ?i64 {
     var w: c.drwav = undefined;
     if (c.drwav_init_memory(&w, bytes.ptr, bytes.len, null) != 0) {
@@ -116,8 +110,7 @@ pub fn lengthUs(bytes: []const u8) ?i64 {
     return oggLengthUs(bytes);
 }
 
-/// The last page's granule position over the rate in the first packet. Opening the stream with
-/// stb_vorbis would also build its codebooks, which costs more than a short sound's decode.
+/// Last granule over the first packet's rate: stb_vorbis would build codebooks, costing more than a short decode.
 fn oggLengthUs(bytes: []const u8) ?i64 {
     if (bytes.len < 28 or !std.mem.eql(u8, bytes[0..4], "OggS")) return null;
     const id = 27 + @as(usize, bytes[26]);
@@ -133,7 +126,6 @@ fn usOf(frames: u64, rate: u32) ?i64 {
     return @intCast(@min(@as(u128, frames) * 1_000_000 / rate, std.math.maxInt(i64)));
 }
 
-/// Cubic Hermite interpolation: much cheaper than a windowed sinc at load, and keysounds are short.
 fn hermite(x0: f32, x1: f32, x2: f32, x3: f32, t: f32) f32 {
     const a = -0.5 * x0 + 1.5 * x1 - 1.5 * x2 + 0.5 * x3;
     const b = x0 - 2.5 * x1 + 2 * x2 - 0.5 * x3;
@@ -147,8 +139,6 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8, out_r
     return resample(gpa, raw.samples, raw.channels, raw.rate, out_rate);
 }
 
-/// `len_us` of the sound from `from_us`, so the unheard rest of a long track is never resampled,
-/// nor for Ogg decoded. Empty when the span lies past the end.
 pub fn decodeSpan(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8, out_rate: u32, from_us: i64, len_us: i64) !Sample {
     if (oggSpan(gpa, bytes, from_us, len_us)) |span| {
         defer gpa.free(span.samples);
@@ -167,7 +157,6 @@ fn framesAt(us: i64, rate: u32) usize {
     return @intCast(@min(@as(u128, @intCast(@max(us, 0))) * rate / 1_000_000, max_seconds * @as(u128, rate)));
 }
 
-/// Seeks instead of decoding the start. NotOgg sends any other file to the full decoders.
 fn oggSpan(gpa: std.mem.Allocator, bytes: []const u8, from_us: i64, len_us: i64) !Raw {
     if (!std.mem.startsWith(u8, bytes, "OggS") or bytes.len > std.math.maxInt(c_int)) return error.NotOgg;
     var err: c_int = 0;
@@ -258,7 +247,6 @@ test "wav decode through resampler keeps duration" {
     try std.testing.expectEqual(@as(usize, 12000), s.frames());
     try std.testing.expectEqual(@as(?i64, 250_000), lengthUs(&buf));
     try std.testing.expectEqual(@as(?i64, null), lengthUs("not audio"));
-    // An Ogg stream's length is its last page's granule over the rate, read without decoding.
     var ogg: [28 + 16 + 14]u8 = @splat(0);
     @memcpy(ogg[0..4], "OggS");
     ogg[26] = 1;
@@ -268,7 +256,6 @@ test "wav decode through resampler keeps duration" {
     std.mem.writeInt(u64, ogg[50..58], 88200, .little);
     try std.testing.expectEqual(@as(?i64, 2_000_000), lengthUs(&ogg));
     try std.testing.expectEqual(@as(?i64, null), lengthUs(ogg[0..40]));
-    // At 1 Hz the same 4 KB would last 33 minutes and resample into 96 million frames.
     std.mem.writeInt(u32, buf[24..28], 1, .little);
     std.mem.writeInt(u32, buf[28..32], 2, .little);
     try std.testing.expectError(error.UndecodableAudio, decode(std.testing.allocator, &buf, "x.wav", 48000));

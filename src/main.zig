@@ -106,9 +106,7 @@ pub fn main(init: std.process.Init) !void {
     try app.main(gpa, opts);
 }
 
-/// std reads the environment on the first stderr write, from the block the process started with. SDL later unsets
-/// XDG_ACTIVATION_TOKEN (set when a desktop launches the game), which leaves a null in that block: the late read then
-/// panics inside the stderr lock and the thread hangs. So both Io instances read it before SDL starts.
+/// SDL unsetting XDG_ACTIVATION_TOKEN breaks std's lazy environ read, which then hangs in the stderr lock.
 fn readEnvironNow(io: std.Io) void {
     _ = std.debug.lockStderr(&.{});
     std.debug.unlockStderr();

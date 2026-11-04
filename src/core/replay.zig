@@ -1,5 +1,4 @@
-//! Replay file: chart identity, options, and the raw input stream. Results are never stored as
-//! truth: anything that needs the score re-simulates, which is what makes IR verification possible.
+//! Never stores results, so the IR re-simulates every score.
 const std = @import("std");
 const types = @import("types.zig");
 const sim_mod = @import("sim.zig");
@@ -85,7 +84,7 @@ const Reader = struct {
     }
 };
 
-/// Decodes untrusted bytes. Returned slices live in `a`.
+/// The bytes are untrusted. Returned slices live in `a`.
 pub fn decode(a: std.mem.Allocator, bytes: []const u8) !Replay {
     var r: Reader = .{ .b = bytes };
     if (bytes.len < 4 + 1 + 64 + 2 or !std.mem.eql(u8, bytes[0..4], magic)) return error.BadMagic;
@@ -125,8 +124,7 @@ pub fn decode(a: std.mem.Allocator, bytes: []const u8) !Replay {
     for (ev, 0..) |*e, i| {
         const z = try r.vari();
         const delta: i64 = @bitCast((z >> 1) ^ (0 -% (z & 1)));
-        // events must be ordered: the sim's contract, and the verifier's defence against time travel
-        // Only the first may start below zero: a key pressed during the lead-in has a negative song time.
+        // Ordered, against time travel; only the first may be negative, a key pressed in the lead-in.
         if ((delta < 0 and i > 0) or delta < -3_600_000_000 or delta > 3_600_000_000) return error.BadField;
         t += delta;
         const f = try r.byte();
@@ -150,7 +148,7 @@ pub const Result = extern struct {
     seed: u64 = 0,
 };
 
-/// Re-runs a play. `chart` must have been parsed with `r.bms_random`; it is modified by options.
+/// `chart` must have been parsed with `r.bms_random`; options modify it.
 pub fn resimulate(gpa: std.mem.Allocator, chart: *types.Chart, r: Replay) !Result {
     _ = options.applyLnMode(chart, r.ln_mode);
     applyLanes(chart, r);
@@ -163,7 +161,7 @@ pub fn resimulate(gpa: std.mem.Allocator, chart: *types.Chart, r: Replay) !Resul
     return res;
 }
 
-/// The random options, then DP flip: the order the client plays them in.
+/// The order the client plays them in.
 pub fn applyLanes(chart: *types.Chart, r: Replay) void {
     options.apply(chart, .{ r.random, r.random2 }, r.seed);
     if (r.flip) options.flip(chart);
@@ -237,7 +235,6 @@ test "round trip and resimulate" {
     const res = try resimulate(gpa, &c, r);
     try std.testing.expect(res.ok);
     try std.testing.expectEqual(@as(u32, 3 * 2 + 1), res.ex_score); // 0,7,14 ms PG; 21 ms at NORMAL=GR
-    // truncated and hostile inputs are rejected, not crashed on
     try std.testing.expectError(error.Truncated, decode(arena.allocator(), bytes[0 .. bytes.len - 1]));
 }
 
@@ -293,7 +290,6 @@ test "a key pressed before the song starts survives the round trip" {
     try std.testing.expectEqual(@as(i64, -1_500_000), r.events[0].time_us);
     try std.testing.expectEqual(c.notes[0].time_us, r.events[2].time_us);
     try std.testing.expectEqual(@as(u32, 2), (try resimulate(gpa, &c, r)).ex_score);
-    // Later events still cannot go back in time.
     const back = [_]sim_mod.Event{ .{ .time_us = 5, .lane = 0, .down = true }, .{ .time_us = 4, .lane = 0, .down = false } };
     const bad = try encode(gpa, .{ .events = &back });
     defer gpa.free(bad);

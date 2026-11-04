@@ -19,12 +19,10 @@ pub fn client(gpa: std.mem.Allocator) std.http.Client {
     return .{ .allocator = gpa, .io = fs.io };
 }
 
-/// Keeps the client's connection for the next call, which spares a TLS handshake per request.
 pub fn send(c: *std.http.Client, gpa: std.mem.Allocator, method: std.http.Method, url: []const u8, payload: ?[]const u8, headers: []const std.http.Header) !Response {
     return sendCapped(c, gpa, method, url, payload, headers, max_body);
 }
 
-/// Keeps an answer in memory, and stops reading it past `limit`.
 const CappedBody = struct {
     out: std.Io.Writer.Allocating,
     limit: usize,
@@ -71,8 +69,7 @@ fn sendCapped(c: *std.http.Client, gpa: std.mem.Allocator, method: std.http.Meth
         .method = method,
         .payload = payload,
         .response_writer = &body.writer,
-        // Not privileged_headers: Zig 0.17 never sends those. Extra headers follow a redirect to any
-        // host, so a request carrying the IR token does not follow one and sees it as a status.
+        // Zig 0.17 never sends privileged_headers, and extra ones follow any redirect, so token requests do not.
         .extra_headers = headers,
         .redirect_behavior = if (headers.len > 0) .unhandled else null,
     }) catch |e| return if (body.too_large) error.TooLarge else e;
@@ -97,7 +94,6 @@ pub const Progress = struct {
     cancel: std.atomic.Value(bool) = .init(false),
 };
 
-/// Streams a response to a file, so a big package never sits in memory.
 pub fn download(gpa: std.mem.Allocator, url: []const u8, path: []const u8, progress: *Progress) !void {
     return downloadCapped(gpa, url, path, progress, max_download);
 }
@@ -133,7 +129,6 @@ fn downloadCapped(gpa: std.mem.Allocator, url: []const u8, path: []const u8, pro
     try w.interface.flush();
 }
 
-/// Resolves `ref` against the page at `base`.
 pub fn join(a: std.mem.Allocator, base: []const u8, ref: []const u8) ![]u8 {
     if (std.mem.indexOf(u8, ref, "://") != null) return a.dupe(u8, ref);
     const scheme_end = (std.mem.indexOf(u8, base, "://") orelse return error.BadUrl) + 3;
@@ -146,7 +141,6 @@ pub fn join(a: std.mem.Allocator, base: []const u8, ref: []const u8) ![]u8 {
     return std.fmt.allocPrint(a, "{s}/{s}", .{ base[0..dir_end], rest });
 }
 
-/// Answers one request with `body`, wherever the test listens.
 const TestPeer = struct {
     fn run(s: *std.Io.net.Server, body: []const u8) void {
         const stream = s.accept(fs.io) catch return;
@@ -298,7 +292,6 @@ test "url join" {
     }
 }
 
-/// A WebSocket on the client's connection, TLS included. Messages are text.
 // shortcut: reads block, so a network that drops silently holds the reader until TCP gives up; add a read timeout if players see frozen rooms.
 pub const WebSocket = struct {
     req: std.http.Client.Request,
@@ -340,7 +333,6 @@ pub const WebSocket = struct {
         try conn.flush();
     }
 
-    /// The next text or binary message, in `buf`. Pings are answered on the way.
     pub fn receive(ws: *WebSocket, buf: []u8) ![]u8 {
         const conn = ws.req.connection.?;
         while (true) {
@@ -440,7 +432,6 @@ test "a client frame is masked, and a server frame too large, split or masked is
     try std.testing.expectError(error.BadFrame, readFrame(&r, &buf));
 }
 
-/// Opens one WebSocket, then sends a ping and echoes the client's message, and reports whether the pong came back.
 const WebSocketPeer = struct {
     fn run(s: *std.Io.net.Server, ponged: *bool) void {
         const stream = s.accept(fs.io) catch return;

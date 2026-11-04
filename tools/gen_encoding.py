@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Generates src/bms/enc_tables.zig (CP932 and CP949 double-byte to Unicode BMP tables)."""
 def table(codec, lead_lo, lead_hi, trail_lo, trail_hi):
     out = []
     for lead in range(lead_lo, lead_hi + 1):

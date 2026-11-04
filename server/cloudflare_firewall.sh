@@ -1,6 +1,5 @@
 #!/bin/sh
-# Lets only Cloudflare reach ports 80 and 443, so nobody can go around the proxy to the server's own address.
-# Safe to run again: it replaces the list with Cloudflare's current one. Needs firewalld. SSH is not touched.
+# Safe to rerun: it replaces the list. SSH is not touched.
 set -eu
 list=$(curl -fsS --max-time 30 https://www.cloudflare.com/ips-v4; echo; curl -fsS --max-time 30 https://www.cloudflare.com/ips-v6)
 # A bad answer must not lock the proxy out, so the old list stays unless this one looks right.

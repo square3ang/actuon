@@ -1,4 +1,3 @@
-//! Song select: a browsable tree of library folders, plus search.
 const std = @import("std");
 const c = @import("c");
 const core = @import("actuon_core");
@@ -47,7 +46,7 @@ pub const State = struct {
     /// Empty means the root. Lives in folder_buf, because rows are rebuilt under it.
     folder: []const u8 = "",
     folder_buf: [4096]u8 = undefined,
-    /// The library folder open in the library view; empty lists every folder.
+    /// Empty lists every folder.
     library_root: []const u8 = "",
     library_root_buf: [4096]u8 = undefined,
     search: []const u8 = "",
@@ -69,7 +68,6 @@ pub const State = struct {
     download_shown: u64 = 0,
     download_moved_ms: u64 = 0,
     scroll: f32 = 0,
-    /// The selected chart, since when, and the preview it was found to have once the cursor rested.
     preview_key: u64 = 0,
     preview_since: u64 = 0,
     preview_checked: bool = true,
@@ -80,18 +78,15 @@ pub const State = struct {
     jacket_key: u64 = 0,
     jacket_since: u64 = 0,
     jacket_tried: bool = false,
-    /// The image being faded out, drawn under `jacket` until the fade ends.
     jacket_old: ?*gfx.Texture = null,
     logo: ?*gfx.Texture = null,
     jacket_fade_at: u64 = 0,
     scroll_at_ns: u64 = 0,
     jacket_job: ?*JacketJob = null,
-    /// Small copies of the images behind the wheel's cards, most recently drawn kept.
     card_art: std.ArrayList(CardArt) = .empty,
     card_job: ?*JacketJob = null,
     query: ?*ir.Query = null,
     query_title: []const u8 = "",
-    /// The selected chart's ranking, asked for once the cursor rests on it.
     board: ?*ir.Board = null,
     board_sha: [64]u8 = undefined,
     board_sha_len: usize = 0,
@@ -100,7 +95,6 @@ pub const State = struct {
     table_thread: ?*c.SDL_Thread = null,
     table_done: std.atomic.Value(bool) = .init(false),
     table_failed: std.atomic.Value(u32) = .init(0),
-    /// Set to fetch one table instead of every configured one.
     table_only: ?[]const u8 = null,
     stats: db_mod.ScanStats = .{},
     start_held: bool = false,
@@ -108,19 +102,14 @@ pub const State = struct {
     /// The 5 key: beatoraja's way to the detail panel from a keyboard.
     detail_held: bool = false,
     exit_since_ms: u64 = 0,
-    /// Last Start press in play, to find a double press.
     start_down_ms: u64 = 0,
-    /// Index into `mode_filters`.
     mode_filter: u8 = 0,
     /// Up to `max_replays` newest are offered per chart, as beatoraja's slots.
     replay_slot: u8 = 0,
     replay_count_for: [64]u8 = undefined,
     replay_count: ?u8 = null,
-    /// Holds the replay being played back.
     replay_arena: ?std.heap.ArenaAllocator = null,
-    /// The panel the skin's timers last saw.
     panel_seen: u8 = 0,
-    /// A scratch held in beatoraja song select: its direction, and when it next moves the cursor.
     pad_scroll: i8 = 0,
     pad_scroll_at_ms: u64 = 0,
 };
@@ -187,7 +176,6 @@ pub fn startScan(a: *App) void {
     s.last_scan_ms = c.SDL_GetTicks();
 }
 
-/// Poll-based watcher: rescans periodically while the player is browsing, never during play.
 fn tickScan(a: *App) void {
     const s = &a.sel;
     if (s.scan_thread) |t| {
@@ -202,7 +190,6 @@ fn tickScan(a: *App) void {
     _ = tickTables(a);
 }
 
-/// Collects a finished fetch and returns true once when it does; `status` then holds the outcome.
 pub fn tickTables(a: *App) bool {
     const s = &a.sel;
     const t = s.table_thread orelse return false;
@@ -216,7 +203,6 @@ pub fn tickTables(a: *App) bool {
     return true;
 }
 
-/// Rebuilds the visible rows from the DB; keeps the cursor on the same index.
 pub fn reload(a: *App) void {
     const s = &a.sel;
     // A rescan may have added or removed the room's chart.
@@ -233,8 +219,7 @@ pub fn reload(a: *App) void {
     if (s.cursor >= s.rows.len) s.cursor = if (s.rows.len == 0) 0 else s.rows.len - 1;
 }
 
-/// beatoraja's play mode filter, in its order. Its skins number them differently.
-/// shortcut: folder and level counts still include hidden charts, count per mode if it misleads.
+/// In beatoraja's order; its skins number them differently. shortcut: folder and level counts still include hidden charts, count per mode if it misleads.
 const mode_filters = [_]struct { mode: ?core.types.Mode, skin_index: i64, name: []const u8 }{
     .{ .mode = null, .skin_index = 0, .name = "ALL" },
     .{ .mode = .beat7, .skin_index = 2, .name = "7K" },
@@ -564,19 +549,16 @@ const jacket_fade_ms = 250;
 const card_fill: gfx.Color = .{ .r = 36, .g = 46, .b = 72 };
 const card_hover: gfx.Color = .{ .r = 52, .g = 66, .b = 100 };
 
-/// Where text of this size starts so it sits in the middle of a row, by the font's line height.
 fn centeredY(y: f32, h: f32, size: u16) f32 {
     return y + (h - @as(f32, @floatFromInt(size)) * 1.3) / 2;
 }
 
-/// Eases toward the target by elapsed time, so the wheel moves alike at any frame rate.
-/// Closes a quarter of the distance every 1/60 s.
 fn scrollStep(cur: f32, target: f32, dt_s: f32) f32 {
     const next = target + (cur - target) * std.math.pow(f32, 0.75, dt_s * 60);
     return if (@abs(target - next) < 0.001) target else next;
 }
 
-/// One image being read and decoded off the main thread, so changing songs never stalls a frame.
+/// Off the main thread so changing songs never stalls a frame.
 const JacketJob = struct {
     gpa: std.mem.Allocator,
     key: u64,
@@ -587,7 +569,7 @@ const JacketJob = struct {
     px: ?*anyopaque = null,
     w: c_int = 0,
     h: c_int = 0,
-    /// Shrinks the decoded image to at most this wide; 0 keeps it whole.
+    /// 0 keeps it whole.
     max_w: c_int = 0,
 
     fn run(ud: ?*anyopaque) callconv(.c) c_int {
@@ -610,7 +592,6 @@ const JacketJob = struct {
         return 0;
     }
 
-    /// Waits for the thread if it is still running.
     fn destroy(j: *JacketJob) void {
         c.SDL_WaitThread(j.thread, null);
         if (j.px) |px| c.stbi_image_free(px);
@@ -641,7 +622,6 @@ fn startImageJob(a: *App, sg: db_mod.Song, name: []const u8, image: u64, max_w: 
     return j;
 }
 
-/// Keeps every nth pixel in place until the image fits `max_w`, and returns its new size.
 /// shortcut: point sampling, fine under a dim fade; a box filter if card art looks noisy.
 fn shrink(px: []u8, w: c_int, h: c_int, max_w: c_int) [2]c_int {
     if (w <= max_w) return .{ w, h };
@@ -665,7 +645,6 @@ fn imageKey(sg: db_mod.Song, name: []const u8) u64 {
     return std.hash.Wyhash.hash(std.hash.Wyhash.hash(0, std.fs.path.dirname(sg.path) orelse ""), name);
 }
 
-/// A card shows the chart's stage image, or its banner if it only has that.
 fn cardImage(sg: db_mod.Song) []const u8 {
     return if (sg.stagefile.len > 0) sg.stagefile else sg.banner;
 }
@@ -675,8 +654,7 @@ fn findCardArt(s: *State, image: u64) ?*CardArt {
     return null;
 }
 
-/// Takes in a finished image, drops the longest unseen, and starts the row nearest the cursor that
-/// still has none. Waits while the wheel moves, so rows only passed over are never read.
+/// Idle while the wheel moves, so rows only passed over are never read; nearest the cursor loads first.
 fn tickCardArt(a: *App, reach: usize) void {
     const s = &a.sel;
     if (s.card_job) |j| {
@@ -711,7 +689,6 @@ fn tickCardArt(a: *App, reach: usize) void {
     }
 }
 
-/// The song's image behind its card, cropped to fill it and fading out toward the card's text.
 fn drawCardArt(a: *App, song: db_mod.Song, x: f32, y: f32, w: f32, h: f32, on: bool) void {
     const name = cardImage(song);
     if (name.len == 0) return;
@@ -732,7 +709,7 @@ fn swapJacket(s: *State, next: ?*gfx.Texture) void {
     s.jacket_fade_at = c.SDL_GetTicks();
 }
 
-/// Shows #STAGEFILE once the cursor has rested a moment, so scrolling never stalls on image loads.
+/// Waits for the cursor to rest, so scrolling never stalls on image loads.
 fn updateJacket(a: *App) void {
     const s = &a.sel;
     const song = if (s.rows.len > 0 and s.cursor < s.rows.len) s.rows[s.cursor].song else null;
@@ -750,7 +727,6 @@ fn updateJacket(a: *App) void {
     }
     if (s.jacket_job) |j| {
         if (!j.done.load(.acquire)) return;
-        // A result the cursor has moved away from is dropped; the current image starts next.
         if (j.key == s.jacket_key) swapJacket(s, if (j.px) |px| a.g.textureFromPixels(@ptrCast(px), j.w, j.h, @intCast(j.w * 4)) else null);
         j.destroy();
         s.jacket_job = null;
@@ -767,7 +743,6 @@ fn jacketEased(s: *const State) f32 {
     return t * t * (3 - 2 * t);
 }
 
-/// How much image there is, 0 to 1: what it covers fades along with it.
 fn jacketPresence(has_new: bool, has_old: bool, eased: f32) f32 {
     if (has_new and has_old) return 1;
     if (has_new) return eased;
@@ -781,7 +756,6 @@ test "an image fades in from nothing and out to nothing" {
     try std.testing.expectEqual(@as(f32, 0), jacketPresence(false, false, 0.25));
 }
 
-/// The new image fades in over the old one or over nothing; with no new image the old one fades out.
 fn drawJacketLayers(a: *App, cover: bool, dst: ?*const c.SDL_FRect) void {
     const s = &a.sel;
     const eased = jacketEased(s);
@@ -792,17 +766,14 @@ fn drawJacketLayers(a: *App, cover: bool, dst: ?*const c.SDL_FRect) void {
 fn drawJacketTexture(a: *App, tex: *gfx.Texture, cover: bool, dst: ?*const c.SDL_FRect, alpha: f32) void {
     const g = &a.g;
     const box = if (dst) |d| d.* else c.SDL_FRect{ .x = 0, .y = 0, .w = g.w, .h = g.h };
-    // Behind the page it is dimmed in its own color, so text stays readable and a fade only ever
-    // moves between this and what lies behind; a dim layer over it would lag the image.
+    // Dimmed in its own color so text stays readable; a dim layer over it would lag the image's fade.
     const shade: u8 = if (cover) 80 else 255;
     const o: gfx.SpriteOptions = .{ .col = .{ .r = shade, .g = shade, .b = shade, .a = @intFromFloat(std.math.clamp(alpha, 0, 1) * 255) } };
     if (!cover) return g.sprite(tex, null, box, o);
-    // Full-bleed crop: the image fills the window without stretching.
     const k = @min(tex.w / g.w, tex.h / g.h);
     g.sprite(tex, .{ .x = (tex.w - g.w * k) / 2, .y = (tex.h - g.h * k) / 2, .w = g.w * k, .h = g.h * k }, box, o);
 }
 
-/// The chart's #PREVIEW, or else a file in its folder named for one.
 fn findPreview(al: std.mem.Allocator, song: db_mod.Song) ?[]const u8 {
     const dir = std.fs.path.dirname(song.path) orelse return null;
     const exts = session_mod.audio_exts;
@@ -815,10 +786,9 @@ fn findPreview(al: std.mem.Allocator, song: db_mod.Song) ?[]const u8 {
     return null;
 }
 
-/// Looks for a preview once the cursor has rested, so scrolling never touches the disk.
 const status_ms = 5000;
 
-/// Clears a message line a while after it last changed, so none of its many setters has to time it.
+/// Times out a message line in one place, so none of its many setters has to.
 pub const Fade = struct {
     hash: u64 = 0,
     since: u64 = 0,
@@ -883,7 +853,6 @@ fn drawHeader(a: *App) void {
     }
 }
 
-/// Rows lean away from the selected one.
 fn drawWheel(a: *App, wheel_x: f32, dock_y: f32) void {
     const g = &a.g;
     const s = &a.sel;
@@ -942,11 +911,9 @@ fn drawWheel(a: *App, wheel_x: f32, dock_y: f32) void {
     }
 }
 
-/// The jacket and data of the selected row.
-/// Scrolling past charts asks the server nothing.
+/// The ranking waits for the cursor to rest, so scrolling past charts asks the server nothing.
 const board_delay_ms = 400;
 
-/// Title, artist and the NOTES, BPM and TIME panels of a chart; returns the y below them.
 pub fn drawSongData(g: *gfx.Gfx, song: db_mod.Song, lx: f32, y: f32, lw: f32) f32 {
     const u = g.h / 720;
     var iy = y;
@@ -1017,13 +984,11 @@ fn drawChartInfo(a: *App, wheel_x: f32, dock_y: f32) void {
     }
 }
 
-/// Option tabs with their keys, then the remaining commands.
 fn drawDock(a: *App, dock_y: f32) void {
     const g = &a.g;
     const s = &a.sel;
     const u = g.h / 720;
-    // Only what a key changes here, as in beatoraja: the play options live in settings.
-    // LN mode stays too, since it decides which scores the chart shows; without a key it opens its settings row.
+    // Only what a key changes here, as in beatoraja; LN mode too, as it picks which scores show, and keyless it opens settings.
     const Tab = struct { sc: ?u32, key: []const u8, label: []const u8, value: []const u8 };
     const on = a.cfg.beatoraja_select;
     var replay_buf: [16]u8 = undefined;
@@ -1055,7 +1020,6 @@ fn drawDock(a: *App, dock_y: f32) void {
         g.textClip(t.value, text_x, dock_y + 20 * u, x + tw - 10 * u - text_x, g.scaled(16), gfx.white);
     }
 
-    // The remaining commands, as a row of text buttons.
     const keyboard_cmds = [_]Cmd{
         .{ .sc = c.SDL_SCANCODE_F6, .label = tr("F6 Search") },
         .{ .sc = c.SDL_SCANCODE_F7, .label = tr("F7 Rescan") },
@@ -1077,7 +1041,6 @@ fn drawDock(a: *App, dock_y: f32) void {
     const select_key = settings.keyName(cfg.start_select[1], &name_buf[3]);
     var key_buf: [4][32]u8 = undefined;
     var label_buf: [7][80]u8 = undefined;
-    // Without a key of its own to click, sc 0 does nothing.
     const beatoraja_cmds = [_]Cmd{
         .{ .sc = c.SDL_SCANCODE_RETURN, .label = i18n.bufPrint(&label_buf[0], "{s} Open", .{settings.keyName(cfg.p1[0], &key_buf[0])}) catch "" },
         .{ .sc = 0, .label = i18n.bufPrint(&label_buf[1], "{s} Auto", .{settings.keyName(cfg.p1[4], &key_buf[1])}) catch "" },
@@ -1098,7 +1061,6 @@ fn drawDock(a: *App, dock_y: f32) void {
 
 pub const Cmd = struct { sc: u32, label: []const u8 };
 
-/// Commands as a row of text buttons along the bottom, the key first in each label. A click presses the key.
 pub fn drawCommands(a: *App, cmds: []const Cmd) void {
     const g = &a.g;
     const u = g.h / 720;
@@ -1117,7 +1079,7 @@ pub fn drawCommands(a: *App, cmds: []const Cmd) void {
     }
 }
 
-/// Forgets the ranking, so it is asked for again: a play or a sign-in changes it.
+/// A play or a sign-in changes the ranking.
 pub fn dropBoard(a: *App) void {
     const s = &a.sel;
     if (s.board) |b| b.release();
@@ -1145,7 +1107,6 @@ fn tickBoard(a: *App, now_ms: u64) void {
     a.select_state.ir_board = s.board;
 }
 
-/// The list is drawn under this, and it takes no clicks of its own.
 fn blockClickUnderOverlay(a: *App) void {
     if (a.practice.open) a.g.clicked = false;
 }
@@ -1187,7 +1148,6 @@ pub fn draw(a: *App) void {
     drawQuery(a);
 }
 
-/// Skins draw their own panels; this is the built-in look's.
 fn drawPanel(a: *App) void {
     const panel = panelOf(&a.sel);
     if (panel == 0) return;
@@ -1260,7 +1220,6 @@ fn barAt(ud: *anyopaque, i: usize) skin_scene.Bar {
     return barOf(s.rows[i]);
 }
 
-/// Points the skin's state at the selected row.
 fn fillSkinState(a: *App) void {
     const s = &a.sel;
     const st = &a.select_state;
@@ -1323,7 +1282,7 @@ fn fillSkinState(a: *App) void {
     st.judge_offset_ms = cfg.judge_offset_ms;
 }
 
-/// The skin draws everything but what it has no place for: search, status and the IR ranking.
+/// Search, status and the IR ranking have no place in a skin, so they are drawn here.
 fn drawSkinned(a: *App) void {
     const g = &a.g;
     const s = &a.sel;
@@ -1446,7 +1405,6 @@ fn go(a: *App, view: @TypeOf(a.sel.view)) void {
     reload(a);
 }
 
-/// Goes up a view, with the cursor on the row that was opened.
 fn back(a: *App, view: @TypeOf(a.sel.view)) void {
     const s = &a.sel;
     const from = s.view;
@@ -1497,7 +1455,6 @@ pub fn startTableFetch(a: *App, only: ?[]const u8) void {
     s.table_thread = c.SDL_CreateThread(tableThread, "tables", a);
 }
 
-/// Downloads into the first library folder; the scanner then finds the charts.
 fn startDownload(a: *App, row: Row) void {
     const s = &a.sel;
     if (s.download != null) {
@@ -1566,7 +1523,6 @@ fn tickDownload(a: *App) void {
     if (st == 1) startScan(a);
 }
 
-/// Fills `play_table_buf`, returning the length.
 /// shortcut: the first table listing the chart, as its level is; pass the table along if one opened from another table must name that.
 fn tableName(a: *App, song: db_mod.Song) usize {
     const st = a.db.prepare("SELECT b.name FROM table_song t JOIN bms_table b ON b.url=t.url WHERE (t.md5=?1 AND t.md5<>'') OR (t.sha256=?2 AND t.sha256<>'') ORDER BY b.name LIMIT 1") catch return 0;
@@ -1601,7 +1557,6 @@ fn replaysOf(a: *App, sha256: []const u8) u8 {
     return n;
 }
 
-/// The replays of the LN mode selected, on a chart that leaves it open.
 const replay_mode = "ln_mode=CASE WHEN EXISTS(SELECT 1 FROM song WHERE sha256=?1 AND has_open_ln) THEN (SELECT ln_mode FROM temp.play_setting) ELSE 0 END";
 
 fn countReplays(a: *App, sha256: []const u8) !u8 {
@@ -1611,7 +1566,7 @@ fn countReplays(a: *App, sha256: []const u8) !u8 {
     return if (try st.step()) @intCast(st.int(0)) else 0;
 }
 
-/// Decodes a stored replay, newest first. Its slices live until the next one is loaded.
+/// Slot 0 is the newest; the slices live until the next one is loaded.
 fn loadReplay(a: *App, sha256: []const u8, slot: u8) !core.replay.Replay {
     const s = &a.sel;
     if (s.replay_arena) |*old| old.deinit();
@@ -1651,7 +1606,7 @@ fn startSong(a: *App, song: db_mod.Song) void {
     startSongWith(a, song, null, null);
 }
 
-/// A round of a versus room: everyone's seed is the same, only LN mode ranks, and no decide screen holds up the clock.
+/// Everyone's seed is the same, only LN mode ranks, and no decide screen holds up the shared clock.
 pub fn startVersus(a: *App, song: db_mod.Song, seed: u64) void {
     var params = songParams(a, song) orelse return;
     params.rec.seed = seed;
@@ -1723,7 +1678,6 @@ fn chartPageUrl(gpa: std.mem.Allocator, ir_url: []const u8, sha256: []const u8) 
     return std.fmt.allocPrintSentinel(gpa, "{s}/charts/{s}", .{ ir_url, sha256 }, 0);
 }
 
-/// The chart's page in the browser. A row without a chart has no page, so it gets the ranking overlay.
 fn openChartPage(a: *App) void {
     const song = selectedSong(&a.sel) orelse return openRanking(a);
     if (a.cfg.ir_url.len == 0) return openRanking(a);
@@ -1735,7 +1689,6 @@ fn openChartPage(a: *App) void {
     }
 }
 
-/// A chart row shows its ranking; a table or level row shows standings over its charts.
 fn openRanking(a: *App) void {
     const s = &a.sel;
     if (a.cfg.ir_url.len == 0 or s.cursor >= s.rows.len) {
@@ -1792,7 +1745,6 @@ fn keyQuery(a: *App, sc: u32) void {
     } else if (sc == c.SDL_SCANCODE_ESCAPE) closeQuery(a);
 }
 
-/// True when the search box took the key.
 fn keySearching(a: *App, sc: u32) bool {
     const s = &a.sel;
     switch (sc) {
@@ -1842,7 +1794,6 @@ fn openRow(a: *App) void {
     if (s.cursor >= s.rows.len) return;
     const row = s.rows[s.cursor];
     if (row.song) |song| return if (a.versus.picking) versus.pickChart(a, song) else startSong(a, song);
-    // Only a chart can be the room's.
     if (a.versus.picking and row.kind == .course) return;
     switch (row.kind) {
         .folder => setFolder(a, row.target),
@@ -1888,7 +1839,6 @@ fn goBack(a: *App) void {
     }
 }
 
-/// The key an on-screen guide names: the bound one under beatoraja controls.
 pub fn guideKey(a: *const App, code: u16, keyboard: []const u8, buf: []u8) []const u8 {
     return if (a.cfg.beatoraja_select) settings.keyName(code, buf) else keyboard;
 }
@@ -1932,7 +1882,6 @@ pub fn setLnMode(a: *App, mode: u8) void {
     reload(a);
 }
 
-/// One step through a list of `n` choices, either way.
 pub fn cycle(v: u8, n: usize, dir: i32) u8 {
     return @intCast(@mod(@as(i32, v) + dir, @as(i32, @intCast(n))));
 }
@@ -1986,8 +1935,7 @@ fn padSelect(a: *App, at: usize, panel: u8, down: bool, repeat: bool) void {
     }
 }
 
-/// Start + keys change hi-speed, Select + keys the green number by one, as in beatoraja's
-/// ControlInputProcessor. Never uses the input up: the same key still plays its note.
+/// As beatoraja's ControlInputProcessor; never uses the input up, so the same key still plays its note.
 fn padPlay(a: *App, at: ?usize, down: bool, repeat: bool) void {
     const s = &a.sel;
     if (at) |i| if (i >= 7 and !down) {
@@ -2019,9 +1967,7 @@ fn overlayKey(at: usize) ?u32 {
     };
 }
 
-/// beatoraja controls. True when the input was used, so it is not also a menu key.
-/// Start and Select are tracked on every screen: their release may come after a screen has gone.
-/// shortcut: reads only the 1P 7 key layout, add the others if a controller needs them here.
+/// True when used, so not also a menu key; Start and Select track on every screen, as their release may outlive it. shortcut: reads only the 1P 7 key layout, add the others if a controller needs them here.
 pub fn pad(a: *App, code: u16, down: bool, repeat: bool) bool {
     if (!a.cfg.beatoraja_select) return false;
     if (a.practice.open) {
@@ -2088,7 +2034,6 @@ pub fn pad(a: *App, code: u16, down: bool, repeat: bool) bool {
 const result_input_ms = 500;
 const double_press_ms = 500;
 
-/// Start pressed twice quickly shows or hides the lane cover, as in beatoraja.
 fn startTap(a: *App, now_ms: u64) void {
     const s = &a.sel;
     if (s.start_down_ms != 0 and now_ms - s.start_down_ms <= double_press_ms) {
@@ -2099,8 +2044,6 @@ fn startTap(a: *App, now_ms: u64) void {
 // beatoraja's default exitPressDuration.
 const play_exit_hold_ms = 1000;
 
-/// What a held input keeps doing: scrolling in song select; in play, moving the cover or the green
-/// number with a scratch, and quitting on Start + Select.
 pub fn tickPad(a: *App, now_ms: u64) void {
     if (!a.cfg.beatoraja_select) return;
     const s = &a.sel;
