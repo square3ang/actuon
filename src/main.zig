@@ -30,6 +30,7 @@ const usage =
 
 pub fn main(init: std.process.Init) !void {
     fs.io = init.io;
+    readEnvironNow(init.io);
     crash.install();
     download.initLocale();
     const gpa = init.gpa;
@@ -103,6 +104,16 @@ pub fn main(init: std.process.Init) !void {
         } else opts.play_path = a;
     }
     try app.main(gpa, opts);
+}
+
+/// std reads the environment on the first stderr write, from the block the process started with. SDL later unsets
+/// XDG_ACTIVATION_TOKEN (set when a desktop launches the game), which leaves a null in that block: the late read then
+/// panics inside the stderr lock and the thread hangs. So both Io instances read it before SDL starts.
+fn readEnvironNow(io: std.Io) void {
+    _ = std.debug.lockStderr(&.{});
+    std.debug.unlockStderr();
+    _ = io.lockStderr(&.{}, null) catch return;
+    io.unlockStderr();
 }
 
 fn irAccount(gpa: std.mem.Allocator, io: std.Io, cmd: []const u8, url: []const u8, name: []const u8) !void {
