@@ -267,12 +267,17 @@ fn pickBranch(a: std.mem.Allocator, line: []const u8, is_set: bool, opts: Option
 }
 
 /// Parses a BMS/BME/BML/PMS file. All returned memory lives in `Chart.arena`.
-pub fn parse(gpa: std.mem.Allocator, data: []const u8, opts: Options) Error!Chart {
+pub fn parse(gpa: std.mem.Allocator, raw: []const u8, opts: Options) Error!Chart {
     var chart: Chart = .{ .arena = std.heap.ArenaAllocator.init(gpa) };
     errdefer chart.arena.deinit();
     const a = chart.arena.allocator();
     chart.is_pms = opts.is_pms;
-    hash.fill(&chart, data);
+    hash.fill(&chart, raw);
+    // Lines are split on bytes, so UTF-16 becomes UTF-8 first; jbms-parser rejects such files.
+    const data = switch (encoding.detect(raw)) {
+        .utf16le, .utf16be => |enc| try encoding.toUtf8(a, raw, enc),
+        else => raw,
+    };
 
     const bars = try a.alloc(std.ArrayList([]const u8), 1000);
     for (bars) |*b| b.* = .empty;
@@ -1131,6 +1136,19 @@ test "LN mode changes only LNs the chart leaves open, and CN ends count as notes
     defer fixed.deinit();
     try std.testing.expect(!options.applyLnMode(&fixed, .cn));
     try std.testing.expectEqual(types.LnType.ln, fixed.notes[0].ln_type);
+}
+
+test "a UTF-16 chart reads like its UTF-8 copy" {
+    const src = "#TITLE 고추참치\r\n#BPM 154\r\n#WAV01 a.wav\r\n#00111:01\r\n";
+    const wide = std.mem.sliceAsBytes(std.unicode.utf8ToUtf16LeStringLiteral("\u{FEFF}" ++ src));
+    var c = try parse(std.testing.allocator, wide, .{});
+    defer c.deinit();
+    var plain = try parse(std.testing.allocator, src, .{});
+    defer plain.deinit();
+    try std.testing.expectEqualStrings(plain.title, c.title);
+    try std.testing.expectEqual(@as(f64, 154), c.bpm);
+    try std.testing.expectEqual(plain.total_notes, c.total_notes);
+    try std.testing.expect(!std.mem.eql(u8, &plain.md5, &c.md5)); // hashed as stored
 }
 
 test "no bpm is an error" {
