@@ -5,3 +5,4 @@ server/target/
 server/.env
 web/target/
 .wrangler/
+__pycache__/
