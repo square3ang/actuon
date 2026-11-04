@@ -130,7 +130,8 @@ pub const Room = struct {
     base: []u8,
     token: []u8,
     join_code: [code_len]u8,
-    create_sha: [64]u8,
+    /// Null opens the room with no chart, for the host to pick one in it.
+    create_sha: ?[64]u8,
     create_title: []u8,
     creating: bool,
     lock: *c.SDL_Mutex,
@@ -149,7 +150,7 @@ pub const Room = struct {
             .base = try gpa.dupe(u8, base),
             .token = try gpa.dupe(u8, token),
             .join_code = @splat(' '),
-            .create_sha = @splat(0),
+            .create_sha = null,
             .create_title = &.{},
             .creating = false,
             .lock = c.SDL_CreateMutex() orelse return error.NoMutex,
@@ -165,7 +166,7 @@ pub const Room = struct {
     pub fn create(gpa: std.mem.Allocator, base: []const u8, token: []const u8, sha: []const u8, title: []const u8) !*Room {
         const r = try open(gpa, base, token);
         r.creating = true;
-        if (sha.len == r.create_sha.len) @memcpy(&r.create_sha, sha);
+        if (sha.len == 64) r.create_sha = sha[0..64].*;
         r.create_title = try gpa.dupe(u8, title);
         try r.run();
         return r;
@@ -251,7 +252,7 @@ pub const Room = struct {
         var buf: [max_message]u8 = undefined;
         const a = step.allocator();
         const enter = if (r.creating and !entered.*)
-            try command(a, .{ .type = "create", .sha256 = @as([]const u8, &r.create_sha), .title = r.create_title })
+            try command(a, .{ .type = "create", .sha256 = if (r.create_sha) |*s| @as([]const u8, s) else "", .title = r.create_title })
         else
             try command(a, .{ .type = "join", .code = @as([]const u8, &r.join_code) });
         switch (try r.ask(a, ws, &buf, enter)) {

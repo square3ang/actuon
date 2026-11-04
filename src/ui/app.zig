@@ -33,7 +33,7 @@ const skin_mod = @import("../skin/skin.zig");
 const skin_scene = @import("../skin/scene.zig");
 const Session = session_mod.Session;
 
-pub const Scene = enum { select, loading, play, result, settings, skinconf, skinslots };
+pub const Scene = enum { select, loading, play, result, settings, skinconf, skinslots, versus };
 
 pub const Pending = struct {
     params: session_mod.Params,
@@ -306,7 +306,7 @@ pub const App = struct {
             a.engine.uiGain(s, 0);
             a.res.music_slot = null;
         };
-        const want = a.scene == .select or a.scene == .settings or a.scene == .skinconf or a.scene == .skinslots;
+        const want = a.scene == .select or a.scene == .settings or a.scene == .skinconf or a.scene == .skinslots or a.scene == .versus;
         if (a.decide_bgm_on and a.decide_at == 0) {
             a.engine.uiGain(engine_mod.decide_slot, 0);
             a.decide_bgm_on = false;
@@ -335,7 +335,7 @@ pub const App = struct {
     pub fn startPlay(a: *App, params: session_mod.Params, record: bool) void {
         if (a.load_thread != null) return;
         // The rendered sound stands in only when no set or skin brings its own for starting a song.
-        if (a.scene == .select and a.sfx_play_ready == null and a.decide_bgm == null) a.sfx(.start);
+        if ((a.scene == .select or a.scene == .versus) and a.sfx_play_ready == null and a.decide_bgm == null) a.sfx(.start);
         a.load_params = params;
         a.record = record and !params.autoplay and params.replay == null;
         a.load_progress.store(0, .release);
@@ -851,6 +851,7 @@ pub const App = struct {
             .settings => settings.key(a, sc),
             .skinconf => skinconf.key(a, sc),
             .skinslots => skinslots.key(a, sc),
+            .versus => versus.key(a, sc),
             .loading => if (!repeat) a.decideKey(sc),
             else => {},
         }
@@ -1059,7 +1060,6 @@ pub const App = struct {
                     if (a.last_scene != .select) a.select_shown_at = c.SDL_GetTicks();
                     select.draw(a);
                     practice.draw(a);
-                    versus.draw(a);
                     if (a.select_skin == null) {
                         const alpha = fadeInAlpha(c.SDL_GetTicks() - a.select_shown_at);
                         if (alpha > 0) a.g.rect(0, 0, a.g.w, a.g.h, .{ .r = 0, .g = 0, .b = 0, .a = alpha });
@@ -1089,6 +1089,10 @@ pub const App = struct {
                 .skinslots => {
                     a.g.backdrop();
                     skinslots.draw(a);
+                },
+                .versus => {
+                    a.g.backdrop();
+                    versus.draw(a);
                 },
             }
             a.last_scene = scene_now;
@@ -1265,6 +1269,8 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
     if (!ir.waitForThreads() or !update_ended) std.process.exit(0);
     skinconf.close(app);
     skinslots.close(app);
+    // Frees the room's chart before the allocator's shutdown check.
+    versus.leave(app);
     var hb = std.heap.ArenaAllocator.init(gpa);
     defer hb.deinit();
     editor.clearHeartbeat(hb.allocator());

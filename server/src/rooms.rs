@@ -242,6 +242,9 @@ impl Rooms {
         now: Instant,
     ) -> Result<(), RoomError> {
         let room = self.room_of_host(code, user)?;
+        if room.sha256.is_empty() {
+            return Err(RoomError::BadRequest);
+        }
         // A start replaces the clock, so repeating it could keep players on the loading screen.
         if room.starts_at.is_some_and(|at| at > now) {
             return Err(RoomError::Busy);

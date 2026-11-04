@@ -99,7 +99,7 @@ an HTTP status number to tell the cases apart.
 
 | Message | Does |
 | --- | --- |
-| `{type: "create", sha256, title}` | Creates a room; the answer holds its `code` |
+| `{type: "create", sha256, title}` | Creates a room; the answer holds its `code`. Both empty opens it with no chart, and `start` is a 400 until the host sets one |
 | `{type: "join", code}` | Enters a room. A player is in one room at a time |
 | `{type: "chart", sha256, title}` | Host only: changes the chart |
 | `{type: "start"}` | Host only: starts a round after 8 seconds. 409 while one is about to start, as for `chart` |

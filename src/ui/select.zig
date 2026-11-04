@@ -297,7 +297,7 @@ test "a click does not reach the list under an overlay" {
     a.g.clicked = true;
     blockClickUnderOverlay(a);
     try std.testing.expect(a.g.clicked);
-    a.versus.open = true;
+    a.practice.open = true;
     blockClickUnderOverlay(a);
     try std.testing.expect(!a.g.clicked);
 }
@@ -938,6 +938,29 @@ fn drawWheel(a: *App, wheel_x: f32, dock_y: f32) void {
 /// Scrolling past charts asks the server nothing.
 const board_delay_ms = 400;
 
+/// Title, artist and the NOTES, BPM and TIME panels of a chart; returns the y below them.
+pub fn drawSongData(g: *gfx.Gfx, song: db_mod.Song, lx: f32, y: f32, lw: f32) f32 {
+    const u = g.h / 720;
+    var iy = y;
+    g.textClip(song.title, lx, iy, lw, g.scaled(24), gfx.white);
+    iy += 34 * u;
+    g.textClip(song.artist, lx, iy, lw, g.scaled(14), gfx.sky);
+    g.textClip(song.genre, lx + lw * 0.55, iy, lw * 0.45, g.scaled(14), gfx.dim);
+    iy += 24 * u;
+    const cw = (lw - 12 * u) / 3;
+    const ph = 50 * u;
+    g.panel(lx, iy, cw, ph, "NOTES");
+    g.digits(lx + cw - 8 * u, iy + 12 * u, g.scaled(24), 4, song.notes, gfx.white);
+    g.panel(lx + cw + 6 * u, iy, cw, ph, "BPM");
+    g.digits(lx + cw * 2 - 2 * u, iy + 12 * u, g.scaled(24), 3, @intFromFloat(@max(song.max_bpm, 0)), gfx.cyan);
+    if (song.min_bpm != song.max_bpm) g.fmt(lx + cw + 14 * u, iy + 28 * u, g.scaled(12), gfx.dim, "{d:.0}~", .{song.min_bpm});
+    const len_s: u64 = @intCast(@divTrunc(@max(song.length_ms, 0), 1000));
+    g.panel(lx + (cw + 6 * u) * 2, iy, cw, ph, "TIME");
+    var tb: [16]u8 = undefined;
+    g.textRight(std.fmt.bufPrint(&tb, "{d}:{d:0>2}", .{ len_s / 60, len_s % 60 }) catch "", lx + lw - 8 * u, iy + 12 * u, g.scaled(24), gfx.white);
+    return iy + ph + 6 * u;
+}
+
 fn drawChartInfo(a: *App, wheel_x: f32, dock_y: f32) void {
     const g = &a.g;
     const s = &a.sel;
@@ -961,23 +984,7 @@ fn drawChartInfo(a: *App, wheel_x: f32, dock_y: f32) void {
     var iy = jy + jack_h + 8 * u;
     if (s.rows.len > 0 and s.cursor < s.rows.len) {
         if (cur_song) |song| {
-            g.textClip(song.title, lx, iy, lw, g.scaled(24), gfx.white);
-            iy += 34 * u;
-            g.textClip(song.artist, lx, iy, lw, g.scaled(14), gfx.sky);
-            g.textClip(song.genre, lx + lw * 0.55, iy, lw * 0.45, g.scaled(14), gfx.dim);
-            iy += 24 * u;
-            const cw = (lw - 12 * u) / 3;
-            const ph = 50 * u;
-            g.panel(lx, iy, cw, ph, "NOTES");
-            g.digits(lx + cw - 8 * u, iy + 12 * u, g.scaled(24), 4, song.notes, gfx.white);
-            g.panel(lx + cw + 6 * u, iy, cw, ph, "BPM");
-            g.digits(lx + cw * 2 - 2 * u, iy + 12 * u, g.scaled(24), 3, @intFromFloat(@max(song.max_bpm, 0)), gfx.cyan);
-            if (song.min_bpm != song.max_bpm) g.fmt(lx + cw + 14 * u, iy + 28 * u, g.scaled(12), gfx.dim, "{d:.0}~", .{song.min_bpm});
-            const len_s: u64 = @intCast(@divTrunc(@max(song.length_ms, 0), 1000));
-            g.panel(lx + (cw + 6 * u) * 2, iy, cw, ph, "TIME");
-            var tb: [16]u8 = undefined;
-            g.textRight(std.fmt.bufPrint(&tb, "{d}:{d:0>2}", .{ len_s / 60, len_s % 60 }) catch "", lx + lw - 8 * u, iy + 12 * u, g.scaled(24), gfx.white);
-            iy += ph + 6 * u;
+            iy = drawSongData(g, song, lx, iy, lw);
             const sh = @min(dock_y - iy - 6 * u, 92 * u);
             if (sh > 60 * u) {
                 const lamp = clearColor(song.clear);
@@ -1041,7 +1048,6 @@ fn drawDock(a: *App, dock_y: f32) void {
     }
 
     // The remaining commands, as a row of text buttons.
-    const Cmd = struct { sc: u32, label: []const u8 };
     const keyboard_cmds = [_]Cmd{
         .{ .sc = c.SDL_SCANCODE_F6, .label = tr("F6 Search") },
         .{ .sc = c.SDL_SCANCODE_F7, .label = tr("F7 Rescan") },
@@ -1079,7 +1085,15 @@ fn drawDock(a: *App, dock_y: f32) void {
         .{ .sc = c.SDL_SCANCODE_9, .label = tr("9 Target") },
         .{ .sc = c.SDL_SCANCODE_6, .label = tr("6 Key config") },
     };
-    const cmds: []const Cmd = if (cfg.beatoraja_select) &beatoraja_cmds else &keyboard_cmds;
+    drawCommands(a, if (cfg.beatoraja_select) &beatoraja_cmds else &keyboard_cmds);
+}
+
+pub const Cmd = struct { sc: u32, label: []const u8 };
+
+/// Commands as a row of text buttons along the bottom, the key first in each label. A click presses the key.
+pub fn drawCommands(a: *App, cmds: []const Cmd) void {
+    const g = &a.g;
+    const u = g.h / 720;
     const cmd_size = g.scaled(12);
     var cmd_w: f32 = 0;
     for (cmds) |cmd| cmd_w += g.measure(cmd.label, cmd_size) + 24 * u;
@@ -1123,9 +1137,9 @@ fn tickBoard(a: *App, now_ms: u64) void {
     a.select_state.ir_board = s.board;
 }
 
-/// The list is drawn under these, and they take no clicks of their own.
+/// The list is drawn under this, and it takes no clicks of its own.
 fn blockClickUnderOverlay(a: *App) void {
-    if (a.practice.open or a.versus.open) a.g.clicked = false;
+    if (a.practice.open) a.g.clicked = false;
 }
 
 pub fn draw(a: *App) void {
@@ -1814,7 +1828,9 @@ fn openRow(a: *App) void {
     const s = &a.sel;
     if (s.cursor >= s.rows.len) return;
     const row = s.rows[s.cursor];
-    if (row.song) |song| return startSong(a, song);
+    if (row.song) |song| return if (a.versus.picking) versus.pickChart(a, song) else startSong(a, song);
+    // Only a chart can be the room's.
+    if (a.versus.picking and row.kind == .course) return;
     switch (row.kind) {
         .folder => setFolder(a, row.target),
         .group => {
@@ -1850,7 +1866,9 @@ fn goBack(a: *App) void {
         s.search = "";
         reload(a);
     } else switch (s.view) {
-        .root => a.running = false,
+        .root => if (a.versus.picking) versus.stopPicking(a) else {
+            a.running = false;
+        },
         .library, .courses, .table, .favorites => back(a, .root),
         .folder => back(a, .library),
         .level => back(a, .table),
@@ -1993,10 +2011,8 @@ fn overlayKey(at: usize) ?u32 {
 /// shortcut: reads only the 1P 7 key layout, add the others if a controller needs them here.
 pub fn pad(a: *App, code: u16, down: bool, repeat: bool) bool {
     if (!a.cfg.beatoraja_select) return false;
-    if (a.practice.open or a.versus.open) {
-        if (down) if (std.mem.indexOfScalar(u16, &a.cfg.p1, code)) |i| if (overlayKey(i)) |sc| {
-            if (a.practice.open) practice.key(a, sc) else versus.key(a, sc);
-        };
+    if (a.practice.open) {
+        if (down) if (std.mem.indexOfScalar(u16, &a.cfg.p1, code)) |i| if (overlayKey(i)) |sc| practice.key(a, sc);
         return true;
     }
     const s = &a.sel;
@@ -2016,6 +2032,13 @@ pub fn pad(a: *App, code: u16, down: bool, repeat: bool) bool {
     }
     const bound = at != null or is_start or is_select;
     switch (a.scene) {
+        // Other keys go on to the screen, so the keyboard and its buttons work there too.
+        .versus => {
+            // Typing a room's code uses the same keys.
+            if (a.versus.joining and code < input.joy_base) return false;
+            if (down) if (at) |i| if (overlayKey(i)) |sc| versus.key(a, sc);
+            return bound;
+        },
         .select => {
             if (panel != was) {
                 if (was == 0) a.sfxOr(a.sfx_option_open, .confirm) else if (panel == 0) a.sfxOr(a.sfx_option_close, .back);
@@ -2108,7 +2131,6 @@ fn tickPadScroll(a: *App, now_ms: u64) void {
 pub fn key(a: *App, sc: u32) void {
     const s = &a.sel;
     if (a.practice.open) return practice.key(a, sc);
-    if (a.versus.open) return versus.key(a, sc);
     if (s.query != null) return keyQuery(a, sc);
     if (s.searching and keySearching(a, sc)) return;
     keySound(a, sc);

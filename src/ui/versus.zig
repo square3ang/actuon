@@ -1,4 +1,6 @@
-//! Versus play: the room screen over song select, the start of a round, and the scores during and after it.
+//! Versus play: a screen of its own, laid out after osu!lazer's multiplayer. A lounge creates or joins a room;
+//! in the room the players are on the left, the chart on the right and the actions in the footer.
+//! It also starts each round and shows the scores during and after it.
 //! Against one player their score fills the skin's target slot, so existing skins show it unchanged.
 const std = @import("std");
 const c = @import("c");
@@ -21,13 +23,17 @@ const winner_wait_ms = 30_000;
 pub const State = struct {
     room: ?*room_mod.Room = null,
     view: room_mod.View = .{},
-    open: bool = false,
+    /// The lounge's cursor is on joining, not creating.
+    join_row: bool = false,
     /// Typing a room's code.
     joining: bool = false,
+    /// On song select to choose the room's chart.
+    picking: bool = false,
     /// The round already started here.
     played_round: u32 = 0,
-    /// The chart the room asks for is in the library.
-    has_chart: bool = false,
+    /// The room's chart in the library, null when it is not there.
+    chart: ?db_mod.Song = null,
+    chart_arena: ?std.heap.ArenaAllocator = null,
     chart_checked: [64]u8 = @splat(0),
     /// In a round started here, from loading to the result screen.
     in_round: bool = false,
@@ -43,20 +49,21 @@ fn signedIn(a: *const App) bool {
     return a.cfg.ir_url.len > 0 and a.cfg.ir_token.len > 0;
 }
 
+/// Lets go of the room and its chart, back to the lounge.
 pub fn leave(a: *App) void {
     const v = &a.versus;
     if (v.room) |r| r.leave();
+    if (v.chart_arena) |*ar| ar.deinit();
     v.* = .{};
     a.skin_state.versus = null;
 }
 
 fn createRoom(a: *App) void {
     const v = &a.versus;
-    const song = select.selectedSong(&a.sel) orelse {
-        v.message = tr("Select a chart first");
-        return;
-    };
-    v.room = room_mod.Room.create(room_gpa, a.cfg.ir_url, a.cfg.ir_token, song.sha256, song.title) catch |e| blk: {
+    v.message = "";
+    // With nothing selected the room opens without a chart, and the host picks one inside it.
+    const song = select.selectedSong(&a.sel);
+    v.room = room_mod.Room.create(room_gpa, a.cfg.ir_url, a.cfg.ir_token, if (song) |s| s.sha256 else "", if (song) |s| s.title else "") catch |e| blk: {
         std.log.err("versus room: {t}", .{e});
         v.message = tr("Could not reach the room");
         break :blk null;
@@ -67,6 +74,7 @@ fn joinRoom(a: *App) void {
     const v = &a.versus;
     a.stopText();
     v.joining = false;
+    v.message = "";
     v.room = room_mod.Room.join(room_gpa, a.cfg.ir_url, a.cfg.ir_token, a.text.items) catch |e| blk: {
         std.log.err("versus room: {t}", .{e});
         v.message = if (e == error.BadCode) tr("No room has that code") else tr("Could not reach the room");
@@ -74,18 +82,38 @@ fn joinRoom(a: *App) void {
     };
 }
 
-/// The versus key on song select: opens the room screen, and a host's selected chart becomes the room's.
+/// The versus key on song select: opens the versus screen, and a host's selected chart becomes the room's.
 pub fn openScreen(a: *App) void {
     const v = &a.versus;
     if (!signedIn(a)) {
         a.sel.status = tr("Sign in to IR first");
         return;
     }
-    v.open = true;
+    a.scene = .versus;
+    v.picking = false;
     const r = v.room orelse return;
     if (!v.view.host) return;
     const song = select.selectedSong(&a.sel) orelse return;
     if (!std.mem.eql(u8, song.sha256, &v.view.sha256)) r.setChart(song.sha256, song.title);
+}
+
+/// The host's way to change the chart: song select, where opening a chart hands it to the room.
+fn startPicking(a: *App) void {
+    a.versus.picking = true;
+    a.sel.status = tr("Open a chart to play it in the room. Esc goes back to the room.");
+    a.scene = .select;
+}
+
+pub fn pickChart(a: *App, song: db_mod.Song) void {
+    const v = &a.versus;
+    if (v.room) |r| if (v.view.host and !std.mem.eql(u8, song.sha256, &v.view.sha256)) r.setChart(song.sha256, song.title);
+    stopPicking(a);
+}
+
+pub fn stopPicking(a: *App) void {
+    a.versus.picking = false;
+    a.sel.status = "";
+    a.scene = .versus;
 }
 
 pub fn key(a: *App, sc: u32) void {
@@ -104,41 +132,47 @@ pub fn key(a: *App, sc: u32) void {
         }
         return;
     }
-    const usable = if (v.room != null) v.view.status == .joined or v.view.status == .connecting else false;
-    if (!usable) {
+    const r = v.room orelse {
         switch (sc) {
-            c.SDL_SCANCODE_ESCAPE => {
-                if (v.room != null) leave(a) else v.open = false;
+            c.SDL_SCANCODE_ESCAPE => a.scene = .select,
+            c.SDL_SCANCODE_UP, c.SDL_SCANCODE_DOWN => {
+                a.sfx(.move);
+                v.join_row = !v.join_row;
             },
-            c.SDL_SCANCODE_C => if (v.room == null) createRoom(a),
             // Not a letter key: its own press would land in the code.
-            c.SDL_SCANCODE_RETURN => if (v.room == null) {
+            c.SDL_SCANCODE_RETURN => if (v.join_row) {
                 v.joining = true;
                 a.startText("");
-            },
+            } else createRoom(a),
             else => {},
         }
         return;
-    }
+    };
+    // A refused or lost room leaves the same way, back to the lounge.
+    if (sc == c.SDL_SCANCODE_ESCAPE) return leave(a);
+    if (v.view.status != .joined) return;
     switch (sc) {
-        c.SDL_SCANCODE_ESCAPE => leave(a),
-        // Back to the list, so a host can pick another chart with the versus key.
-        c.SDL_SCANCODE_TAB => v.open = false,
-        c.SDL_SCANCODE_RETURN => if (v.view.host) v.room.?.start(),
+        c.SDL_SCANCODE_TAB => if (v.view.host) startPicking(a),
+        c.SDL_SCANCODE_RETURN => if (v.view.host) r.start(),
         c.SDL_SCANCODE_L => a.cfg.versus_panel_left = !a.cfg.versus_panel_left,
         else => {},
     }
 }
 
-fn checkChart(a: *App) void {
+/// The room's chart from the library, read again when the room changes it or a rescan may have.
+fn loadChart(a: *App) void {
     const v = &a.versus;
     if (std.mem.eql(u8, &v.chart_checked, &v.view.sha256)) return;
     v.chart_checked = v.view.sha256;
-    v.has_chart = false;
-    const st = a.db.prepare("SELECT 1 FROM song WHERE sha256=?1 LIMIT 1") catch return;
+    v.chart = null;
+    if (v.chart_arena) |*ar| {
+        _ = ar.reset(.free_all);
+    } else v.chart_arena = .init(a.gpa);
+    const st = a.db.prepare(db_mod.song_select ++ " WHERE s.sha256=?1 LIMIT 1") catch return;
     defer st.deinit();
     st.bindText(1, &v.view.sha256);
-    v.has_chart = st.step() catch false;
+    if (!(st.step() catch false)) return;
+    v.chart = db_mod.readSong(v.chart_arena.?.allocator(), st) catch null;
 }
 
 /// Runs every frame on every screen.
@@ -146,10 +180,10 @@ pub fn tick(a: *App) void {
     const v = &a.versus;
     const r = v.room orelse return;
     v.view = r.snapshot();
-    checkChart(a);
+    loadChart(a);
     // Not the room's round: one skipped here must not take the last round's score, or a song played alone.
     v.report.round = v.played_round;
-    v.report.has_chart = v.has_chart;
+    v.report.has_chart = v.chart != null;
     if (v.in_round and a.scene == .play) if (a.session) |s| {
         const snap = s.snapshot();
         v.report.ex = snap.score.exScore();
@@ -159,10 +193,11 @@ pub fn tick(a: *App) void {
     if (v.in_round) v.report.done = a.scene == .result;
     if (v.in_round and a.scene == .result and v.result_at == 0) v.result_at = c.SDL_GetTicks();
     r.setReport(v.report);
-    if (a.scene == .select) {
+    if (a.scene == .select or a.scene == .versus) {
+        // The result screen leaves for song select, and a round ends back in its room.
         if (v.in_round) {
             v.in_round = false;
-            v.open = true;
+            a.scene = .versus;
         }
         if (v.view.start_round != v.played_round and v.view.start_round != 0) startRound(a);
     }
@@ -172,6 +207,7 @@ pub fn tick(a: *App) void {
 fn closeOverSelect(a: *App) void {
     a.practice.open = false;
     a.sel.searching = false;
+    a.versus.picking = false;
     a.stopText();
 }
 
@@ -184,18 +220,10 @@ fn startRound(a: *App) void {
         v.message = tr("That round has already started");
         return;
     }
-    if (!v.has_chart) {
+    const song = v.chart orelse {
         v.message = tr("You do not have this chart");
         return;
-    }
-    const st = a.db.prepare(db_mod.song_select ++ " WHERE s.sha256=?1 LIMIT 1") catch return;
-    defer st.deinit();
-    st.bindText(1, &v.view.sha256);
-    var tmp = std.heap.ArenaAllocator.init(a.gpa);
-    defer tmp.deinit();
-    if (!(st.step() catch false)) return;
-    const song = db_mod.readSong(tmp.allocator(), st) catch return;
-    v.open = false;
+    };
     v.in_round = true;
     v.start_tick = v.view.start_tick;
     v.result_at = 0;
@@ -276,7 +304,7 @@ fn drawBoard(a: *App, x: f32, y: f32) void {
     }
 }
 
-/// Who won, once the replays are checked. A score not checked yet is shown, and cannot win.
+/// Who won the last round, once the replays are checked. A score not checked yet is shown, and cannot win.
 pub fn drawResult(a: *App) void {
     const v = &a.versus;
     if (!v.in_round) return;
@@ -289,7 +317,7 @@ pub fn drawResult(a: *App) void {
     var order: [room_mod.max_players]*const room_mod.Player = undefined;
     const list = sorted(&v.view, &order);
     g.panel(x, y, 330 * u, 34 * u + row_h * @as(f32, @floatFromInt(list.len)), "VERSUS");
-    const top = winner(list, v.result_at != 0 and c.SDL_GetTicks() - v.result_at >= winner_wait_ms);
+    const top = roundWinner(v, list);
     for (list, 0..) |p, i| {
         const ry = y + 26 * u + row_h * @as(f32, @floatFromInt(i));
         const col = if (top == p) gfx.amber else if (p.you) gfx.cyan else gfx.white;
@@ -298,6 +326,11 @@ pub fn drawResult(a: *App) void {
         const label = if (p.final_ex) |ex| std.fmt.bufPrint(&buf, "{d}", .{ex}) catch "" else std.fmt.bufPrint(&buf, "{d} ...", .{p.ex}) catch "";
         g.textRight(label, x + 318 * u, ry, g.scaled(14), col);
     }
+}
+
+/// The winner, once every score is in or the wait for one is over.
+fn roundWinner(v: *const State, list: []const *const room_mod.Player) ?*const room_mod.Player {
+    return winner(list, v.result_at != 0 and c.SDL_GetTicks() - v.result_at >= winner_wait_ms);
 }
 
 /// Only a checked score counts, and nobody has won until everyone's is in or `waited_out`.
@@ -313,55 +346,223 @@ fn winner(list: []const *const room_mod.Player, waited_out: bool) ?*const room_m
     return best;
 }
 
-pub fn draw(a: *App) void {
-    const v = &a.versus;
-    if (!v.open) return;
-    const g = &a.g;
-    const u = g.h / 720;
-    const w = 560 * u;
-    const h = 460 * u;
-    const x = (g.w - w) / 2;
-    const y = (g.h - h) / 2;
-    g.rect(0, 0, g.w, g.h, gfx.bg.alpha(170));
-    g.panel(x, y, w, h, "");
-    _ = g.text(tr("VERSUS"), x + 20 * u, y + 12 * u, g.scaled(24), gfx.white);
-    const body = y + 56 * u;
-    if (v.joining) {
-        _ = g.text(tr("Room code"), x + 24 * u, body, g.scaled(16), gfx.dim);
-        _ = g.text(a.text.items, x + 24 * u, body + 30 * u, g.scaled(32), gfx.white);
-    } else if (v.room == null) {
-        _ = g.text(tr("C: create a room for the selected chart"), x + 24 * u, body, g.scaled(16), gfx.white);
-        _ = g.text(tr("ENTER: join a room by its code"), x + 24 * u, body + 30 * u, g.scaled(16), gfx.white);
-    } else switch (v.view.status) {
-        .connecting => _ = g.text(tr("Connecting..."), x + 24 * u, body, g.scaled(16), gfx.dim),
-        .full => _ = g.text(tr("That room is full"), x + 24 * u, body, g.scaled(16), gfx.amber),
-        .not_found => _ = g.text(tr("No room has that code"), x + 24 * u, body, g.scaled(16), gfx.amber),
-        .failed => _ = g.text(tr("Could not reach the room"), x + 24 * u, body, g.scaled(16), gfx.amber),
-        .lost => _ = g.text(tr("Connection to the room was lost"), x + 24 * u, body, g.scaled(16), gfx.amber),
-        .joined => drawRoom(a, x, body, w),
-    }
-    g.textCentered(if (v.view.order_failed) tr("The room did not take that") else v.message, x + w / 2, y + h - 52 * u, g.scaled(14), gfx.amber);
-    g.textCentered(tr("ESC: leave"), x + w / 2, y + h - 28 * u, g.scaled(12), gfx.dim);
+/// A room opened with no chart sends none, so its hash stays unset.
+fn hasChart(v: *const room_mod.View) bool {
+    return v.sha256[0] != 0;
 }
 
-fn drawRoom(a: *App, x: f32, y: f32, w: f32) void {
+const Seat = enum { idle, no_chart, playing, results, winner };
+
+/// What a player's row says, from what the room already sends: it keeps no ready state.
+fn seatOf(p: *const room_mod.Player, v: *const room_mod.View, top: ?*const room_mod.Player) Seat {
+    if (top == p) return .winner;
+    if (!p.has_chart) return if (hasChart(v)) .no_chart else .idle;
+    if (v.round == 0) return .idle;
+    if (p.done) return .results;
+    return if (p.judged > 0) .playing else .idle;
+}
+
+/// The same frame as the other menus: a title, panels of rows, and the keys along the bottom.
+pub fn draw(a: *App) void {
     const g = &a.g;
     const v = &a.versus;
     const u = g.h / 720;
-    g.textRight(&v.view.code, x + w - 24 * u, y - 44 * u, g.scaled(32), gfx.cyan);
-    g.textClip(v.view.title(), x + 24 * u, y, w - 48 * u, g.scaled(20), gfx.white);
-    if (!v.has_chart) _ = g.text(tr("You do not have this chart"), x + 24 * u, y + 28 * u, g.scaled(14), gfx.amber);
-    for (v.view.players[0..v.view.count], 0..) |*p, i| {
-        const ry = y + 56 * u + 26 * u * @as(f32, @floatFromInt(i));
-        g.textClip(p.name(), x + 24 * u, ry, w * 0.5, g.scaled(16), if (p.you) gfx.cyan else gfx.white);
-        if (p.host) g.textRight(tr("HOST"), x + w * 0.75, ry, g.scaled(14), gfx.sky);
-        if (!p.has_chart) g.textRight(tr("NO CHART"), x + w - 24 * u, ry, g.scaled(14), gfx.amber);
+    _ = g.text(tr("Versus"), 22 * u, 18 * u, g.scaled(32), gfx.white);
+    if (v.room == null) return drawLounge(a);
+    if (v.view.status == .joined) return drawRoom(a);
+    const say = switch (v.view.status) {
+        .connecting, .joined => tr("Connecting..."),
+        .full => tr("That room is full"),
+        .not_found => tr("No room has that code"),
+        .failed => tr("Could not reach the room"),
+        .lost => tr("Connection to the room was lost"),
+    };
+    const f = frame(a);
+    g.panel(f.x, f.top, f.w, f.bottom - f.top, "");
+    _ = g.text(tr("Room"), f.x + 18 * u, f.top + 10 * u, g.scaled(24), gfx.white);
+    drawRow(g, f.x + 8 * u, f.top + menu_row * u, f.w - 16 * u, say, if (v.view.status == .connecting) gfx.dim else gfx.amber, "", gfx.dim, null);
+    drawHelp(a, "", "");
+    select.drawCommands(a, &.{.{ .sc = c.SDL_SCANCODE_ESCAPE, .label = tr("Esc Leave") }});
+}
+
+/// Settings' frame: panels from under the title down to the help box, which sits over the commands.
+const Frame = struct { x: f32, w: f32, top: f32, bottom: f32, help_y: f32 };
+
+fn frame(a: *const App) Frame {
+    const u = a.g.h / 720;
+    const help_y = a.g.h - 34 * u - 56 * u;
+    return .{ .x = 14 * u, .w = a.g.w - 28 * u, .top = 72 * u, .bottom = help_y - 8 * u, .help_y = help_y };
+}
+
+/// Settings' row pitch, in 720p units. A panel's heading takes one.
+const menu_row = 54;
+
+/// A settings row: the label on the left, the value on the right, over `fill` when it has one.
+fn drawRow(g: *gfx.Gfx, x: f32, y: f32, w: f32, label: []const u8, label_col: gfx.Color, value: []const u8, value_col: gfx.Color, fill: ?gfx.Color) void {
+    const u = g.h / 720;
+    const h = (menu_row - 4) * u;
+    if (fill) |col| g.round(x, y, w, h, 8 * u, col);
+    const ty = y + (h - 22 * u) / 2;
+    const label_w = @min(g.measure(label, g.scaled(16)), w * 0.6);
+    g.textClip(label, x + 12 * u, ty, label_w, g.scaled(16), label_col);
+    const right = x + w - 14 * u;
+    const value_x = x + 36 * u + label_w;
+    g.textClip(value, @max(value_x, right - g.measure(value, g.scaled(14))), ty + u, right - value_x, g.scaled(14), value_col);
+}
+
+/// The cursor's row is filled, as is one under the mouse.
+fn rowFill(g: *const gfx.Gfx, on: bool, x: f32, y: f32, w: f32) ?gfx.Color {
+    if (on) return gfx.accent;
+    return if (g.hit(x, y, w, (menu_row - 4) * g.h / 720)) gfx.rule else null;
+}
+
+/// osu!lazer lists open rooms here. These rooms are private, so a code takes the list's place.
+fn drawLounge(a: *App) void {
+    const g = &a.g;
+    const v = &a.versus;
+    const u = g.h / 720;
+    const f = frame(a);
+    g.panel(f.x, f.top, f.w, f.bottom - f.top, "");
+    _ = g.text(tr("Lounge"), f.x + 18 * u, f.top + 10 * u, g.scaled(24), gfx.white);
+    const rx = f.x + 8 * u;
+    const rw = f.w - 16 * u;
+    const song = select.selectedSong(&a.sel);
+    for ([_][]const u8{ tr("Create a room"), tr("Join a room") }, 0..) |label, i| {
+        const ry = f.top + menu_row * u * @as(f32, @floatFromInt(i + 1));
+        const join = i == 1;
+        const on = join == v.join_row;
+        const value_col = if (on) gfx.white else gfx.dim;
+        const value = if (join) (if (v.joining) "" else tr("Room code")) else if (song) |s| s.title else tr("No chart yet");
+        drawRow(g, rx, ry, rw, label, gfx.white, value, value_col, rowFill(g, on, rx, ry, rw));
+        // Settings' text field, over the value.
+        if (join and v.joining) {
+            const rh = (menu_row - 4) * u;
+            const fx = rx + 260 * u;
+            g.round(fx, ry + (rh - 30 * u) / 2, rx + rw - 14 * u - fx, 30 * u, 6 * u, gfx.well);
+            var up: [32]u8 = undefined;
+            const n = @min(a.text.items.len, up.len);
+            g.fmt(fx + 10 * u, ry + (rh - 22 * u) / 2, g.scaled(16), gfx.white, "{s}_", .{std.ascii.upperString(up[0..n], a.text.items[0..n])});
+        }
+        if (!v.joining and g.clickIn(rx, ry, rw, (menu_row - 4) * u)) {
+            v.join_row = join;
+            a.click_key = c.SDL_SCANCODE_RETURN;
+        }
     }
-    const hints = y + 300 * u;
+    drawHelp(a, if (v.join_row) tr("Type the code the host shares, then press Enter.") else tr("Opens a room for the selected chart, or with none for now. Others join with its code."), v.message);
+    if (v.joining) {
+        select.drawCommands(a, &.{
+            .{ .sc = c.SDL_SCANCODE_RETURN, .label = tr("Enter Join") },
+            .{ .sc = c.SDL_SCANCODE_ESCAPE, .label = tr("Esc Back") },
+        });
+    } else select.drawCommands(a, &.{
+        .{ .sc = c.SDL_SCANCODE_DOWN, .label = tr("Up/Down Choose") },
+        .{ .sc = c.SDL_SCANCODE_RETURN, .label = tr("Enter Open") },
+        .{ .sc = c.SDL_SCANCODE_ESCAPE, .label = tr("Esc Back") },
+    });
+}
+
+/// The help box under settings' rows: what this does, then a message.
+fn drawHelp(a: *App, help: []const u8, message: []const u8) void {
+    const g = &a.g;
+    const u = g.h / 720;
+    const f = frame(a);
+    g.panel(f.x, f.help_y, f.w, 56 * u, "");
+    g.textClip(help, f.x + 18 * u, f.help_y + 8 * u, f.w - 36 * u, g.scaled(14), gfx.sky);
+    g.textClip(message, f.x + 18 * u, f.help_y + 30 * u, f.w - 36 * u, g.scaled(14), gfx.white);
+}
+
+fn drawRoom(a: *App) void {
+    const g = &a.g;
+    const v = &a.versus;
+    const u = g.h / 720;
+    const code_w = g.measure(&v.view.code, g.scaled(32));
+    g.textRight(&v.view.code, g.w - 22 * u, 18 * u, g.scaled(32), gfx.cyan);
+    g.textRight(tr("Room code"), g.w - 34 * u - code_w, 30 * u, g.scaled(14), gfx.dim);
+
+    const f = frame(a);
+    const lw = (f.w - 14 * u) / 2;
+    g.panel(f.x, f.top, lw, f.bottom - f.top, "");
+    _ = g.text(tr("Players"), f.x + 18 * u, f.top + 10 * u, g.scaled(24), gfx.white);
+    g.fmt(f.x + 30 * u + g.measure(tr("Players"), g.scaled(24)), f.top + 18 * u, g.scaled(16), gfx.dim, "{d} / {d}", .{ v.view.count, room_mod.max_players });
+    var order: [room_mod.max_players]*const room_mod.Player = undefined;
+    const list = sorted(&v.view, &order);
+    const top_player = roundWinner(v, list);
+    for (list, 0..) |p, i| drawPlayer(a, p, top_player, f.x + 8 * u, f.top + menu_row * u * @as(f32, @floatFromInt(i + 1)), lw - 16 * u);
+
+    const rx = f.x + lw + 14 * u;
+    const rw = f.w - lw - 14 * u;
+    g.panel(rx, f.top, rw, f.bottom - f.top, "");
+    _ = g.text(tr("Chart"), rx + 18 * u, f.top + 10 * u, g.scaled(24), gfx.white);
+    if (v.chart) |song| {
+        g.textRight(song.shownLevel(), rx + rw - 18 * u, f.top + 10 * u, g.scaled(24), gfx.cyan);
+        g.textRight(tr("LEVEL"), rx + rw - 26 * u - g.measure(song.shownLevel(), g.scaled(24)), f.top + 18 * u, g.scaled(14), gfx.dim);
+    }
+    drawChart(a, rx + 8 * u, f.top + menu_row * u, rw - 16 * u);
+    // The round's start, as a row at the foot of the chart.
+    const sy = f.bottom - 8 * u - (menu_row - 4) * u;
+    if (!v.view.host) {
+        drawRow(g, rx + 8 * u, sy, rw - 16 * u, tr("Waiting for the host"), gfx.dim, "", gfx.dim, null);
+    } else if (!hasChart(&v.view)) {
+        drawRow(g, rx + 8 * u, sy, rw - 16 * u, tr("Start"), gfx.dim, "", gfx.dim, null);
+    } else {
+        drawRow(g, rx + 8 * u, sy, rw - 16 * u, tr("Start"), gfx.white, "Enter", gfx.white, rowFill(g, true, rx + 8 * u, sy, rw - 16 * u));
+        if (g.clickIn(rx + 8 * u, sy, rw - 16 * u, (menu_row - 4) * u)) a.click_key = c.SDL_SCANCODE_RETURN;
+    }
+    drawHelp(a, tr("Everyone plays with the same seed, in LN mode, with no assist options."), if (v.view.order_failed) tr("The room did not take that") else v.message);
+
+    const board = if (a.cfg.versus_panel_left) tr("L Score board: left") else tr("L Score board: right");
     if (v.view.host) {
-        g.textCentered(tr("ENTER: start. TAB: pick a chart, then the versus key."), x + w / 2, hints, g.scaled(14), gfx.sky);
-    } else g.textCentered(tr("Waiting for the host"), x + w / 2, hints, g.scaled(14), gfx.dim);
-    g.textCentered(tr("L: move the score board in play"), x + w / 2, hints + 24 * u, g.scaled(12), gfx.dim);
+        select.drawCommands(a, &.{
+            .{ .sc = c.SDL_SCANCODE_RETURN, .label = tr("Enter Start") },
+            .{ .sc = c.SDL_SCANCODE_TAB, .label = tr("Tab Change chart") },
+            .{ .sc = c.SDL_SCANCODE_L, .label = board },
+            .{ .sc = c.SDL_SCANCODE_ESCAPE, .label = tr("Esc Leave") },
+        });
+    } else select.drawCommands(a, &.{
+        .{ .sc = c.SDL_SCANCODE_L, .label = board },
+        .{ .sc = c.SDL_SCANCODE_ESCAPE, .label = tr("Esc Leave") },
+    });
+}
+
+/// A row: the name, then what the player is doing, then the score.
+fn drawPlayer(a: *App, p: *const room_mod.Player, top_player: ?*const room_mod.Player, x: f32, y: f32, w: f32) void {
+    const g = &a.g;
+    const u = g.h / 720;
+    const v = &a.versus.view;
+    const seat = seatOf(p, v, top_player);
+    // Nothing to show for a player who has not played this round. A score not checked yet is the live tag's colour.
+    var buf: [16]u8 = undefined;
+    const score = if (v.round == 0 or (p.final_ex == null and p.judged == 0)) "" else std.fmt.bufPrint(&buf, "{d}", .{shownEx(p)}) catch "";
+    const score_col = if (seat == .winner) gfx.amber else if (p.final_ex == null) gfx.sky else gfx.white;
+    drawRow(g, x, y, w, p.name(), if (p.you) gfx.cyan else gfx.white, score, score_col, if (p.you) gfx.slab else null);
+    var tx = x + w * 0.62;
+    const ty = y + ((menu_row - 4) * u - 22 * u) / 2 + u;
+    if (p.host) tx += g.text(tr("HOST"), tx, ty, g.scaled(14), gfx.sky).w + 12 * u;
+    const tag: struct { []const u8, gfx.Color } = switch (seat) {
+        .idle => .{ "", gfx.dim },
+        .no_chart => .{ tr("NO CHART"), gfx.amber },
+        .playing => .{ tr("PLAYING"), gfx.sky },
+        .results => .{ tr("RESULTS"), gfx.dim },
+        .winner => .{ tr("WINNER"), gfx.amber },
+    };
+    _ = g.text(tag[0], tx, ty, g.scaled(14), tag[1]);
+}
+
+/// The chart's facts as rows, under the panel's heading.
+fn drawChart(a: *App, x: f32, y: f32, w: f32) void {
+    const g = &a.g;
+    const v = &a.versus;
+    const u = g.h / 720;
+    const step = menu_row * u;
+    if (!hasChart(&v.view)) {
+        const hint = if (v.view.host) tr("Tab opens song select to pick one.") else "";
+        return drawRow(g, x, y, w, tr("No chart yet"), gfx.dim, hint, gfx.dim, null);
+    }
+    const song = v.chart orelse {
+        g.textClip(v.view.title(), x + 10 * u, y, w - 20 * u, g.scaled(24), gfx.white);
+        return drawRow(g, x, y + step, w, tr("You do not have this chart"), gfx.amber, "", gfx.dim, null);
+    };
+    _ = select.drawSongData(g, song, x + 10 * u, y, w - 20 * u);
 }
 
 /// The clock of a round about to start, over the loading screen.
@@ -393,6 +594,23 @@ test "the opponent is the best other player, and only a checked score wins" {
     try std.testing.expect(opponent(&v) == null);
 }
 
+test "a player's card follows the round" {
+    var p: room_mod.Player = .{};
+    var v: room_mod.View = .{};
+    try std.testing.expectEqual(Seat.idle, seatOf(&p, &v, null));
+    v.sha256 = @splat('a');
+    try std.testing.expectEqual(Seat.no_chart, seatOf(&p, &v, null));
+    p.has_chart = true;
+    try std.testing.expectEqual(Seat.idle, seatOf(&p, &v, null));
+    v.round = 1;
+    try std.testing.expectEqual(Seat.idle, seatOf(&p, &v, null));
+    p.judged = 5;
+    try std.testing.expectEqual(Seat.playing, seatOf(&p, &v, null));
+    p.done = true;
+    try std.testing.expectEqual(Seat.results, seatOf(&p, &v, null));
+    try std.testing.expectEqual(Seat.winner, seatOf(&p, &v, &p));
+}
+
 test "a skin reading the versus numbers replaces the board, and they read the room" {
     var objects = [_]skin_model.Object{.{ .kind = .number, .ref = skin_model.versus_ex + 1 }};
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -421,16 +639,95 @@ test "a round closes what was open over song select" {
     try std.testing.expect(!a.practice.open and !a.sel.searching and !a.text_active);
 }
 
-test "the room screen needs a sign-in, and closes without a room" {
+test "the versus screen needs a sign-in, and its lounge goes back to song select" {
     const a = try testing.open();
     defer testing.close(a);
     a.cfg.ir_token = "";
     openScreen(a);
-    try std.testing.expect(!a.versus.open);
+    try std.testing.expectEqual(.select, a.scene);
     a.cfg.ir_url = "http://127.0.0.1:1";
     a.cfg.ir_token = "t";
     openScreen(a);
-    try std.testing.expect(a.versus.open);
+    try std.testing.expectEqual(.versus, a.scene);
+    key(a, c.SDL_SCANCODE_DOWN);
+    key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expect(a.versus.joining and a.text_active);
     key(a, c.SDL_SCANCODE_ESCAPE);
-    try std.testing.expect(!a.versus.open);
+    try std.testing.expect(!a.versus.joining and a.versus.join_row);
+    try std.testing.expectEqual(.versus, a.scene);
+    key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expectEqual(.select, a.scene);
+}
+
+test "a pad leaves the lounge, and a room code keeps the letters bound to it" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.cfg.beatoraja_select = true;
+    a.scene = .versus;
+    a.versus.joining = true;
+    try std.testing.expect(!select.pad(a, a.cfg.p1[1], true, false));
+    try std.testing.expect(a.versus.joining);
+    a.versus.joining = false;
+    try std.testing.expect(select.pad(a, a.cfg.p1[1], true, false));
+    try std.testing.expectEqual(.select, a.scene);
+}
+
+test "the room finds its chart, leaves for the lounge, and a finished round comes back to it" {
+    const a = try testing.open();
+    defer testing.close(a);
+    const sha: [64]u8 = @splat('a');
+    try a.db.exec(std.fmt.comptimePrint("INSERT INTO song(path,folder,sha256,md5,title,level) VALUES('/c/1.bms','/c','{s}','md5','Room','2')", .{&sha}));
+    // No thread: the room is only the state the game reads.
+    var r: room_mod.Room = undefined;
+    r.lock = c.SDL_CreateMutex() orelse return error.NoMutex;
+    defer c.SDL_DestroyMutex(r.lock);
+    r.quit = .init(false);
+    r.view = .{ .status = .joined, .sha256 = sha };
+    a.versus.room = &r;
+    defer leave(a);
+    a.versus.in_round = true;
+    tick(a);
+    try std.testing.expectEqual(.versus, a.scene);
+    try std.testing.expect(!a.versus.in_round);
+    try std.testing.expectEqualStrings("/c/1.bms", a.versus.chart.?.path);
+    try std.testing.expect(r.report.has_chart);
+    r.view.sha256 = @splat('b');
+    tick(a);
+    try std.testing.expect(a.versus.chart == null);
+    key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expect(r.quit.load(.acquire));
+    try std.testing.expect(a.versus.room == null);
+    try std.testing.expectEqual(.versus, a.scene);
+}
+
+test "the host picks the room's chart on song select, and Esc there goes back to the room" {
+    const a = try testing.open();
+    defer testing.close(a);
+    const sha: [64]u8 = @splat('c');
+    try a.db.exec(std.fmt.comptimePrint("INSERT INTO song(path,folder,sha256,md5,title,level) VALUES('/c/1.bms','/c','{s}','md5','Picked','2')", .{&sha}));
+    var r: room_mod.Room = undefined;
+    r.gpa = std.testing.allocator;
+    r.lock = c.SDL_CreateMutex() orelse return error.NoMutex;
+    defer c.SDL_DestroyMutex(r.lock);
+    r.quit = .init(false);
+    r.want_sha = null;
+    r.want_title = &.{};
+    defer r.gpa.free(r.want_title);
+    r.view = .{ .status = .joined, .host = true };
+    a.versus.room = &r;
+    defer leave(a);
+    a.scene = .versus;
+    tick(a);
+    key(a, c.SDL_SCANCODE_TAB);
+    try std.testing.expect(a.versus.picking and a.scene == .select);
+    select.key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expect(!a.versus.picking and a.scene == .versus and a.running);
+    key(a, c.SDL_SCANCODE_TAB);
+    a.sel.view = .folder;
+    a.sel.folder = "/c";
+    select.reload(a);
+    select.key(a, c.SDL_SCANCODE_RETURN);
+    try std.testing.expectEqual(.versus, a.scene);
+    try std.testing.expectEqualSlices(u8, &sha, &r.want_sha.?);
+    try std.testing.expectEqualStrings("Picked", r.want_title);
 }

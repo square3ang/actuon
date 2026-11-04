@@ -47,7 +47,10 @@ SCREENS = {
     "play": (keys(), [chart, "--auto"], MOVING),
     "play_double": (keys(), [os.path.join(root, "tests/charts/double.bme"), "--auto"], MOVING),
     "result": (keys(), [chart, "--auto"], EXACT),
+    "versus_lounge": (keys("Return", "Return", "Down", "V"), [], EXACT),
 }
+# The versus screen needs a sign-in, not a server: this IR answers nobody.
+SIGNED_IN = {"ir_url": "http://127.0.0.1:1", "ir_token": "t"}
 # After the chart has ended, for the result screen.
 RESULT_MS = 30000
 
@@ -62,7 +65,7 @@ def render(name):
         cfg = os.path.join(data, "actuon", "actuon")
         os.makedirs(cfg)
         with open(os.path.join(cfg, "config.json"), "w") as f:
-            json.dump({"roots": [os.path.join(root, "tests/charts")], "tables": []}, f)
+            json.dump({"roots": [os.path.join(root, "tests/charts")], "tables": [], **(SIGNED_IN if name.startswith("versus") else {})}, f)
         # xvfb-run -a races when several start at once, so each screen gets its own display.
         display = str(100 + list(SCREENS).index(name))
         cmd = ["xvfb-run", "-n", display, "-s", "-screen 0 1280x720x24", binary, *args, "--null-audio", "--shot", path, "--shot-after-ms", str(wait)]

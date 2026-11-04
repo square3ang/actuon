@@ -87,7 +87,10 @@ impl Session {
         let user = self.user;
         match command {
             Command::Create { sha256, title } => {
-                check_chart(&sha256, &title)?;
+                // A room may open with no chart yet: the host picks one inside it.
+                if !(sha256.is_empty() && title.is_empty()) {
+                    check_chart(&sha256, &title)?;
+                }
                 let code = rooms::code_from(&random_bytes()?);
                 rooms.create(code.clone(), user, &self.name, &sha256, &title, now)?;
                 self.code = Some(code);
@@ -181,6 +184,15 @@ mod tests {
             400,
             "a chart hash is checked"
         );
+        let bare = "{\"type\":\"create\",\"sha256\":\"\",\"title\":\"\"}";
+        assert_eq!(host.handle(&rooms, bare, now)["type"], "room", "a room opens with no chart");
+        assert_eq!(
+            host.handle(&rooms, "{\"type\":\"start\"}", now)["status"],
+            400,
+            "nothing to start without a chart"
+        );
+        let untitled = format!("{{\"type\":\"create\",\"sha256\":\"\",\"title\":\"t\"}}");
+        assert_eq!(host.handle(&rooms, &untitled, now)["status"], 400, "a title needs its chart");
         let made = host.handle(
             &rooms,
             &format!("{{\"type\":\"create\",\"sha256\":\"{SHA}\",\"title\":\"t\"}}"),
