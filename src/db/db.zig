@@ -216,7 +216,7 @@ pub fn initSchema(d: Db) !void {
     try migrateLnModes(d);
     if (!try hasColumn(d, "score", "assist")) try d.exec("ALTER TABLE score ADD COLUMN assist INTEGER DEFAULT 0");
     try labelReplayModes(d);
-    // An old row names only its last import, so that one is credited with the whole count, which re-imports it as before.
+    // An old row names only its last import, which takes the whole count; any earlier source adds its counts once more on its next import, as the old DB never kept them.
     if (try hasColumn(d, "score", "source")) {
         try d.exec("INSERT OR IGNORE INTO score_import(sha256,mode,source,playcount,clearcount) SELECT sha256,mode,source,playcount,clearcount FROM score WHERE source<>''");
     }
@@ -784,7 +784,8 @@ pub fn importBeatoraja(gpa: std.mem.Allocator, d: Db, path: []const u8) !ImportS
     const st = try src.prepare("SELECT sha256,clear,epg,lpg,egr,lgr,egd,lgd,ebd,lbd,epr,lpr,ems,lms,combo,minbp,playcount,clearcount,date,mode FROM score WHERE mode IN (0,1,2)");
     defer st.deinit();
     var stats: ImportStats = .{};
-    try d.exec("BEGIN");
+    // IMMEDIATE: recordScore reads score_import before it writes, and SQLite will not wait to turn a read into a write.
+    try d.exec("BEGIN IMMEDIATE");
     errdefer d.exec("ROLLBACK") catch {};
     // The file is untrusted: clamp every count instead of trapping on -1 or overflow.
     const lossy = std.math.lossyCast;
