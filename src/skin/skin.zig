@@ -182,14 +182,7 @@ pub fn find(a: std.mem.Allocator, io: std.Io, root: []const u8, want: i32) ?[]co
 
 pub const Conf = jsonskin.Conf;
 
-pub const Option = struct {
-    kind: enum { property, file, offset },
-    name: []const u8,
-    choices: []const []const u8 = &.{},
-    def: []const u8 = "",
-    /// offset: which field of jsonskin.Offset.
-    field: u3 = 0,
-};
+pub const Option = jsonskin.Option;
 
 fn confRoot(io: std.Io, root: []const u8) []const u8 {
     const st = fs.stat(io, root) orelse return root;
@@ -252,7 +245,7 @@ fn addOptions(a: std.mem.Allocator, io: std.Io, out: *std.ArrayList(Option), dir
     for (list.f(head.object.get("filepath"))) |f| {
         if (f != .object) continue;
         const names = jsonskin.wildChoices(a, io, dir, list.s(f.object.get("path"))) catch continue;
-        if (names.len > 1) try addOption(a, out, .{ .kind = .file, .name = list.s(f.object.get("name")), .choices = names, .def = list.s(f.object.get("def")) });
+        if (names.len > 1) try addOption(a, out, .{ .kind = .file, .name = list.s(f.object.get("name")), .choices = names, .def = jsonskin.closest(names, list.s(f.object.get("def"))).? });
     }
     for (list.f(head.object.get("offset"))) |o| {
         if (o != .object) continue;
@@ -290,7 +283,7 @@ fn addFileOptions(a: std.mem.Allocator, io: std.Io, out: *std.ArrayList(Option),
         const t = typeOfFile(a, io, path) orelse return;
         if (!offersOptions(t)) return;
         for (lr2.customOptions(a, io, path) catch return) |o| {
-            if (o.items.len > 1) try addOption(a, out, .{ .kind = .property, .name = o.title, .choices = o.items, .def = o.items[0] });
+            if (o.kind == .offset or o.choices.len > 1) try addOption(a, out, o);
         }
     } else if (headerOf(a, io, path)) |h| try addOptions(a, io, out, dir, h);
 }
@@ -299,7 +292,6 @@ pub const scratchRight = osuskin.scratchRight;
 
 const builtin_options = [_]Option{.{ .kind = .property, .name = osuskin.scratch_side_name, .choices = &osuskin.scratch_side_choices, .def = "Left" }};
 
-/// shortcut: LR2 #CUSTOMFILE and #CUSTOMOFFSET are not offered, their wildcards take the first match.
 pub fn options(a: std.mem.Allocator, io: std.Io, root: []const u8, want: i32) ![]const Option {
     if (root.len == 0) return if (want == playType(.beat7) or want == playType(.beat5)) &builtin_options else &.{};
     const path = find(a, io, root, want) orelse return &.{};

@@ -496,9 +496,12 @@ pub const Renderer = struct {
         };
         scale *= squeeze;
         var x = left;
+        var prev: ?u32 = null;
         var it = std.unicode.Utf8View.initUnchecked(s).iterator();
         while (it.nextCodepoint()) |cp| {
             const glyph = font.glyphs.get(cp) orelse continue;
+            x += font.kern(prev, cp) * scale;
+            prev = cp;
             defer x += glyph.advance * scale + font.margin * squeeze;
             if (glyph.w <= 0 or glyph.h <= 0) continue;
             const page = font.first_tex + @as(i32, glyph.page);
