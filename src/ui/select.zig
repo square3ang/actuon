@@ -1479,7 +1479,8 @@ fn startDownload(a: *App, row: Row) void {
     }
     var buf: [2048]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
-    const url: []const u8 = if (a.cfg.download_url.len > 0 and row.target.len > 0)
+    const from_config = a.cfg.download_url.len > 0 and row.target.len > 0;
+    const url: []const u8 = if (from_config)
         download.expand(fba.allocator(), a.cfg.download_url, row.target) catch return
     else
         row.extra;
@@ -1487,7 +1488,8 @@ fn startDownload(a: *App, row: Row) void {
         s.status = tr("No download source for this chart");
         return;
     }
-    s.download = download.start(a.gpa, a.io, url, a.cfg.roots[0], row.target);
+    // A table's song link counts as chosen only on the host of the table the player added.
+    s.download = download.start(a.gpa, a.io, url, if (from_config) url else s.table_url, a.cfg.roots[0], row.target);
     s.status = if (s.download != null) tr("Downloading...") else tr("Could not start download");
     s.download_seen = 0;
     s.download_shown = 0;

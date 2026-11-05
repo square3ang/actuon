@@ -200,62 +200,28 @@ pub fn store(gpa: std.mem.Allocator, d: Db, url: []const u8, head_bytes: []const
     return .{ .songs = songs, .courses = courses };
 }
 
-fn urlHost(url: []const u8) ?[]const u8 {
-    const uri = std.Uri.parse(url) catch return null;
-    if (!std.mem.eql(u8, uri.scheme, "http") and !std.mem.eql(u8, uri.scheme, "https")) return null;
-    const host = switch (uri.host orelse return null) {
-        .raw, .percent_encoded => |h| h,
-    };
-    // Encoded hosts would hide an address from the check below.
-    return if (std.mem.indexOfScalar(u8, host, '%') == null) host else null;
-}
-
-/// shortcut: keeps hostile tables off the home network but checks the written host, not where its name resolves or a redirect goes; check the connected address if that matters.
-fn isPrivateHost(written: []const u8) bool {
-    const host = std.mem.trimEnd(u8, written, ".");
-    if (std.ascii.eqlIgnoreCase(host, "localhost") or std.ascii.endsWithIgnoreCase(host, ".localhost")) return true;
-    // Only global unicast is public, which also covers the spellings of ::1 and mapped IPv4.
-    if (host.len > 0 and host[0] == '[') return host.len < 2 or (host[1] != '2' and host[1] != '3');
-    const last = host[if (std.mem.lastIndexOfScalar(u8, host, '.')) |dot| dot + 1 else 0..];
-    const is_number = for (last) |ch| {
-        if (!std.ascii.isDigit(ch)) break false;
-    } else true;
-    if (!is_number and !std.ascii.startsWithIgnoreCase(last, "0x")) return false;
-    // A resolver also reads 2130706433, 127.1, 0x7f.0.0.1 and 0177.0.0.1 as addresses, so only a plain quad can pass.
-    var octets: [4]u8 = undefined;
-    var it = std.mem.splitScalar(u8, host, '.');
-    for (&octets) |*octet| {
-        const text = it.next() orelse return true;
-        if (text.len > 1 and text[0] == '0') return true;
-        octet.* = std.fmt.parseInt(u8, text, 10) catch return true;
-    }
-    if (it.next() != null) return true;
-    return octets[0] == 0 or octets[0] == 10 or octets[0] == 127 or (octets[0] == 169 and octets[1] == 254) or
-        (octets[0] == 172 and octets[1] >= 16 and octets[1] <= 31) or (octets[0] == 192 and octets[1] == 168);
-}
-
 /// Plain HTTP past the player's own network: a password or IR token sent there could be read on the way.
 pub fn sendsInClear(url: []const u8) bool {
     if (!std.ascii.startsWithIgnoreCase(url, "http://")) return false;
-    return !isPrivateHost(urlHost(url) orelse return true);
+    return !http.isPrivateHost(http.urlHost(url) orelse return true);
 }
 
 /// The player chose the table's own host, so a table on the home network can still use it.
 fn refAllowed(table_url: []const u8, ref_url: []const u8) bool {
-    const host = urlHost(ref_url) orelse return false;
-    if (urlHost(table_url)) |own| if (std.ascii.eqlIgnoreCase(own, host)) return true;
-    return !isPrivateHost(host);
+    const host = http.urlHost(ref_url) orelse return false;
+    if (http.urlHost(table_url)) |own| if (std.ascii.eqlIgnoreCase(own, host)) return true;
+    return !http.isPrivateHost(host);
 }
 
 pub fn fetch(gpa: std.mem.Allocator, io: std.Io, d: Db, url: []const u8) !FetchResult {
-    const page = try http.get(gpa, io, url);
+    const page = try http.getPublic(gpa, io, url, url);
     defer gpa.free(page);
     var head_url: []u8 = undefined;
     // Some entries point straight at the header JSON.
     if (findMeta(page)) |m| head_url = try http.join(gpa, url, m) else head_url = try gpa.dupe(u8, url);
     defer gpa.free(head_url);
     if (!refAllowed(url, head_url)) return error.BadTable;
-    const head_bytes = if (std.mem.eql(u8, head_url, url)) try gpa.dupe(u8, page) else try http.get(gpa, io, head_url);
+    const head_bytes = if (std.mem.eql(u8, head_url, url)) try gpa.dupe(u8, page) else try http.getPublic(gpa, io, head_url, url);
     defer gpa.free(head_bytes);
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -263,7 +229,7 @@ pub fn fetch(gpa: std.mem.Allocator, io: std.Io, d: Db, url: []const u8) !FetchR
     if (head != .object) return error.BadTable;
     const data_url = try http.join(arena.allocator(), head_url, str(head.object.get("data_url")));
     if (!refAllowed(url, data_url)) return error.BadTable;
-    const data_bytes = try http.get(gpa, io, data_url);
+    const data_bytes = try http.getPublic(gpa, io, data_url, url);
     defer gpa.free(data_bytes);
     return store(gpa, d, url, head_bytes, data_bytes);
 }
@@ -294,16 +260,20 @@ pub fn parseConstraints(s: []const u8) CourseLimits {
 test "a table cannot point at the player's own network" {
     const table = "https://example.com/t.html";
     for ([_][]const u8{
-        "http://localhost/x",         "http://a.localhost/x", "http://127.0.0.1/x",
-        "http://10.1.2.3/x",          "http://192.168.0.1/x", "http://172.16.0.1/x",
-        "http://169.254.169.254/x",   "http://0.0.0.0/x",     "http://[::1]/x",
-        "http://[fe80::1]/x",         "http://[fd00::1]/x",   "http://2130706433/x",
-        "http://0x7f.0.0.1/x",        "file:///etc/passwd",   "http://127.1/x",
-        "http://0177.0.0.1/x",        "http://127.0.0.1./x",  "http://%31%32%37.0.0.1/x",
-        "http://[0:0:0:0:0:0:0:1]/x",
+        "http://localhost/x",         "http://a.localhost/x",       "http://127.0.0.1/x",
+        "http://10.1.2.3/x",          "http://192.168.0.1/x",       "http://172.16.0.1/x",
+        "http://169.254.169.254/x",   "http://0.0.0.0/x",           "http://[::1]/x",
+        "http://[fe80::1]/x",         "http://[fd00::1]/x",         "http://2130706433/x",
+        "http://0x7f.0.0.1/x",        "file:///etc/passwd",         "http://127.1/x",
+        "http://0177.0.0.1/x",        "http://127.0.0.1./x",        "http://%31%32%37.0.0.1/x",
+        "http://[0:0:0:0:0:0:0:1]/x", "http://100.64.0.1/x",        "http://224.0.0.1/x",
+        "http://255.255.255.255/x",   "http://nas/x",               "http://nas.local/x",
+        "http://router.home.arpa/x",  "http://[64:ff9b::7f00:1]/x",
     }) |ref| try std.testing.expect(!refAllowed(table, ref));
     try std.testing.expect(refAllowed(table, "https://example.com/data.json"));
     try std.testing.expect(refAllowed(table, "http://172.32.0.1/x"));
+    try std.testing.expect(refAllowed(table, "http://100.128.0.1/x"));
+    try std.testing.expect(refAllowed(table, "http://[64:ff9b::808:808]/x"));
     try std.testing.expect(refAllowed(table, "https://cafe.example/d.json"));
     try std.testing.expect(refAllowed("http://192.168.0.5/t.html", "http://192.168.0.5/d.json"));
 }

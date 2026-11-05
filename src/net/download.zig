@@ -87,6 +87,8 @@ pub const Job = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     url: []u8,
+    /// The address the player chose, whose host skips the home-network check when written as a home host.
+    own_url: []u8,
     root: []u8,
     id: []u8,
     state: std.atomic.Value(u8) = .init(0), // 0 running, 1 done, 2 failed
@@ -107,6 +109,7 @@ pub const Job = struct {
     pub fn destroy(j: *Job) void {
         if (j.thread) |t| c.SDL_WaitThread(t, null);
         j.gpa.free(j.url);
+        j.gpa.free(j.own_url);
         j.gpa.free(j.root);
         j.gpa.free(j.id);
         j.gpa.destroy(j);
@@ -136,12 +139,12 @@ fn run(j: *Job) !void {
     // Per job: an abandoned job's thread can wake later and remove its file while a retry downloads.
     const archive = try std.fmt.allocPrint(a, "{s}.{x}.part", .{ dest, @intFromPtr(j) });
     defer fs.remove(j.io, archive);
-    try http.download(j.gpa, j.io, j.url, archive, &j.progress);
+    try http.download(j.gpa, j.io, j.url, j.own_url, archive, &j.progress);
     // Lookup services answer with JSON naming the archive. Anything too big to read here is the archive.
     if (fs.readAlloc(a, j.io, archive, 1 << 20)) |head| {
         if (head.len > 0 and head[0] == '{') {
             const real = (try packageUrl(a, head)) orelse return error.NoPackage;
-            try http.download(j.gpa, j.io, real, archive, &j.progress);
+            try http.download(j.gpa, j.io, real, j.own_url, archive, &j.progress);
         }
     } else |_| {}
     j.extracting.store(true, .release);
@@ -166,11 +169,11 @@ fn thread(ud: ?*anyopaque) callconv(.c) c_int {
 }
 
 /// `id` names the folder, so it must be a chart hash, not free text.
-pub fn start(gpa: std.mem.Allocator, io: std.Io, url: []const u8, root: []const u8, id: []const u8) ?*Job {
+pub fn start(gpa: std.mem.Allocator, io: std.Io, url: []const u8, own_url: []const u8, root: []const u8, id: []const u8) ?*Job {
     for (id) |ch| if (!std.ascii.isAlphanumeric(ch)) return null;
     if (id.len == 0) return null;
     const j = gpa.create(Job) catch return null;
-    j.* = .{ .gpa = gpa, .io = io, .url = gpa.dupe(u8, url) catch return null, .root = gpa.dupe(u8, root) catch return null, .id = gpa.dupe(u8, id) catch return null };
+    j.* = .{ .gpa = gpa, .io = io, .url = gpa.dupe(u8, url) catch return null, .own_url = gpa.dupe(u8, own_url) catch return null, .root = gpa.dupe(u8, root) catch return null, .id = gpa.dupe(u8, id) catch return null };
     j.thread = c.SDL_CreateThread(thread, "download", j) orelse {
         j.destroy();
         return null;

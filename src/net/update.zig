@@ -66,7 +66,7 @@ const Proof = struct { key: [32]u8, signature: [64]u8, name: []const u8 };
 
 fn fetchVerified(gpa: std.mem.Allocator, io: std.Io, url: []const u8, proof: Proof, path: []const u8, progress: *http.Progress) !void {
     errdefer fs.remove(io, path);
-    try http.download(gpa, io, url, path, progress);
+    try http.download(gpa, io, url, url, path, progress);
     const message = try release_sig.message(gpa, proof.name, try fs.sha256(io, path));
     defer gpa.free(message);
     const key = Ed25519.PublicKey.fromBytes(proof.key) catch return error.BadSignature;
