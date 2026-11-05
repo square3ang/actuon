@@ -2020,13 +2020,21 @@ fn overlayKey(at: usize) ?u32 {
 /// The button's index as if in `p1`, from whichever layout binds it; 1P 7 key wins a code bound twice.
 fn menuIndex(cfg: *const config.Config, code: u16) ?usize {
     if (std.mem.indexOfScalar(u16, &cfg.p1, code)) |i| return i;
-    // The other layouts' keyboard keys, such as K and L, are screen keys too: only their pad buttons join.
-    if (code < input.joy_base) return null;
+    if (code < input.joy_base and screenKey(code)) return null;
     for ([_][]const u16{ &cfg.p2, &cfg.pms }) |keys| if (std.mem.indexOfScalar(u16, keys, code)) |i| return i;
     if (cfg.keys14) |keys| if (std.mem.indexOfScalar(u16, &keys, code)) |i| return i % 9;
     if (cfg.keys5) |keys| if (std.mem.indexOfScalar(u16, &keys, code)) |i| return indexOf5(i);
     if (cfg.keys10) |keys| if (std.mem.indexOfScalar(u16, &keys, code)) |i| return indexOf5(i % 7);
     return null;
+}
+
+/// A keyboard key a menu screen reads itself, so another layout binding it must not take it; keep in step with select, result and versus keys.
+fn screenKey(code: u16) bool {
+    return switch (code) {
+        c.SDL_SCANCODE_L, c.SDL_SCANCODE_T, c.SDL_SCANCODE_F, c.SDL_SCANCODE_R, c.SDL_SCANCODE_V, c.SDL_SCANCODE_P => true,
+        c.SDL_SCANCODE_1...c.SDL_SCANCODE_SPACE, c.SDL_SCANCODE_F1...c.SDL_SCANCODE_UP => true,
+        else => false,
+    };
 }
 
 /// A 5 key side has its scratch at 5 and 6, where `p1` has it at 7 and 8.
@@ -2425,29 +2433,35 @@ test "beatoraja select opens with odd keys, closes with even ones, and stays in 
     try std.testing.expect(!pad(a, c.SDL_SCANCODE_3, true, false));
 }
 
-test "menu keys come from every layout's pad buttons, and 1P 7 key wins a shared one" {
+test "menu keys come from every layout, in 1P, 2P and 9, 14, then 5 and 10 key order" {
     const a = try testing.open();
     defer testing.close(a);
     a.cfg.beatoraja_select = true;
     a.scene = .select;
     const pad_b = input.joy_base;
+    a.cfg.p1[3] = pad_b + 3;
     a.cfg.p2[2] = pad_b + 2;
     a.cfg.pms[1] = pad_b + 1;
-    a.cfg.keys5 = .{ pad_b + 50, 0, 0, 0, 0, pad_b + 55, pad_b + 56 };
+    a.cfg.keys5 = .{ pad_b + 50, 0, pad_b + 70, pad_b + 1, 0, pad_b + 55, pad_b + 56 };
     a.cfg.keys10 = @splat(0);
     a.cfg.keys10.?[13] = pad_b + 63;
     a.cfg.keys14 = @splat(0);
     a.cfg.keys14.?[10] = pad_b + 70;
-    a.cfg.keys14.?[11] = a.cfg.p1[3];
+    a.cfg.keys14.?[11] = pad_b + 3;
     const want = [_]struct { u16, ?usize }{
-        .{ pad_b + 2, 2 },      .{ pad_b + 1, 1 },  .{ pad_b + 50, 0 }, .{ pad_b + 55, 7 },
-        .{ pad_b + 56, 8 },     .{ pad_b + 63, 8 }, .{ pad_b + 70, 1 }, .{ a.cfg.p1[3], 3 },
-        // A keyboard key of another layout stays a screen key.
-        .{ a.cfg.p2[0], null },
+        .{ pad_b + 2, 2 },   .{ pad_b + 1, 1 },           .{ pad_b + 50, 0 }, .{ pad_b + 55, 7 },
+        .{ pad_b + 56, 8 },  .{ pad_b + 63, 8 },          .{ pad_b + 70, 1 }, .{ pad_b + 3, 3 },
+        // Another layout's keyboard keys join too, but not one a screen reads itself.
+        .{ a.cfg.p2[0], 0 }, .{ c.SDL_SCANCODE_L, null },
     };
+    try std.testing.expectEqual(c.SDL_SCANCODE_L, a.cfg.p2[3]);
     for (want) |w| try std.testing.expectEqual(w[1], menuIndex(&a.cfg, w[0]));
     try std.testing.expect(pad(a, pad_b + 2, true, false));
     try std.testing.expectEqual(.library, a.sel.view);
+    a.practice.open = true;
+    a.practice.row = 0;
+    try std.testing.expect(pad(a, a.cfg.p2[8], true, false));
+    try std.testing.expectEqual(1, a.practice.row);
 }
 
 test "a held scratch scrolls until it is let go" {
