@@ -252,6 +252,16 @@ fn decodeThread(ud: ?*anyopaque) callconv(.c) c_int {
 
 const Media = union(enum) { none, image: *gfx.Texture, video: *Video };
 
+fn clipUs(shown_us: i64, freq: u32) i64 {
+    return @divTrunc(shown_us *| freq, 100);
+}
+
+test "a clip keeps pace with the practice speed" {
+    try std.testing.expectEqual(@as(i64, 2_000_000), clipUs(1_000_000, 200));
+    try std.testing.expectEqual(@as(i64, 500_000), clipUs(1_000_000, 50));
+    try std.testing.expectEqual(@as(i64, 1_000_000), clipUs(1_000_000, 100));
+}
+
 pub const Look = struct {
     /// beatoraja's stretch types: 0 fills, 1 fits inside keeping the shape, 3 covers and crops.
     stretch: i32 = 0,
@@ -302,6 +312,8 @@ pub const Bga = struct {
     media: []Media,
     cur: Cursor = .{},
     shown: [3]i32 = @splat(-1),
+    /// Practice FREQ percent: chart time runs that much faster, and a clip with it.
+    freq: u32 = 100,
     g: *gfx.Gfx,
 
     /// Black is transparent on layer images, as in LR2, and the base draws over black anyway.
@@ -327,7 +339,7 @@ pub const Bga = struct {
             gpa.destroy(b);
             return null;
         };
-        b.* = .{ .gpa = gpa, .g = g, .media = media };
+        b.* = .{ .gpa = gpa, .g = g, .media = media, .freq = if (s.params.practice) |p| p.freq else 100 };
         @memset(media, .none);
         var arena = std.heap.ArenaAllocator.init(gpa);
         defer arena.deinit();
@@ -375,7 +387,7 @@ pub const Bga = struct {
             .none => return,
             .image => |tex| tex,
             .video => |v| blk: {
-                v.clock.store(t - since, .release);
+                v.clock.store(clipUs(t - since, b.freq), .release);
                 v.stale = v.upload() or v.stale;
                 video = v;
                 break :blk v.tex;

@@ -865,6 +865,8 @@ pub const App = struct {
 
     fn pump(a: *App) void {
         var ev: c.SDL_Event = undefined;
+        const read_ns = c.SDL_GetTicksNS();
+        defer input.sdl_read_ns.store(read_ns, .release);
         while (c.SDL_PollEvent(&ev)) {
             switch (ev.type) {
                 c.SDL_EVENT_QUIT => a.running = false,

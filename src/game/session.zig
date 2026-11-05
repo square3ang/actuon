@@ -70,7 +70,6 @@ fn scaled(t: i64, freq: u32) i64 {
     return @divTrunc(t *| 100, @as(i64, freq));
 }
 
-/// shortcut: BGA video runs at its own speed under another FREQ; slow the decoder clock if players mind.
 pub fn applyPractice(chart: *Chart, p: Practice) !void {
     const al = chart.arena.allocator();
     const inSection = struct {
@@ -196,8 +195,15 @@ pub const Session = struct {
     vis: []u8,
 
     const no_seek = std.math.minInt(i64);
-    /// shortcut: judging lags the clock by this, so later events count from arrival; raise it if SDL input on slow frames loses timing.
-    const input_grace_us = 20_000;
+    /// Covers the OS handing over an event stamped a moment before.
+    const input_grace_us = 5_000;
+    /// A main loop stalled longer than this, as by a dragged window, stops holding judging back.
+    const max_input_lag_us = 250_000;
+
+    /// Judging stops short of any input still on its way, so a late-read event keeps its own time.
+    fn judgedUntil(now: i64, read_us: i64, judge_offset_us: i64) i64 {
+        return @max(@min(now, read_us), now - max_input_lag_us) - @max(judge_offset_us, 0) - input_grace_us;
+    }
 
     pub fn parseFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8, selected: ?[]const i32, seed: u64) !Chart {
         const data = try fs.readAlloc(gpa, io, path, 1 << 28);
@@ -394,6 +400,8 @@ pub const Session = struct {
 
             const paused = s.paused.load(.acquire);
             const now = if (paused) s.pause_t.load(.acquire) else s.songNow();
+            // Read before the queue: the main loop publishes it after pushing what it read.
+            const read_us = if (s.engine.clockReady()) s.engine.toSongUs(input.sdl_read_ns.load(.acquire)) else now;
             while (input.pop()) |ev| {
                 if (!s.params.allow_input or s.params.replay != null or s.params.autoplay) continue;
                 const b = s.bind[ev.code] orelse continue;
@@ -413,7 +421,7 @@ pub const Session = struct {
                 }
             }
             // Replays and autoplay have no late events, and their keysounds must not lag.
-            s.sim.advance(if (s.params.replay != null or s.params.autoplay) now else now - input_grace_us);
+            s.sim.advance(if (s.params.replay != null or s.params.autoplay) now else judgedUntil(now, read_us, s.params.judge_offset_us));
 
             const n = s.sim.drain(&out);
             for (out[0..n]) |o| switch (o.kind) {
@@ -603,6 +611,30 @@ test "an input older than judged time scores the same when resimulated" {
     try std.testing.expectEqual(s.sim.score.exScore(), again.score.exScore());
     try std.testing.expectEqual(s.sim.score.count(.pr), again.score.count(.pr));
     try std.testing.expectEqual(s.sim.score.count(.ms), again.score.count(.ms));
+}
+
+test "judging waits for input a slow frame has not read yet" {
+    const now: i64 = 10_000_000;
+    const read = now - 50_000;
+    try std.testing.expect(Session.judgedUntil(now, read, 0) <= read);
+    try std.testing.expect(Session.judgedUntil(now, now, 30_000) <= now - 30_000);
+    try std.testing.expectEqual(now - Session.max_input_lag_us - Session.input_grace_us, Session.judgedUntil(now, 0, 0));
+
+    const gpa = std.testing.allocator;
+    var chart = try core.bms.parse(gpa, "#BPM 120\n#TOTAL 300\n#WAV01 a.wav\n#00111:01\n", .{});
+    defer chart.deinit();
+    var s: Session = undefined;
+    s.params = .{ .path = "" };
+    s.last_event_t = 0;
+    s.sim = try Sim.create(gpa, &chart, .{});
+    defer s.sim.destroy();
+    s.events = try .initCapacity(gpa, 4);
+    defer s.events.deinit(gpa);
+    const note_t = chart.notes[0].time_us;
+    s.sim.advance(Session.judgedUntil(note_t + 50_000, note_t, 0));
+    s.applyInput(note_t, chart.notes[0].lane, 0, true);
+    try std.testing.expectEqual(note_t, s.events.items[0].time_us);
+    try std.testing.expectEqual(@as(u32, 1), s.sim.score.count(.pg));
 }
 
 test "a practice section keeps its notes, hands the rest to the music and moves to the new speed" {

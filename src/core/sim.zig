@@ -83,7 +83,7 @@ fn gasTop(cfg: Config) gauge_mod.Type {
 
 pub const Sim = struct {
     notes: []const Note,
-    /// 0 = unjudged, else judge + 1. Render reads it racily: at worst a note shows one extra frame.
+    /// 0 = unjudged, else judge + 1. Only the sim's thread touches it; render draws from a copy taken under a lock.
     state: []u8,
     lane_notes: [types.max_lanes][]u32,
     lanes: [types.max_lanes]LaneState = @splat(.{}),
