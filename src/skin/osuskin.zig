@@ -7,11 +7,10 @@ const m = @import("model.zig");
 const lr2 = @import("lr2csv.zig");
 const jsonskin = @import("jsonskin.zig");
 const play = @import("../ui/play.zig");
+const gfx = @import("../ui/gfx.zig");
 
 const stage_h: f32 = 480;
 const unit: f32 = 1.6;
-/// shortcut: a 16:9 canvas, other window shapes stretch it; a ColumnStart per aspect if that matters.
-const stage_w: f32 = 854;
 
 pub fn isIni(path: []const u8) bool {
     return std.ascii.eqlIgnoreCase(std.fs.path.basename(path), "skin.ini");
@@ -127,10 +126,9 @@ fn findImage(a: std.mem.Allocator, io: std.Io, dir: []const u8, name_in: []const
     return null;
 }
 
-fn pixelSize(io: std.Io, path: []const u8) ?[2]f32 {
-    const gpa = std.heap.page_allocator;
-    const bytes = fs.readAlloc(gpa, io, path, 1 << 28) catch return null;
-    defer gpa.free(bytes);
+fn pixelSize(a: std.mem.Allocator, io: std.Io, path: []const u8) ?[2]f32 {
+    const bytes = fs.readAlloc(a, io, path, 1 << 28) catch return null;
+    defer a.free(bytes);
     var w: c_int = 0;
     var h: c_int = 0;
     var n: c_int = 0;
@@ -156,12 +154,14 @@ const Build = struct {
     io: std.Io,
     dir: []const u8,
     mania: []const u8,
+    /// As osu!, the canvas is 480 high and as wide as the window's shape, so nothing stretches.
+    w: f32,
     paths: std.ArrayList(?[]const u8) = .empty,
     objects: std.ArrayList(m.Object) = .empty,
 
     fn file(b: *Build, name: []const u8, animated: bool) !?Image {
         const f = findImage(b.a, b.io, b.dir, name, animated) orelse return null;
-        const size = pixelSize(b.io, f.path) orelse return null;
+        const size = pixelSize(b.a, b.io, f.path) orelse return null;
         try b.paths.append(b.a, f.path);
         return .{ .tex = @intCast(b.paths.items.len - 1), .w = size[0] / f.scale, .h = size[1] / f.scale };
     }
@@ -254,7 +254,7 @@ fn addKeys(b: *Build, mode: core.types.Mode, order: []const u8, l: *const Layout
     }
 }
 
-fn addNotes(b: *Build, skin: *m.Skin, general: []const u8, order: []const u8, l: *const Layout) !void {
+fn addNotes(b: *Build, skin: *m.Skin, general: []const u8, mode: core.types.Mode, order: []const u8, l: *const Layout) !void {
     const n = &skin.notes;
     const hit = hitPosition(b.mania);
     const given = number(b.mania, "WidthForNoteHeightScale", 0);
@@ -270,14 +270,15 @@ fn addNotes(b: *Build, skin: *m.Skin, general: []const u8, order: []const u8, l:
         const head = try b.noteImage(i, "H", kind) orelse note;
         const tail = try b.noteImage(i, "T", kind) orelse head;
         const body = try b.noteImage(i, "L", kind);
-        // shortcut: a missing image is a white bar, as there is no osu! default skin to fall back on.
-        const blank: m.Src = .{ .solid = .{ 255, 255, 255 } };
+        // A missing image takes the built-in play screen's colour for the lane.
+        const col = play.noteColor(mode, lane);
+        const blank: m.Src = .{ .solid = .{ col.r, col.g, col.b } };
         n.note[lane] = if (note) |x| x.src() else blank;
         n.ln_start[lane] = if (head) |x| x.src() else blank;
         n.ln_end[lane] = if (tail) |x| x.src() else blank;
         n.ln_body[lane] = if (body) |x| x.src() else blank;
         // osu! has no mines; these must still show.
-        n.mine[lane] = .{ .solid = .{ 255, 0, 0 } };
+        n.mine[lane] = .{ .solid = .{ gfx.danger.r, gfx.danger.g, gfx.danger.b } };
         const h = if (note orelse head) |x| x.h * scale_w / x.w else l.ws[i] / 3;
         n.lane[lane] = .{ l.xs[i], hit, l.ws[i], h };
     }
@@ -372,7 +373,7 @@ fn addScore(b: *Build, fonts: []const u8) !void {
         .digit_gap = gap,
         .digits = places,
         .zero_pad = true,
-        .keys = try b.fixed(stage_w - 10 / unit - w - (w - gap) * (places - 1), 0, w, h, white),
+        .keys = try b.fixed(b.w - 10 / unit - w - (w - gap) * (places - 1), 0, w, h, white),
     });
 
     const acc_scale = 0.6 * 0.96 / unit;
@@ -380,7 +381,7 @@ fn addScore(b: *Build, fonts: []const u8) !void {
     const ah = font.h * acc_scale;
     const agap = overlap * acc_scale;
     const y = h + 9 / unit;
-    var right = stage_w - 17 / unit;
+    var right = b.w - 17 / unit;
     if (try b.file(try std.fmt.allocPrint(b.a, "{s}-percent", .{prefix}), false)) |img| {
         right -= img.w * acc_scale;
         try b.sprite(img, right, y, img.w * acc_scale, img.h * acc_scale);
@@ -492,9 +493,9 @@ fn build(b: *Build, skin: *m.Skin, general: []const u8, fonts: []const u8, mode:
     const l = layoutOf(b.mania, order.len);
     const hit = hitPosition(b.mania);
 
-    try b.objects.append(b.a, .{ .kind = .bga, .stretch = stretchOf(conf), .keys = try b.fixed(0, 0, stage_w, stage_h, white) });
+    try b.objects.append(b.a, .{ .kind = .bga, .stretch = stretchOf(conf), .keys = try b.fixed(0, 0, b.w, stage_h, white) });
     const dim = dimAlpha(conf);
-    if (dim > 0) try b.rect(0, 0, stage_w, stage_h, .{ 0, 0, 0, dim });
+    if (dim > 0) try b.rect(0, 0, b.w, stage_h, .{ 0, 0, 0, dim });
     if (try b.image("StageLeft", "mania-stage-left", true)) |img|
         try b.sprite(img, l.x - img.w / unit, 0, img.w / unit, stage_h);
     if (try b.image("StageRight", "mania-stage-right", true)) |img|
@@ -529,7 +530,7 @@ fn build(b: *Build, skin: *m.Skin, general: []const u8, fonts: []const u8, mode:
 
     const keys_under = if (get(b.mania, "KeysUnderNotes")) |v| std.mem.eql(u8, v, "1") else false;
     if (keys_under) try addKeys(b, mode, order, &l);
-    try addNotes(b, skin, general, order, &l);
+    try addNotes(b, skin, general, mode, order, &l);
     try b.objects.append(b.a, .{ .kind = .notes });
     if (!keys_under) try addKeys(b, mode, order, &l);
     try addLighting(b, general, mode, order, &l);
@@ -539,15 +540,15 @@ fn build(b: *Build, skin: *m.Skin, general: []const u8, fonts: []const u8, mode:
     try addGauge(b, conf);
 }
 
-/// A key count the ini has no section for takes every default, as in lazer.
-pub fn load(skin: *m.Skin, io: std.Io, path: []const u8, mode: core.types.Mode, conf: jsonskin.Conf) ![]const ?[]const u8 {
+/// A key count the ini has no section for takes every default, as in lazer. `aspect` is the window's width over height.
+pub fn load(skin: *m.Skin, io: std.Io, path: []const u8, mode: core.types.Mode, conf: jsonskin.Conf, aspect: f32) ![]const ?[]const u8 {
     const a = skin.arena.allocator();
     const text = try fs.readAlloc(a, io, path, 1 << 22);
     const body = if (std.mem.startsWith(u8, text, "\xef\xbb\xbf")) text[3..] else text;
-    skin.w = stage_w;
+    skin.w = stage_h * aspect;
     skin.h = stage_h;
     skin.plain_loading = true;
-    var b: Build = .{ .a = a, .io = io, .dir = std.fs.path.dirname(path) orelse ".", .mania = section(body, "Mania", mode.keys()) };
+    var b: Build = .{ .a = a, .io = io, .dir = std.fs.path.dirname(path) orelse ".", .mania = section(body, "Mania", mode.keys()), .w = skin.w };
     try build(&b, skin, section(body, "General", null), section(body, "Fonts", null), mode, conf);
     skin.objects = b.objects.items;
     return b.paths.items;
@@ -598,7 +599,10 @@ test "a 7+1 chart takes the 8 key section, scratch first, @2x and frame 0 prefer
 
     var skin: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
     defer skin.arena.deinit();
-    const paths = try load(&skin, std.testing.io, path, .beat7, .{});
+    const paths = try load(&skin, std.testing.io, path, .beat7, .{}, 4.0 / 3.0);
+    // A 4:3 window gets a 640 wide canvas; the lanes keep their place from the left.
+    try std.testing.expectEqual(@as(f32, 640), skin.w);
+    try std.testing.expectEqual(@as(f32, 640), skin.objects[0].keys[0].w);
     const scratch = skin.notes.lane[7].?;
     try std.testing.expectEqual(@as(f32, 100), scratch[0]);
     try std.testing.expectEqual(@as(f32, 40), scratch[2]);
@@ -618,8 +622,18 @@ test "a 7+1 chart takes the 8 key section, scratch first, @2x and frame 0 prefer
     // A note image missing, the head still sizes the lane; a skin without a version stretches its bodies.
     try std.testing.expectEqual(@as(f32, 0), skin.notes.ln_body_span);
     // Mines have no art in osu!, nor does a missing column image stop a note showing.
-    try std.testing.expect(skin.notes.mine[0].solid != null);
-    try std.testing.expect(skin.notes.ln_body[0].solid != null);
+    const mine = skin.notes.mine[0].solid.?;
+    try std.testing.expectEqual(gfx.danger.r, mine[0]);
+    // A missing body takes the built-in screen's lane colour, scratch red included.
+    const body = skin.notes.ln_body[0].solid.?;
+    try std.testing.expectEqual(play.noteColor(.beat7, 0).b, body[2]);
+    try std.testing.expectEqual(play.noteColor(.beat7, 7).r, skin.notes.ln_body[7].solid.?[0]);
+
+    var wide: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
+    defer wide.arena.deinit();
+    _ = try load(&wide, std.testing.io, path, .beat7, .{}, 2);
+    try std.testing.expectEqual(@as(f32, 960), wide.w);
+    try std.testing.expectEqual(@as(f32, 100), wide.notes.lane[7].?[0]);
 }
 
 test "an ini for other modes only is not a mania skin" {

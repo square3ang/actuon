@@ -350,7 +350,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, g: *gfx.Gfx, path: []const u8, m
     skin.path = try a.dupe(u8, path);
     skin.mtime = if (fs.stat(io, path)) |st| st.mtime else 0;
     const paths = if (osuskin.isIni(path))
-        try osuskin.load(skin, io, path, mode, conf)
+        try osuskin.load(skin, io, path, mode, conf, g.w / g.h)
     else if (std.ascii.endsWithIgnoreCase(path, ".lr2skin") or std.ascii.endsWithIgnoreCase(path, ".csv"))
         try lr2.load(skin, io, path, mode, resolver, conf)
     else if (std.ascii.endsWithIgnoreCase(path, ".json"))
@@ -385,7 +385,9 @@ pub fn destroy(gpa: std.mem.Allocator, s: *Skin) void {
     gpa.destroy(s);
 }
 
-pub fn changed(s: *const Skin, io: std.Io) bool {
+pub fn changed(s: *const Skin, io: std.Io, aspect: f32) bool {
+    // An osu! skin is laid out for one window shape.
+    if (osuskin.isIni(s.path) and @abs(s.w / s.h - aspect) > 0.01) return true;
     const st = fs.stat(io, s.path) orelse return false;
     return st.mtime != s.mtime;
 }
@@ -520,4 +522,13 @@ test "the built-in skin offers the scratch side for single play only" {
     try std.testing.expectEqual(@as(usize, 1), (try options(a, std.testing.io, "", playType(.beat5))).len);
     try std.testing.expectEqual(@as(usize, 0), (try options(a, std.testing.io, "", playType(.beat14))).len);
     try std.testing.expectEqual(@as(usize, 0), (try options(a, std.testing.io, "", type_select)).len);
+}
+
+test "an osu! skin reloads when the window changes shape" {
+    var s: Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator), .path = "missing/skin.ini", .w = 640, .h = 480 };
+    defer s.arena.deinit();
+    try std.testing.expect(!changed(&s, std.testing.io, 4.0 / 3.0));
+    try std.testing.expect(changed(&s, std.testing.io, 16.0 / 9.0));
+    s.path = "missing/skin.json";
+    try std.testing.expect(!changed(&s, std.testing.io, 16.0 / 9.0));
 }
