@@ -578,8 +578,7 @@ fn raise(a: std.mem.Allocator, best: *std.StringHashMapUnmanaged(Best), sha: []c
 
 const Pending = struct { id: i64, sha: []const u8, path: []const u8 };
 
-/// Best first, so one upload covers its chart. Without `send_failed`, failed plays stay home as the result screen keeps them.
-/// shortcut: a quit play is stored as failed too, so it goes out when failed ones do; mark quits in the replay table if that matters.
+/// Best first, so one upload covers its chart. Without `send_failed`, failed plays stay home as the result screen keeps them; quits always do.
 fn pendingReplays(a: std.mem.Allocator, d: db_mod.Db, mine: []const MyScore, send_failed: bool) ![]Pending {
     var best: std.StringHashMapUnmanaged(Best) = .empty;
     // A claim does not count: a replay that only matches it still turns it into a verified score.
@@ -588,7 +587,7 @@ fn pendingReplays(a: std.mem.Allocator, d: db_mod.Db, mine: []const MyScore, sen
     }
     const st = try d.prepare(
         \\SELECT r.id,r.sha256,r.ex,r.clear,COALESCE((SELECT path FROM song s WHERE s.sha256=r.sha256 LIMIT 1),''),r.max_combo,r.miss
-        \\FROM replay r WHERE r.ln_mode=0 AND (?1 OR r.clear!=1) ORDER BY r.sha256, r.ex DESC, r.clear DESC
+        \\FROM replay r WHERE r.ln_mode=0 AND r.quit=0 AND (?1 OR r.clear!=1) ORDER BY r.sha256, r.ex DESC, r.clear DESC
     );
     defer st.deinit();
     st.bindInt(1, @intFromBool(send_failed));
@@ -1036,6 +1035,19 @@ test "a claim does not stop a replay from being sent" {
     try d.exec("INSERT INTO replay(sha256,ex,clear) VALUES('x',50,1)");
     const mine = [_]MyScore{.{ .sha256 = "x", .ex = 90, .clear = 4, .miss = 0, .max_combo = 0, .date = 0, .verified = false }};
     try std.testing.expectEqual(@as(usize, 1), (try pendingReplays(arena.allocator(), d, &mine, true)).len);
+}
+
+test "a quit play never goes up, even with failed plays on" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const d = try db_mod.Db.open(":memory:", a, false);
+    defer d.close();
+    try db_mod.initSchema(d);
+    try d.exec("INSERT INTO replay(id,sha256,ex,clear,quit) VALUES(1,'x',90,1,1),(2,'x',50,1,0)");
+    const p = try pendingReplays(arena.allocator(), d, &.{}, true);
+    try std.testing.expectEqual(@as(usize, 1), p.len);
+    try std.testing.expectEqual(@as(i64, 2), p[0].id);
 }
 
 test "downloaded scores keep local bests and play counts, and repeat safely" {

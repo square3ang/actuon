@@ -88,7 +88,7 @@ pub fn dropBoard(a: *App) void {
 }
 
 /// A score and its replay land together, or the IR would be asked to verify a score with nothing behind it.
-fn saveLocal(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, bytes: ?[]const u8) !void {
+fn saveLocal(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, bytes: ?[]const u8, natural: bool) !void {
     const r = &a.res;
     const ln_mode = @backingInt(s.params.rec.ln_mode);
     try a.db.exec("BEGIN IMMEDIATE");
@@ -123,7 +123,7 @@ fn saveLocal(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, bytes
     if (bytes == null) score = .{ .sha256 = &s.chart.sha256, .mode = mode, .clear = 0, .assist = @backingInt(r.clear), .ex = 0, .counts = @splat(0), .max_combo = 0, .miss = std.math.maxInt(i32), .cleared = @intFromBool(cleared), .date = date };
     try db_mod.recordScore(a.db, score);
     if (bytes) |data| {
-        const ins = try a.db.prepare("INSERT INTO replay(sha256,date,ex,clear,data,ln_mode,max_combo,miss) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)");
+        const ins = try a.db.prepare("INSERT INTO replay(sha256,date,ex,clear,data,ln_mode,max_combo,miss,quit) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)");
         defer ins.deinit();
         ins.bindText(1, &s.chart.sha256);
         ins.bindInt(2, date);
@@ -133,6 +133,7 @@ fn saveLocal(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, bytes
         ins.bindInt(6, ln_mode);
         ins.bindInt(7, score.max_combo);
         ins.bindInt(8, score.miss);
+        ins.bindInt(9, @intFromBool(!natural));
         _ = try ins.step();
         try db_mod.pruneReplays(a.db, &s.chart.sha256, ln_mode);
     }
@@ -179,7 +180,7 @@ pub fn capture(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, nat
         return;
     };
     defer if (bytes) |b| s.gpa.free(b);
-    saveLocal(a, s, snap, bytes) catch |e| {
+    saveLocal(a, s, snap, bytes, natural) catch |e| {
         std.log.err("score save failed: {t}", .{e});
         a.db.exec("ROLLBACK") catch {};
         r.recorded = false;

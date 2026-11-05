@@ -165,7 +165,7 @@ pub const schema =
     \\CREATE TABLE IF NOT EXISTS score_import(sha256 TEXT NOT NULL, mode INTEGER NOT NULL, source TEXT NOT NULL,
     \\  playcount INTEGER DEFAULT 0, clearcount INTEGER DEFAULT 0, PRIMARY KEY(sha256, mode, source));
     \\CREATE TABLE IF NOT EXISTS replay(id INTEGER PRIMARY KEY, sha256 TEXT, date INTEGER, ex INTEGER, clear INTEGER, data BLOB, ln_mode INTEGER NOT NULL DEFAULT 0,
-    \\  max_combo INTEGER NOT NULL DEFAULT 0, miss INTEGER NOT NULL DEFAULT 2147483647);
+    \\  max_combo INTEGER NOT NULL DEFAULT 0, miss INTEGER NOT NULL DEFAULT 2147483647, quit INTEGER NOT NULL DEFAULT 0);
     \\CREATE INDEX IF NOT EXISTS replay_sha ON replay(sha256);
     \\CREATE TABLE IF NOT EXISTS dir(path TEXT PRIMARY KEY, mtime INTEGER);
     \\CREATE TABLE IF NOT EXISTS unparsed(path TEXT PRIMARY KEY, mtime INTEGER, size INTEGER);
@@ -219,6 +219,8 @@ pub fn initSchema(d: Db) !void {
     // Older replays get the "no play" combo and BP, so IR sync never sends one for an improvement it cannot know.
     if (!try hasColumn(d, "replay", "max_combo")) try d.exec("ALTER TABLE replay ADD COLUMN max_combo INTEGER NOT NULL DEFAULT 0");
     if (!try hasColumn(d, "replay", "miss")) try d.exec("ALTER TABLE replay ADD COLUMN miss INTEGER NOT NULL DEFAULT 2147483647");
+    // Older quits cannot be told from fails, so they stay as before.
+    if (!try hasColumn(d, "replay", "quit")) try d.exec("ALTER TABLE replay ADD COLUMN quit INTEGER NOT NULL DEFAULT 0");
     try labelReplayModes(d);
     // An old row names only its last import, which takes the whole count; any earlier source adds its counts once more on its next import, as the old DB never kept them.
     if (try hasColumn(d, "score", "source")) {
