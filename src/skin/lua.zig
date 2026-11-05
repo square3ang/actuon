@@ -78,7 +78,7 @@ fn msNumber(l: ?*c.lua_State) callconv(.c) c_int {
         c.lua_pushinteger(l, 0);
         return 1;
     };
-    c.lua_pushinteger(l, cx.num(cx.ud, checkId(l)) orelse 0);
+    c.lua_pushinteger(l, cx.st.num(checkId(l)) orelse 0);
     return 1;
 }
 
@@ -87,7 +87,7 @@ fn msFloat(l: ?*c.lua_State) callconv(.c) c_int {
         c.lua_pushnumber(l, 0);
         return 1;
     };
-    c.lua_pushnumber(l, cx.float(cx.ud, checkId(l)));
+    c.lua_pushnumber(l, cx.st.float(checkId(l)));
     return 1;
 }
 
@@ -96,7 +96,7 @@ fn msOption(l: ?*c.lua_State) callconv(.c) c_int {
         c.lua_pushboolean(l, 0);
         return 1;
     };
-    c.lua_pushboolean(l, @intFromBool(cx.opt(cx.ud, checkId(l))));
+    c.lua_pushboolean(l, @intFromBool(cx.st.opt(checkId(l))));
     return 1;
 }
 
@@ -105,7 +105,7 @@ fn msText(l: ?*c.lua_State) callconv(.c) c_int {
         _ = c.lua_pushstring(l, "");
         return 1;
     };
-    const s = cx.str(cx.ud, checkId(l));
+    const s = cx.st.str(checkId(l));
     _ = c.lua_pushlstring(l, s.ptr, s.len);
     return 1;
 }
@@ -119,8 +119,8 @@ fn msTimer(l: ?*c.lua_State) callconv(.c) c_int {
         return 1;
     };
     const id = c.luaL_checkinteger(l, 1);
-    const on = id >= 0 and id < cx.timers.len and cx.timers[@intCast(id)] >= 0;
-    c.lua_pushinteger(l, if (on) cx.timers[@intCast(id)] * 1000 else timer_off);
+    const on = id >= 0 and id < cx.st.timers.len and cx.st.timers[@intCast(id)] >= 0;
+    c.lua_pushinteger(l, if (on) cx.st.timers[@intCast(id)] * 1000 else timer_off);
     return 1;
 }
 
@@ -135,29 +135,29 @@ fn msOffValue(l: ?*c.lua_State) callconv(.c) c_int {
 }
 
 fn msGaugeType(l: ?*c.lua_State) callconv(.c) c_int {
-    c.lua_pushinteger(l, if (hostOf(l).env.ctx) |cx| cx.num(cx.ud, m.gauge_type) orelse 0 else 0);
+    c.lua_pushinteger(l, if (hostOf(l).env.ctx) |cx| cx.st.num(m.gauge_type) orelse 0 else 0);
     return 1;
 }
 
 fn msGauge(l: ?*c.lua_State) callconv(.c) c_int {
-    c.lua_pushnumber(l, if (hostOf(l).env.ctx) |cx| cx.float(cx.ud, m.gauge_value) * 100 else 0);
+    c.lua_pushnumber(l, if (hostOf(l).env.ctx) |cx| cx.st.float(m.gauge_value) * 100 else 0);
     return 1;
 }
 
 fn msExScore(l: ?*c.lua_State) callconv(.c) c_int {
-    c.lua_pushinteger(l, if (hostOf(l).env.ctx) |cx| cx.num(cx.ud, 71) orelse 0 else 0);
+    c.lua_pushinteger(l, if (hostOf(l).env.ctx) |cx| cx.st.num(71) orelse 0 else 0);
     return 1;
 }
 
 fn msRate(l: ?*c.lua_State) callconv(.c) c_int {
-    c.lua_pushnumber(l, if (hostOf(l).env.ctx) |cx| cx.float(cx.ud, 110) else 0);
+    c.lua_pushnumber(l, if (hostOf(l).env.ctx) |cx| cx.st.float(110) else 0);
     return 1;
 }
 
 /// Judge i counts from PG = 0.
 fn msJudge(l: ?*c.lua_State) callconv(.c) c_int {
     const i = checkId(l);
-    c.lua_pushinteger(l, if (hostOf(l).env.ctx) |cx| cx.num(cx.ud, if (i == 5) 420 else 110 +| i) orelse 0 else 0);
+    c.lua_pushinteger(l, if (hostOf(l).env.ctx) |cx| cx.st.num(if (i == 5) 420 else 110 +| i) orelse 0 else 0);
     return 1;
 }
 

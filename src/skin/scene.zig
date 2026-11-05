@@ -97,6 +97,7 @@ fn optionButton(cfg: *const config.Config, button: i64) ?i64 {
 
 pub const State = struct {
     select: ?SelectInfo = null,
+    /// Start time per timer id in scene ms, -1 when off.
     timers: [2048]i64 = @splat(-1),
     snap: Snapshot = .{},
     title: []const u8 = "",
@@ -295,12 +296,7 @@ pub const State = struct {
         return @divTrunc(us - st.start_us, 1000);
     }
 
-    fn fromUd(ud: *anyopaque) *State {
-        return @ptrCast(@alignCast(ud));
-    }
-
-    fn opt(ud: *anyopaque, id: i32) bool {
-        const st = fromUd(ud);
+    pub fn opt(st: *State, id: i32) bool {
         const sn = &st.snap;
         const sc = &sn.score;
         const rate = st.scoreRate();
@@ -429,8 +425,7 @@ pub const State = struct {
         return &v.players[@intCast(id - base)];
     }
 
-    fn num(ud: *anyopaque, id: i32) ?i64 {
-        const st = fromUd(ud);
+    pub fn num(st: *State, id: i32) ?i64 {
         if (st.versusPlayer(id, m.versus_ex)) |p| return p.final_ex orelse p.ex;
         if (st.versusPlayer(id, m.versus_judged)) |p| return p.judged;
         const sn = &st.snap;
@@ -525,8 +520,7 @@ pub const State = struct {
         };
     }
 
-    fn float(ud: *anyopaque, id: i32) f32 {
-        const st = fromUd(ud);
+    pub fn float(st: *State, id: i32) f32 {
         const sn = &st.snap;
         return switch (id) {
             m.gauge_value => sn.gauge / 100,
@@ -551,15 +545,14 @@ pub const State = struct {
     }
 
     /// True when the slider took the value, so the mouse press is used up.
-    fn setFloat(ud: *anyopaque, id: i32, value: f32) bool {
-        const b = fromUd(ud).ir_board orelse return false;
+    pub fn setFloat(st: *State, id: i32, value: f32) bool {
+        const b = st.ir_board orelse return false;
         if (id != 8) return false;
         b.setPosition(value);
         return true;
     }
 
-    fn str(ud: *anyopaque, id: i32) []const u8 {
-        const st = fromUd(ud);
+    pub fn str(st: *State, id: i32) []const u8 {
         if (st.versusPlayer(id, m.versus_name)) |p| return p.name();
         if (st.select) |se| switch (id) {
             30 => return se.search,
@@ -584,7 +577,7 @@ pub const State = struct {
 
     /// For a skin's script as it loads: it may pick colors and parts from the song.
     pub fn loadCtx(st: *State) m.Ctx {
-        return .{ .ud = st, .now_ms = 0, .timers = &st.timers, .opt = opt, .num = num, .float = float, .str = str, .lua_call_bool = null, .lua_call_num = null };
+        return .{ .st = st, .now_ms = 0 };
     }
 
     pub fn ctx(st: *State, skin: *const m.Skin, now_ms: i64) m.Ctx {
@@ -597,14 +590,8 @@ pub const State = struct {
         return .{
             .lift_px = lane_h * st.lift,
             .hidden_px = lane_h * st.hidden,
-            .ud = st,
+            .st = st,
             .now_ms = now_ms,
-            .timers = &st.timers,
-            .opt = opt,
-            .num = num,
-            .float = float,
-            .str = str,
-            .set_float = setFloat,
             .lua_call_bool = if (skin.lua != null) skin_mod.lua_call_bool else null,
             .lua_call_num = if (skin.lua != null) skin_mod.lua_call_num else null,
             .lua_call_str = if (skin.lua != null) skin_mod.lua_call_str else null,
@@ -1050,6 +1037,5 @@ test "the skin's pace counts notes passed, not empty presses" {
     var st: State = .{ .total_notes = 100, .target_ex = 200 };
     st.snap.score.passed = 10;
     st.snap.score.counts[5] = .{ 50, 0 };
-    const ctx = st.loadCtx();
-    try std.testing.expectEqual(@as(?i64, -20), ctx.num(ctx.ud, 153));
+    try std.testing.expectEqual(@as(?i64, -20), st.num(153));
 }

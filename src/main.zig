@@ -47,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (args.len == 3 and std.mem.eql(u8, args[1], "fetch-chart")) {
         const al = init.arena.allocator();
-        const cfg = config.load(al, io);
+        const cfg = config.load(al, io).cfg;
         if (cfg.roots.len == 0) return error.NoLibraryFolder;
         const url = try download.expand(al, cfg.download_url, args[2]);
         const j = download.start(gpa, io, url, url, cfg.roots[0], args[2]) orelse return error.BadHash;
@@ -101,7 +101,7 @@ pub fn main(init: std.process.Init) !void {
             opts.start_us = 1000 * try std.fmt.parseInt(i64, next(args, &i) orelse return error.MissingValue, 10);
         } else if (std.mem.startsWith(u8, a, "-")) {
             std.debug.print("{s}", .{usage});
-            return;
+            return error.UnknownFlag;
         } else opts.play_path = a;
     }
     try app.main(gpa, io, opts);
@@ -113,6 +113,13 @@ fn readEnvironNow(io: std.Io) void {
     std.debug.unlockStderr();
     _ = io.lockStderr(&.{}, null) catch return;
     io.unlockStderr();
+}
+
+fn printOut(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var buf: [1024]u8 = undefined;
+    var w = std.Io.File.stdout().writer(io, &buf);
+    try w.interface.print(fmt, args);
+    try w.interface.flush();
 }
 
 fn irAccount(gpa: std.mem.Allocator, io: std.Io, cmd: []const u8, url: []const u8, name: []const u8) !void {
@@ -135,11 +142,12 @@ fn irAccount(gpa: std.mem.Allocator, io: std.Io, cmd: []const u8, url: []const u
         std.debug.print("server said {d}: {s}\n", .{ r.status, r.body });
         return error.Refused;
     };
-    var cfg = config.load(a, io);
-    cfg.ir_url = url;
-    cfg.ir_token = token;
-    try config.save(gpa, io, cfg);
-    std.debug.print("logged in as {s}; token saved\n", .{name});
+    var loaded = config.load(a, io);
+    loaded.cfg.ir_url = url;
+    loaded.cfg.ir_token = token;
+    try config.save(gpa, io, loaded.file, loaded.cfg);
+    // The token is saved, so a closed stdout must not make a script think the login failed.
+    printOut(io, "logged in as {s}; token saved\n", .{name}) catch {};
 }
 
 fn irRival(gpa: std.mem.Allocator, io: std.Io, name: []const u8) !void {
@@ -148,10 +156,14 @@ fn irRival(gpa: std.mem.Allocator, io: std.Io, name: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const cfg = config.load(a, io);
+    const cfg = config.load(a, io).cfg;
     const auth = try std.fmt.allocPrint(a, "Bearer {s}", .{cfg.ir_token});
     const r = try http.request(a, io, .PUT, try std.fmt.allocPrint(a, "{s}/rivals/{f}", .{ cfg.ir_url, std.fmt.alt(std.Uri.Component{ .raw = name }, .formatEscaped) }), "", &.{.{ .name = "Authorization", .value = auth }});
-    std.debug.print("{d}: {s}\n", .{ r.status, r.body });
+    if (r.status / 100 != 2) {
+        std.debug.print("server said {d}: {s}\n", .{ r.status, r.body });
+        return error.Refused;
+    }
+    try printOut(io, "{d}: {s}\n", .{ r.status, r.body });
 }
 
 fn fetchTable(gpa: std.mem.Allocator, io: std.Io, url: []const u8) !void {
@@ -160,7 +172,7 @@ fn fetchTable(gpa: std.mem.Allocator, io: std.Io, url: []const u8) !void {
     const d = try db.openMain(gpa);
     defer d.close();
     const r = try table.fetch(gpa, io, d, url);
-    std.debug.print("{d} songs, {d} courses\n", .{ r.songs, r.courses });
+    try printOut(io, "{d} songs, {d} courses\n", .{ r.songs, r.courses });
 }
 
 test {

@@ -35,6 +35,7 @@ pub fn open() !*App {
         .io = std.testing.io,
         .arena = arena,
         .cfg = .{ .tables = &.{} },
+        .cfg_file = .read,
         .g = undefined,
         .engine = try engine_mod.Engine.create(gpa),
         .db = db,

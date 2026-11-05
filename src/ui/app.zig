@@ -77,6 +77,7 @@ pub const App = struct {
     /// Shared with main, so what menus allocate here is freed with what main allocated.
     arena: *std.heap.ArenaAllocator,
     cfg: config.Config,
+    cfg_file: config.File,
     g: gfx.Gfx,
     engine: *engine_mod.Engine,
     sfx_data: [std.enums.values(menu_sound.Sfx).len][]const f32 = @splat(&.{}),
@@ -978,7 +979,7 @@ pub const App = struct {
     }
 
     pub fn saveConfig(a: *App) void {
-        config.save(a.gpa, a.io, a.cfg) catch |e| std.log.err("config save failed: {t}", .{e});
+        config.save(a.gpa, a.io, a.cfg_file, a.cfg) catch |e| std.log.err("config save failed: {t}", .{e});
     }
 
     fn pressShotKey(a: *App) void {
@@ -1179,7 +1180,8 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, opts: Options) !void {
     defer c.SDL_Quit();
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    const cfg = config.load(arena.allocator(), io);
+    const stored = config.load(arena.allocator(), io);
+    const cfg = stored.cfg;
     i18n.current = i18n.resolve(cfg.language);
     const flags: u64 = c.rb_window_flags() | c.SDL_WINDOW_RESIZABLE | c.SDL_WINDOW_HIGH_PIXEL_DENSITY | (if (cfg.fullscreen) @as(u64, c.SDL_WINDOW_FULLSCREEN) else 0);
     const win = c.SDL_CreateWindow("actuon", @intCast(cfg.width), @intCast(cfg.height), flags) orelse return error.SdlWindow;
@@ -1198,6 +1200,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, opts: Options) !void {
         .io = io,
         .arena = &arena,
         .cfg = cfg,
+        .cfg_file = stored.file,
         .g = try gfx.Gfx.init(gpa, win),
         .engine = engine,
         .db = try db_mod.openMain(gpa),
@@ -1250,8 +1253,11 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, opts: Options) !void {
         std.log.warn("no readable keyboard under /dev/input: keys come from the compositor, a frame late", .{});
         app.sel.status = tr("Reading /dev/input needs the input group: run sudo usermod -aG input $USER, then log in again.");
     }
-    if (config.set_aside) app.sel.status = tr("Settings could not be read: moved to config.json.bad");
-    if (config.stuck) app.sel.status = tr("Settings could not be read or moved: changes this run are not saved");
+    switch (app.cfg_file) {
+        .read => {},
+        .set_aside => app.sel.status = tr("Settings could not be read: moved to config.json.bad"),
+        .stuck => app.sel.status = tr("Settings could not be read or moved: changes this run are not saved"),
+    }
     if (crash.takePrevious(arena.allocator(), io)) app.sel.status = tr("The last run crashed: see crash-last.txt in the data folder");
     if (opts.preview) |cmd| if (!cmd.stop) app.startPreview(cmd.file, cmd.measure);
     // Captures stay offline, so every run draws the same version row.
