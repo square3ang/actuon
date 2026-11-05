@@ -30,6 +30,8 @@ pub fn push(ev: Raw) void {
 
 /// Counts pushes, for the futex the sim thread sleeps on.
 var pushes: std.atomic.Value(u32) = .init(0);
+/// SDL ticks when the main loop last began reading SDL events: every SDL input stamped before it is queued.
+pub var sdl_read_ns: std.atomic.Value(u64) = .init(0);
 /// C input callbacks push here and cannot carry an Io, so the queue keeps the one main set.
 pub var io: std.Io = undefined;
 
