@@ -161,7 +161,9 @@ pub const schema =
     \\  sha256 TEXT NOT NULL, mode INTEGER NOT NULL DEFAULT 0, clear INTEGER DEFAULT 0, ex INTEGER DEFAULT 0,
     \\  pg INTEGER DEFAULT 0, gr INTEGER DEFAULT 0, gd INTEGER DEFAULT 0, bd INTEGER DEFAULT 0, pr INTEGER DEFAULT 0, ms INTEGER DEFAULT 0,
     \\  max_combo INTEGER DEFAULT 0, min_bp INTEGER DEFAULT 2147483647, playcount INTEGER DEFAULT 0, clearcount INTEGER DEFAULT 0,
-    \\  date INTEGER DEFAULT 0, source TEXT DEFAULT '', assist INTEGER DEFAULT 0, PRIMARY KEY(sha256, mode));
+    \\  date INTEGER DEFAULT 0, assist INTEGER DEFAULT 0, PRIMARY KEY(sha256, mode));
+    \\CREATE TABLE IF NOT EXISTS score_import(sha256 TEXT NOT NULL, mode INTEGER NOT NULL, source TEXT NOT NULL,
+    \\  playcount INTEGER DEFAULT 0, clearcount INTEGER DEFAULT 0, PRIMARY KEY(sha256, mode, source));
     \\CREATE TABLE IF NOT EXISTS replay(id INTEGER PRIMARY KEY, sha256 TEXT, date INTEGER, ex INTEGER, clear INTEGER, data BLOB, ln_mode INTEGER NOT NULL DEFAULT 0);
     \\CREATE INDEX IF NOT EXISTS replay_sha ON replay(sha256);
     \\CREATE TABLE IF NOT EXISTS dir(path TEXT PRIMARY KEY, mtime INTEGER);
@@ -214,14 +216,19 @@ pub fn initSchema(d: Db) !void {
     try migrateLnModes(d);
     if (!try hasColumn(d, "score", "assist")) try d.exec("ALTER TABLE score ADD COLUMN assist INTEGER DEFAULT 0");
     try labelReplayModes(d);
+    // An old row names only its last import, so that one is credited with the whole count, which re-imports it as before.
+    if (try hasColumn(d, "score", "source")) {
+        try d.exec("INSERT OR IGNORE INTO score_import(sha256,mode,source,playcount,clearcount) SELECT sha256,mode,source,playcount,clearcount FROM score WHERE source<>''");
+    }
     try dropUnusedColumns(d);
 }
 
-/// Rescans refill these chart facts; judge counts and clearcount stay, as no file could give them back.
+/// Rescans refill these chart facts and score_import holds what score.source told; judge counts and clearcount stay, as no file could give them back.
 fn dropUnusedColumns(d: Db) !void {
     const gone = [_][2][]const u8{
         .{ "song", "total" },           .{ "song", "judgerank" },    .{ "song", "has_mine" }, .{ "song", "has_random" },
         .{ "table_song", "name_diff" }, .{ "bms_table", "fetched" }, .{ "favorite", "date" }, .{ "course_score", "date" },
+        .{ "score", "source" },
     };
     var buf: [64]u8 = undefined;
     for (gone) |g| {
@@ -708,11 +715,35 @@ pub fn scoreMode(d: Db, sha256: []const u8, asked: u8, played: u8) !u8 {
     return @intCast(st.int(0));
 }
 
-/// As beatoraja's ScoreData.update. shortcut: a row remembers one source, so alternating two imports adds counts twice, keep counts per source if that is reported.
+/// As beatoraja's ScoreData.update. An import adds only the plays and clears its source gained since it was last imported.
 pub fn recordScore(d: Db, s: ScoreIn) !void {
+    var played: i64 = s.played;
+    var cleared: i64 = s.cleared;
+    if (s.source.len > 0) {
+        const prev = try d.prepare("SELECT playcount,clearcount FROM score_import WHERE sha256=?1 AND mode=?2 AND source=?3");
+        defer prev.deinit();
+        prev.bindText(1, s.sha256);
+        prev.bindInt(2, s.mode);
+        prev.bindText(3, s.source);
+        if (try prev.step()) {
+            played = @max(played - prev.int(0), 0);
+            cleared = @max(cleared - prev.int(1), 0);
+        }
+        const keep = try d.prepare(
+            \\INSERT INTO score_import(sha256,mode,source,playcount,clearcount) VALUES(?1,?2,?3,?4,?5)
+            \\ON CONFLICT(sha256,mode,source) DO UPDATE SET playcount=MAX(playcount,excluded.playcount), clearcount=MAX(clearcount,excluded.clearcount)
+        );
+        defer keep.deinit();
+        keep.bindText(1, s.sha256);
+        keep.bindInt(2, s.mode);
+        keep.bindText(3, s.source);
+        keep.bindInt(4, s.played);
+        keep.bindInt(5, s.cleared);
+        _ = try keep.step();
+    }
     const st = try d.prepare(
-        \\INSERT INTO score(sha256,clear,ex,pg,gr,gd,bd,pr,ms,max_combo,min_bp,playcount,clearcount,date,source,mode,assist)
-        \\VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
+        \\INSERT INTO score(sha256,clear,ex,pg,gr,gd,bd,pr,ms,max_combo,min_bp,playcount,clearcount,date,mode,assist)
+        \\VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
         \\ON CONFLICT(sha256,mode) DO UPDATE SET
         \\ clear=MAX(clear,excluded.clear),
         \\ pg=CASE WHEN excluded.ex>ex THEN excluded.pg ELSE pg END,
@@ -724,9 +755,8 @@ pub fn recordScore(d: Db, s: ScoreIn) !void {
         \\ ex=MAX(ex,excluded.ex),
         \\ max_combo=MAX(max_combo,excluded.max_combo),
         \\ min_bp=MIN(min_bp,excluded.min_bp),
-        \\ playcount=CASE WHEN excluded.source='' OR source<>excluded.source THEN playcount+excluded.playcount ELSE MAX(playcount,excluded.playcount) END,
-        \\ clearcount=CASE WHEN excluded.source='' OR source<>excluded.source THEN clearcount+excluded.clearcount ELSE MAX(clearcount,excluded.clearcount) END,
-        \\ source=CASE WHEN excluded.source='' THEN source ELSE excluded.source END,
+        \\ playcount=playcount+excluded.playcount,
+        \\ clearcount=clearcount+excluded.clearcount,
         \\ date=MAX(date,excluded.date),
         \\ assist=MAX(assist,excluded.assist)
     );
@@ -737,12 +767,11 @@ pub fn recordScore(d: Db, s: ScoreIn) !void {
     for (s.counts, 0..) |v, i| st.bindInt(@intCast(4 + i), v);
     st.bindInt(10, s.max_combo);
     st.bindInt(11, s.miss);
-    st.bindInt(12, s.played);
-    st.bindInt(13, s.cleared);
+    st.bindInt(12, played);
+    st.bindInt(13, cleared);
     st.bindInt(14, s.date);
-    st.bindText(15, s.source);
-    st.bindInt(16, s.mode);
-    st.bindInt(17, s.assist);
+    st.bindInt(15, s.mode);
+    st.bindInt(16, s.assist);
     _ = try st.step();
 }
 
@@ -1036,12 +1065,39 @@ test "importing the same scores twice does not double the play counts, local pla
     local.cleared = 1;
     local.source = "";
     try recordScore(d, local);
-    const st = try d.prepare("SELECT playcount,clearcount,source FROM score");
+    const st = try d.prepare("SELECT playcount,clearcount FROM score");
     defer st.deinit();
     try std.testing.expect(try st.step());
     try std.testing.expectEqual(@as(i64, 6), st.int(0));
     try std.testing.expectEqual(@as(i64, 3), st.int(1));
-    try std.testing.expectEqualStrings("LR2", st.text(2));
+}
+
+test "alternating two imports adds each source's counts once, and only what it gained since" {
+    const d = try Db.open(":memory:", std.testing.allocator, false);
+    defer d.close();
+    // A database from before score_import, whose row last took 5 plays from LR2.
+    try d.exec(
+        \\CREATE TABLE score(sha256 TEXT NOT NULL, mode INTEGER NOT NULL DEFAULT 0, clear INTEGER DEFAULT 0, ex INTEGER DEFAULT 0, pg INTEGER DEFAULT 0, gr INTEGER DEFAULT 0, gd INTEGER DEFAULT 0, bd INTEGER DEFAULT 0, pr INTEGER DEFAULT 0, ms INTEGER DEFAULT 0, max_combo INTEGER DEFAULT 0, min_bp INTEGER DEFAULT 2147483647, playcount INTEGER DEFAULT 0, clearcount INTEGER DEFAULT 0, date INTEGER DEFAULT 0, source TEXT DEFAULT '', PRIMARY KEY(sha256, mode));
+        \\INSERT INTO score(sha256,playcount,clearcount,source) VALUES('a',5,2,'LR2');
+    );
+    try initSchema(d);
+    try std.testing.expect(!try hasColumn(d, "score", "source"));
+    var lr2: ScoreIn = .{ .sha256 = "a", .clear = 1, .ex = 1, .counts = @splat(0), .max_combo = 0, .miss = 0, .played = 5, .cleared = 2, .date = 1, .source = "LR2" };
+    var bo = lr2;
+    bo.played = 3;
+    bo.cleared = 1;
+    bo.source = "beatoraja";
+    try recordScore(d, lr2);
+    try recordScore(d, bo);
+    try recordScore(d, lr2);
+    try recordScore(d, bo);
+    lr2.played = 7;
+    try recordScore(d, lr2);
+    const st = try d.prepare("SELECT playcount,clearcount FROM score");
+    defer st.deinit();
+    try std.testing.expect(try st.step());
+    try std.testing.expectEqual(@as(i64, 10), st.int(0));
+    try std.testing.expectEqual(@as(i64, 3), st.int(1));
 }
 
 test "an old database's replays keep the LN mode written inside them" {

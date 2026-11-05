@@ -531,8 +531,6 @@ fn mergeMine(d: db_mod.Db, scores: []const MyScore) !u32 {
             .miss = s.miss,
             .played = 0,
             .date = s.date,
-            // No source: it brings no counts, and naming one would make the next import look new and add its totals again.
-            .source = "",
         });
         merged += 1;
     }
