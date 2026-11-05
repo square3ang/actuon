@@ -692,7 +692,7 @@ pub const App = struct {
         if (now - a.skin_poll_ms < 1000) return;
         a.skin_poll_ms = now;
         const sk = a.play_skin orelse return;
-        if (skin_mod.changed(sk, a.io)) a.reloadSkins(mode);
+        if (skin_mod.changed(sk, a.io, a.g.w / a.g.h)) a.reloadSkins(mode);
     }
 
     fn tickPlay(a: *App) void {

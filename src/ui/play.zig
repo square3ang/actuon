@@ -494,7 +494,7 @@ fn drawKey(g: *gfx.Gfx, x: f32, y: f32, w: f32, h: f32, col: gfx.Color, held: bo
 const scratch_red: gfx.Color = .{ .r = 235, .g = 48, .b = 62 };
 const scratch_lit: gfx.Color = .{ .r = 255, .g = 112, .b = 118 };
 
-fn noteColor(mode: core.types.Mode, lane: u8) gfx.Color {
+pub fn noteColor(mode: core.types.Mode, lane: u8) gfx.Color {
     const blue: gfx.Color = .{ .r = 72, .g = 156, .b = 255 };
     const white: gfx.Color = .{ .r = 240, .g = 244, .b = 250 };
     if (mode.scratchOf(lane) >= 0) return scratch_red;
