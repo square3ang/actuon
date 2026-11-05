@@ -61,30 +61,90 @@ const Tl = struct {
     scroll: f64 = 1,
     speed: f64 = 1,
     bar: bool = false,
-    slot: [types.max_lanes]Slot = @splat(.none),
+    node: Tree.Node = undefined,
+
+    fn of(node: *Tree.Node) *Tl {
+        return @fieldParentPtr("node", node);
+    }
+
+    fn prev(tl: *Tl) ?*Tl {
+        return of(tl.node.prev() orelse return null);
+    }
 };
+
+const Held = struct {
+    node: Tree.Node = undefined,
+    tl: *Tl,
+    slot: Slot,
+
+    fn of(node: *Tree.Node) *Held {
+        return @fieldParentPtr("node", node);
+    }
+};
+
+const Tree = std.Treap(f64, std.math.order);
+
+fn nodeBelow(tree: *Tree, section: f64) ?*Tree.Node {
+    const entry = tree.getEntryFor(section);
+    if (entry.node) |node| return node.prev();
+    const parent = entry.context.inserted_under orelse return null;
+    return if (parent.key < section) parent else parent.prev();
+}
+
+fn nodeAtOrBelow(tree: *Tree, section: f64) ?*Tree.Node {
+    return tree.getEntryFor(section).node orelse nodeBelow(tree, section);
+}
 
 const Timelines = struct {
     gpa: std.mem.Allocator,
-    items: std.ArrayList(*Tl) = .empty,
-    /// shortcut: a chart past this many ~350 B Tls is refused (real ones stay near 192k), raise it if a real one is.
-    max: usize = 1 << 19,
+    // Lines of one measure may give their points in any order, so points go in a tree, not a shifted list.
+    tree: Tree = .{},
+    len: usize = 0,
+    // Most points hold a note on one lane or none, so each lane keeps a tree of only the points that do.
+    lanes: [types.max_lanes]Tree = @splat(.{}),
+    // Counts every Held made, as the arena keeps the ones a lane let go.
+    helds: usize = 0,
+    /// Real charts stay under 192k points and a note or two on each, about 30 MiB; past this one is hostile.
+    max_bytes: usize = 256 << 20,
 
-    fn lowerBound(self: *const Timelines, section: f64) usize {
-        var lo: usize = 0;
-        var hi: usize = self.items.items.len;
-        while (lo < hi) {
-            const mid = (lo + hi) / 2;
-            if (self.items.items[mid].section < section) lo = mid + 1 else hi = mid;
+    fn bytes(self: *const Timelines) usize {
+        return self.len * @sizeOf(Tl) + self.helds * @sizeOf(Held);
+    }
+
+    fn add(self: *Timelines, tl: *Tl) void {
+        var entry = self.tree.getEntryFor(tl.section);
+        entry.set(&tl.node);
+        self.len += 1;
+    }
+
+    fn slot(self: *Timelines, tl: *Tl, lane: usize) Slot {
+        const node = self.lanes[lane].getEntryFor(tl.section).node orelse return .none;
+        return Held.of(node).slot;
+    }
+
+    fn heldBelow(self: *Timelines, tl: *Tl, lane: usize) ?*Held {
+        return Held.of(nodeBelow(&self.lanes[lane], tl.section) orelse return null);
+    }
+
+    fn setSlot(self: *Timelines, tl: *Tl, lane: usize, s: Slot) !void {
+        var entry = self.lanes[lane].getEntryFor(tl.section);
+        if (entry.node) |node| {
+            if (s == .none) entry.set(null) else Held.of(node).slot = s;
+            return;
         }
-        return lo;
+        if (s == .none) return;
+        if (self.bytes() >= self.max_bytes) return error.TooBig;
+        const held = try self.gpa.create(Held);
+        held.* = .{ .tl = tl, .slot = s };
+        entry.set(&held.node);
+        self.helds += 1;
     }
 
     fn get(self: *Timelines, section: f64) !*Tl {
-        const idx = self.lowerBound(section);
-        if (idx < self.items.items.len and self.items.items[idx].section == section) return self.items.items[idx];
-        if (self.items.items.len >= self.max) return error.TooBig;
-        const lower = self.items.items[idx - 1];
+        if (self.tree.getEntryFor(section).node) |node| return Tl.of(node);
+        if (self.bytes() >= self.max_bytes) return error.TooBig;
+        // The point at section 0 comes first, so a new point always has one below it.
+        const lower = Tl.of(nodeBelow(&self.tree, section).?);
         const stop_part: f64 = @floatFromInt(lower.stop);
         const time = lower.time + stop_part + (240000.0 * 1000.0 * (section - lower.section)) / lower.bpm;
         const tl = try self.gpa.create(Tl);
@@ -96,7 +156,7 @@ const Timelines = struct {
             .scroll = lower.scroll,
             .speed = lower.speed,
         };
-        try self.items.insert(self.gpa, idx, tl);
+        self.add(tl);
         return tl;
     }
 };
@@ -225,14 +285,13 @@ const Decoder = struct {
     hidden: std.ArrayList(struct { tl: *Tl, wav: i32, lane: u8 }) = .empty,
     bga: std.ArrayList(struct { tl: *Tl, id: i32, layer: types.BgaLayer }) = .empty,
 
-    fn text(d: *Decoder, s: []const u8) ![]const u8 {
+    fn text(d: *Decoder, s: []const u8) ![]u8 {
         return encoding.toUtf8(d.a, std.mem.trim(u8, s, " \t\r\n"), d.enc);
     }
 
-    fn path(d: *Decoder, s: []const u8) ![]const u8 {
+    fn path(d: *Decoder, s: []const u8) ![]u8 {
         const out = try d.text(s);
-        const m: []u8 = @constCast(out);
-        std.mem.replaceScalar(u8, m, '\\', '/');
+        std.mem.replaceScalar(u8, out, '\\', '/');
         return out;
     }
 
@@ -554,7 +613,7 @@ fn build(d: *Decoder, maxsec: usize) !void {
     const base_tl = try a.create(Tl);
     base_tl.* = .{ .section = 0, .time = 0, .micro = 0, .bpm = chart.bpm };
     var tls: Timelines = .{ .gpa = a };
-    try tls.items.append(a, base_tl);
+    tls.add(base_tl);
 
     const cassign: *const [18]i8 = switch (d.mode) {
         .popn9 => &assign_popn,
@@ -568,18 +627,14 @@ fn build(d: *Decoder, maxsec: usize) !void {
     for (sections, 0..) |*s, i| {
         try tempoEvents(d, &tls, s, d.bars[i].items);
         (try tls.get(s.sectionnum)).bar = true;
-        state.dropEnded(s.sectionnum);
         for (d.bars[i].items) |line| try channelLine(d, &tls, s, line, cassign, &state);
     }
 
-    if (base_tl.bpm == 0 or tls.items.items[0].bpm == 0) return error.NoBpm;
+    if (base_tl.bpm == 0) return error.NoBpm;
 
     // An LN that never ends disappears, as in jbms-parser.
     for (state.start, 0..) |maybe, lane| {
-        if (maybe) |ln| if (!ln.orphan) {
-            const tl = try tls.get(ln.section);
-            tl.slot[lane] = .none;
-        };
+        if (maybe) |ln| if (!ln.orphan) try tls.setSlot(try tls.get(ln.section), lane, .none);
     }
     try flatten(d, &tls);
 }
@@ -684,26 +739,44 @@ fn tempoEvents(d: *Decoder, tls: *Timelines, s: *Section, lines: []const []const
 
 const LaneState = struct {
     start: [types.max_lanes]?*Ln = @splat(null),
-    lnlist: [types.max_lanes]std.ArrayList(*Ln) = @splat(.empty),
+    // Only whether some LN covers a point matters, so overlapping LNs merge into disjoint spans keyed by their start.
+    covered: [types.max_lanes]Tree = @splat(.{}),
 
-    /// shortcut: lookups stay a scan of at most this many, move to an interval tree if a real chart needs more.
-    const max_live = 1024;
+    const Span = struct {
+        node: Tree.Node = undefined,
+        to: f64,
+
+        fn of(node: *Tree.Node) *Span {
+            return @fieldParentPtr("node", node);
+        }
+    };
 
     fn addLn(st: *LaneState, a: std.mem.Allocator, key: usize, ln: *Ln) !void {
-        if (st.lnlist[key].items.len >= max_live) return error.TooBig;
-        try st.lnlist[key].append(a, ln);
+        var from = ln.section;
+        var to = ln.pair.?.section;
+        // An end placed before its start covers nothing.
+        if (to < from) return;
+        const tree = &st.covered[key];
+        var next = nodeAtOrBelow(tree, from) orelse tree.getMin();
+        while (next) |node| {
+            if (node.key > to) break;
+            next = node.next();
+            const span = Span.of(node);
+            if (span.to < from) continue;
+            from = @min(from, node.key);
+            to = @max(to, span.to);
+            var gone = tree.getEntryForExisting(node);
+            gone.set(null);
+        }
+        const span = try a.create(Span);
+        span.* = .{ .to = to };
+        var entry = tree.getEntryFor(from);
+        entry.set(&span.node);
     }
 
-    /// Measures only move forward, so an LN that ended before this one can hold none of its notes.
-    fn dropEnded(st: *LaneState, section: f64) void {
-        for (&st.lnlist) |*list| {
-            var kept: usize = 0;
-            for (list.items) |ln| if (ln.pair.?.section >= section) {
-                list.items[kept] = ln;
-                kept += 1;
-            };
-            list.shrinkRetainingCapacity(kept);
-        }
+    fn inside(st: *LaneState, key: usize, section: f64) bool {
+        const node = nodeAtOrBelow(&st.covered[key], section) orelse return false;
+        return section <= Span.of(node).to;
     }
 };
 
@@ -713,13 +786,6 @@ fn setPair(a: *Ln, b: *Ln) void {
     a.end = false;
     b.end = true;
     b.ln_type = a.ln_type;
-}
-
-fn insideLn(st: *const LaneState, key: usize, section: f64) bool {
-    for (st.lnlist[key].items) |ln| {
-        if (ln.section <= section and section <= ln.pair.?.section) return true;
-    }
-    return false;
 }
 
 fn channelLine(d: *Decoder, tls: *Timelines, s: *const Section, line: []const u8, cassign: *const [18]i8, st: *LaneState) !void {
@@ -790,36 +856,32 @@ fn channelLine(d: *Decoder, tls: *Timelines, s: *const Section, line: []const u8
                 const tl = try c.tls.get(c.s.sectionnum + c.s.rate * pos);
                 const k = c.lane;
                 if (v == c.d.lnobj) {
-                    var i = c.tls.lowerBound(tl.section);
-                    while (i > 0) {
-                        i -= 1;
-                        const tl2 = c.tls.items.items[i];
-                        if (tl2.slot[k] == .none) continue;
-                        switch (tl2.slot[k]) {
+                    if (c.tls.heldBelow(tl, k)) |held| {
+                        const tl2 = held.tl;
+                        switch (held.slot) {
                             .normal => |wav| {
                                 const ln = try c.a.create(Ln);
                                 ln.* = .{ .wav = wav, .section = tl2.section, .ln_type = c.d.lnmode };
-                                tl2.slot[k] = .{ .long = ln };
+                                try c.tls.setSlot(tl2, k, .{ .long = ln });
                                 const end = try c.a.create(Ln);
                                 end.* = .{ .wav = -2, .section = tl.section };
-                                tl.slot[k] = .{ .long = end };
+                                try c.tls.setSlot(tl, k, .{ .long = end });
                                 setPair(ln, end);
                                 try c.st.addLn(c.a, k, ln);
                             },
                             .long => |note| if (note.pair == null) {
                                 const end = try c.a.create(Ln);
                                 end.* = .{ .wav = -2, .section = tl.section };
-                                tl.slot[k] = .{ .long = end };
+                                try c.tls.setSlot(tl, k, .{ .long = end });
                                 setPair(note, end);
                                 try c.st.addLn(c.a, k, note);
                                 c.st.start[k] = null;
                             },
                             else => {},
                         }
-                        break;
                     }
                 } else {
-                    tl.slot[k] = .{ .normal = c.d.wm[@intCast(v)] };
+                    try c.tls.setSlot(tl, k, .{ .normal = c.d.wm[@intCast(v)] });
                 }
             }
         }.f),
@@ -827,41 +889,37 @@ fn channelLine(d: *Decoder, tls: *Timelines, s: *const Section, line: []const u8
             fn f(c: Ctx, pos: f64, v: i32) !void {
                 const tl = try c.tls.get(c.s.sectionnum + c.s.rate * pos);
                 const k = c.lane;
-                const inside = insideLn(c.st, k, tl.section);
                 const wav = c.d.wm[@intCast(v)];
-                if (!inside) {
+                if (!c.st.inside(k, tl.section)) {
                     if (c.st.start[k] == null) {
-                        if (tl.slot[k] == .normal and tl.slot[k].normal != wav) {
-                            try c.d.bg.append(c.a, .{ .tl = tl, .wav = tl.slot[k].normal });
+                        const held = c.tls.slot(tl, k);
+                        if (held == .normal and held.normal != wav) {
+                            try c.d.bg.append(c.a, .{ .tl = tl, .wav = held.normal });
                         }
                         const ln = try c.a.create(Ln);
                         ln.* = .{ .wav = wav, .section = tl.section };
-                        tl.slot[k] = .{ .long = ln };
+                        try c.tls.setSlot(tl, k, .{ .long = ln });
                         c.st.start[k] = ln;
                     } else if (c.st.start[k].?.orphan) {
                         c.st.start[k] = null;
                     } else {
                         const start = c.st.start[k].?;
-                        var i = c.tls.lowerBound(tl.section);
-                        while (i > 0) {
-                            i -= 1;
-                            const tl2 = c.tls.items.items[i];
+                        var below = tl.prev();
+                        while (below) |tl2| : (below = tl2.prev()) {
                             if (!(tl2.section > start.section)) break;
-                            switch (tl2.slot[k]) {
+                            switch (c.tls.slot(tl2, k)) {
                                 .none => {},
                                 .normal => |w| {
                                     try c.d.bg.append(c.a, .{ .tl = tl2, .wav = w });
-                                    tl2.slot[k] = .none;
+                                    try c.tls.setSlot(tl2, k, .none);
                                 },
-                                else => {
-                                    tl2.slot[k] = .none;
-                                },
+                                else => try c.tls.setSlot(tl2, k, .none),
                             }
                         }
                         start.ln_type = c.d.lnmode;
                         const end = try c.a.create(Ln);
                         end.* = .{ .wav = if (start.wav != wav) wav else -2, .section = tl.section };
-                        tl.slot[k] = .{ .long = end };
+                        try c.tls.setSlot(tl, k, .{ .long = end });
                         setPair(start, end);
                         try c.st.addLn(c.a, k, start);
                         c.st.start[k] = null;
@@ -872,10 +930,7 @@ fn channelLine(d: *Decoder, tls: *Timelines, s: *const Section, line: []const u8
                     c.st.start[k] = ln;
                 } else {
                     const start = c.st.start[k].?;
-                    if (!start.orphan) {
-                        const stl = try c.tls.get(start.section);
-                        stl.slot[k] = .none;
-                    }
+                    if (!start.orphan) try c.tls.setSlot(try c.tls.get(start.section), k, .none);
                     c.st.start[k] = null;
                 }
             }
@@ -884,9 +939,9 @@ fn channelLine(d: *Decoder, tls: *Timelines, s: *const Section, line: []const u8
             fn f(c: Ctx, pos: f64, v0: i32) !void {
                 const tl = try c.tls.get(c.s.sectionnum + c.s.rate * pos);
                 const k = c.lane;
-                if (tl.slot[k] != .none or insideLn(c.st, k, tl.section)) return;
+                if (c.tls.slot(tl, k) != .none or c.st.inside(k, tl.section)) return;
                 const v = if (c.d.base == 62) rebase36(v0) else v0;
-                tl.slot[k] = .{ .mine = .{ .wav = c.d.wm[0], .damage = @floatFromInt(v) } };
+                try c.tls.setSlot(tl, k, .{ .mine = .{ .wav = c.d.wm[0], .damage = @floatFromInt(v) } });
             }
         }.f),
         .none => {},
@@ -896,9 +951,7 @@ fn channelLine(d: *Decoder, tls: *Timelines, s: *const Section, line: []const u8
 fn flatten(d: *Decoder, tls: *Timelines) !void {
     const a = d.a;
     const chart = d.chart;
-    const items = tls.items.items;
-
-    const timelines = try a.alloc(types.Timeline, items.len);
+    const timelines = try a.alloc(types.Timeline, tls.len);
     var y: f64 = 0;
     var total: u32 = 0;
     var notes: std.ArrayList(Note) = .empty;
@@ -906,14 +959,23 @@ fn flatten(d: *Decoder, tls: *Timelines) !void {
     var max_bpm = chart.bpm;
     const keys = chart.mode.keys();
 
-    for (items, 0..) |tl, i| {
-        if (i > 0) y += (tl.section - items[i - 1].section) * items[i - 1].scroll;
-        timelines[i] = .{ .time_us = tl.micro, .y = y, .section = tl.section, .bpm = tl.bpm, .stop_us = tl.stop, .scroll = tl.scroll, .speed = tl.speed, .bar = tl.bar };
+    var it = tls.tree.inorderIterator();
+    var below: ?*Tl = null;
+    var next_held: [types.max_lanes]?*Tree.Node = undefined;
+    for (&next_held, tls.lanes) |*n, lane| n.* = lane.getMin();
+    for (timelines) |*out| {
+        const tl = Tl.of(it.next().?);
+        if (below) |b| y += (tl.section - b.section) * b.scroll;
+        below = tl;
+        out.* = .{ .time_us = tl.micro, .y = y, .section = tl.section, .bpm = tl.bpm, .stop_us = tl.stop, .scroll = tl.scroll, .speed = tl.speed, .bar = tl.bar };
         min_bpm = @min(min_bpm, tl.bpm);
         max_bpm = @max(max_bpm, tl.bpm);
-        for (0..keys) |lane_usize| {
+        for (next_held[0..keys], 0..) |*node, lane_usize| {
+            const held = Held.of(node.* orelse continue);
+            if (held.tl != tl) continue;
+            node.* = node.*.?.next();
             const lane: u8 = @intCast(lane_usize);
-            switch (tl.slot[lane]) {
+            switch (held.slot) {
                 .none => {},
                 .normal => |wav| {
                     try notes.append(a, .{ .time_us = tl.micro, .y = y, .wav = wav, .lane = lane, .kind = .normal });
@@ -1037,21 +1099,40 @@ test "nested random with fixed selection" {
     try std.testing.expectError(error.BadRandom, parse(std.testing.allocator, src, .{ .selected_random = &.{0} }));
 }
 
-test "LNs that ended stop counting toward a lane's live limit, and one measure past it is refused" {
+test "overlapping and touching LNs cover their union and nothing past it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var st: LaneState = .{};
+    for ([_][2]f64{ .{ 2, 3 }, .{ 6, 7 }, .{ 0, 1 }, .{ 0.5, 2.5 }, .{ 3, 4 }, .{ 9, 8 } }) |span| {
+        const start = try a.create(Ln);
+        const end = try a.create(Ln);
+        start.* = .{ .wav = 1, .section = span[0] };
+        end.* = .{ .wav = -2, .section = span[1] };
+        setPair(start, end);
+        try st.addLn(a, 0, start);
+    }
+    for ([_]f64{ 0, 1.5, 3, 4, 6.5 }) |in| try std.testing.expect(st.inside(0, in));
+    for ([_]f64{ -1, 4.5, 5, 7.5, 8.5 }) |out| try std.testing.expect(!st.inside(0, out));
+    try std.testing.expect(!st.inside(1, 1));
+}
+
+test "a measure crowded with LNs parses, and notes inside any LN are dropped" {
     const gpa = std.testing.allocator;
     var src: std.ArrayList(u8) = .empty;
     defer src.deinit(gpa);
     try src.appendSlice(gpa, "#BPM 120\n#WAV01 a.wav\n#00151:");
-    for (0..600) |_| try src.appendSlice(gpa, "0101");
-    try src.appendSlice(gpa, "\n#00251:");
-    for (0..600) |_| try src.appendSlice(gpa, "0101");
+    for (0..5000) |_| try src.appendSlice(gpa, "010100");
     try src.appendSlice(gpa, "\n");
     var c = try parse(gpa, src.items, .{});
     defer c.deinit();
-    try std.testing.expectEqual(@as(u32, 1200), c.total_notes);
-    try src.appendSlice(gpa, "#00351:");
-    for (0..LaneState.max_live + 1) |_| try src.appendSlice(gpa, "0101");
-    try std.testing.expectError(error.TooBig, parse(gpa, src.items, .{}));
+    try std.testing.expectEqual(@as(u32, 5000), c.total_notes);
+
+    // LNs 0-1/8 and 1/2-5/8 on lane 1; the mines at 1/16 and 9/16 fall inside, the one at 3/4 does not.
+    var mines = try parse(gpa, "#BPM 120\n#WAV01 a.wav\n#00151:0101000001010000\n#001D1:00010000000000000001000001000000\n", .{});
+    defer mines.deinit();
+    try std.testing.expectEqual(@as(usize, 5), mines.notes.len);
+    try std.testing.expectEqual(types.NoteKind.mine, mines.notes[4].kind);
 }
 
 test "deep #IF nesting keeps a live inner branch dead under a dead outer one" {
@@ -1076,16 +1157,22 @@ test "the later of two BPM changes at one position wins" {
     try std.testing.expectEqual(@as(i64, 6_000_000), c.notes[0].time_us);
 }
 
-test "timeline count past the cap is an error" {
+test "timelines and notes past the memory cap are an error" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var base: Tl = .{ .section = 0, .time = 0, .micro = 0, .bpm = 120 };
-    var tls: Timelines = .{ .gpa = a, .max = 2 };
-    try tls.items.append(a, &base);
-    _ = try tls.get(0.5);
+    var tls: Timelines = .{ .gpa = a, .max_bytes = 2 * @sizeOf(Tl) };
+    tls.add(&base);
+    const half = try tls.get(0.5);
     _ = try tls.get(0.5);
     try std.testing.expectError(error.TooBig, tls.get(0.25));
+    tls.max_bytes += @sizeOf(Held);
+    try tls.setSlot(half, 0, .{ .normal = 1 });
+    try tls.setSlot(half, 0, .{ .normal = 2 });
+    try std.testing.expectError(error.TooBig, tls.setSlot(half, 1, .{ .normal = 1 }));
+    try tls.setSlot(half, 0, .none);
+    try std.testing.expectError(error.TooBig, tls.setSlot(half, 0, .{ .normal = 1 }));
 }
 
 test "lnobj and channel 5x LN" {
