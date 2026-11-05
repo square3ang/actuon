@@ -23,9 +23,9 @@ const library =
 
 pub fn open() !*App {
     const gpa = std.testing.allocator;
-    try fs.mkdirs(std.testing.io, fs.test_data_dir);
     const arena = try gpa.create(std.heap.ArenaAllocator);
     arena.* = .init(gpa);
+    try fs.mkdirs(std.testing.io, try fs.dataDir(arena.allocator()));
     const db = try db_mod.Db.open(":memory:", gpa, false);
     try db_mod.initSchema(db);
     try db.exec(library);

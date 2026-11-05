@@ -100,7 +100,8 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, a, "--from-ms")) {
             opts.start_us = 1000 * try std.fmt.parseInt(i64, next(args, &i) orelse return error.MissingValue, 10);
         } else if (std.mem.startsWith(u8, a, "-")) {
-            std.debug.print("{s}", .{usage});
+            // The returned error still reports the failure if stderr is closed.
+            printTo(io, .stderr(), "{s}", .{usage}) catch {};
             return error.UnknownFlag;
         } else opts.play_path = a;
     }
@@ -115,9 +116,9 @@ fn readEnvironNow(io: std.Io) void {
     io.unlockStderr();
 }
 
-fn printOut(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+fn printTo(io: std.Io, file: std.Io.File, comptime fmt: []const u8, args: anytype) !void {
     var buf: [1024]u8 = undefined;
-    var w = std.Io.File.stdout().writer(io, &buf);
+    var w = file.writer(io, &buf);
     try w.interface.print(fmt, args);
     try w.interface.flush();
 }
@@ -130,7 +131,7 @@ fn irAccount(gpa: std.mem.Allocator, io: std.Io, cmd: []const u8, url: []const u
     const a = arena.allocator();
     // As in Settings: the password would go out readable, and the next start signs out of such an IR anyway.
     if (table.sendsInClear(url)) {
-        std.debug.print("an IR on the internet needs https://\n", .{});
+        printTo(io, .stderr(), "an IR on the internet needs https://\n", .{}) catch {};
         return error.PlainHttp;
     }
     var buf: [1024]u8 = undefined;
@@ -139,7 +140,7 @@ fn irAccount(gpa: std.mem.Allocator, io: std.Io, cmd: []const u8, url: []const u
     const password = std.mem.trimEnd(u8, line, "\r");
     const r = try ir.requestToken(a, io, url, name, password, std.mem.eql(u8, cmd, "ir-register"));
     const token = r.token orelse {
-        std.debug.print("server said {d}: {s}\n", .{ r.status, r.body });
+        printTo(io, .stderr(), "server said {d}: {s}\n", .{ r.status, r.body }) catch {};
         return error.Refused;
     };
     var loaded = config.load(a, io);
@@ -147,7 +148,7 @@ fn irAccount(gpa: std.mem.Allocator, io: std.Io, cmd: []const u8, url: []const u
     loaded.cfg.ir_token = token;
     try config.save(gpa, io, loaded.file, loaded.cfg);
     // The token is saved, so a closed stdout must not make a script think the login failed.
-    printOut(io, "logged in as {s}; token saved\n", .{name}) catch {};
+    printTo(io, .stdout(), "logged in as {s}; token saved\n", .{name}) catch {};
 }
 
 fn irRival(gpa: std.mem.Allocator, io: std.Io, name: []const u8) !void {
@@ -160,10 +161,10 @@ fn irRival(gpa: std.mem.Allocator, io: std.Io, name: []const u8) !void {
     const auth = try std.fmt.allocPrint(a, "Bearer {s}", .{cfg.ir_token});
     const r = try http.request(a, io, .PUT, try std.fmt.allocPrint(a, "{s}/rivals/{f}", .{ cfg.ir_url, std.fmt.alt(std.Uri.Component{ .raw = name }, .formatEscaped) }), "", &.{.{ .name = "Authorization", .value = auth }});
     if (r.status / 100 != 2) {
-        std.debug.print("server said {d}: {s}\n", .{ r.status, r.body });
+        printTo(io, .stderr(), "server said {d}: {s}\n", .{ r.status, r.body }) catch {};
         return error.Refused;
     }
-    try printOut(io, "{d}: {s}\n", .{ r.status, r.body });
+    try printTo(io, .stdout(), "{d}: {s}\n", .{ r.status, r.body });
 }
 
 fn fetchTable(gpa: std.mem.Allocator, io: std.Io, url: []const u8) !void {
@@ -172,7 +173,7 @@ fn fetchTable(gpa: std.mem.Allocator, io: std.Io, url: []const u8) !void {
     const d = try db.openMain(gpa);
     defer d.close();
     const r = try table.fetch(gpa, io, d, url);
-    try printOut(io, "{d} songs, {d} courses\n", .{ r.songs, r.courses });
+    try printTo(io, .stdout(), "{d} songs, {d} courses\n", .{ r.songs, r.courses });
 }
 
 test {
