@@ -187,14 +187,22 @@ mod tests {
             "a chart hash is checked"
         );
         let bare = "{\"type\":\"create\",\"sha256\":\"\",\"title\":\"\"}";
-        assert_eq!(host.handle(&rooms, bare, now)["type"], "room", "a room opens with no chart");
+        assert_eq!(
+            host.handle(&rooms, bare, now)["type"],
+            "room",
+            "a room opens with no chart"
+        );
         assert_eq!(
             host.handle(&rooms, "{\"type\":\"start\"}", now)["status"],
             400,
             "nothing to start without a chart"
         );
         let untitled = format!("{{\"type\":\"create\",\"sha256\":\"\",\"title\":\"t\"}}");
-        assert_eq!(host.handle(&rooms, &untitled, now)["status"], 400, "a title needs its chart");
+        assert_eq!(
+            host.handle(&rooms, &untitled, now)["status"],
+            400,
+            "a title needs its chart"
+        );
         let made = host.handle(
             &rooms,
             &format!("{{\"type\":\"create\",\"sha256\":\"{SHA}\",\"title\":\"t\"}}"),

@@ -113,7 +113,11 @@ impl Pool {
 
 /// Gives the connection back even when the job panics, or the pool would shrink for good.
 /// Holds the permit too: a request dropped mid-job must not free a slot whose connection is still out.
-struct Lease(Arc<Pool>, Option<Connection>, OwnedSemaphorePermit);
+struct Lease(
+    Arc<Pool>,
+    Option<Connection>,
+    #[allow(dead_code)] OwnedSemaphorePermit,
+);
 
 impl Drop for Lease {
     fn drop(&mut self) {
