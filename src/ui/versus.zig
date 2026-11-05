@@ -619,11 +619,10 @@ test "a skin reading the versus numbers replaces the board, and they read the ro
     var v: room_mod.View = .{ .count = 1 };
     v.players[0] = .{ .ex = 7, .judged = 3, .final_ex = 8 };
     var st: skin_scene.State = .{ .versus = &v };
-    const ctx = st.loadCtx();
-    try std.testing.expectEqual(@as(?i64, 8), ctx.num(ctx.ud, skin_model.versus_ex));
-    try std.testing.expectEqual(@as(?i64, 3), ctx.num(ctx.ud, skin_model.versus_judged));
-    try std.testing.expect(ctx.opt(ctx.ud, skin_model.versus_present));
-    try std.testing.expect(!ctx.opt(ctx.ud, skin_model.versus_present + 1));
+    try std.testing.expectEqual(@as(?i64, 8), st.num(skin_model.versus_ex));
+    try std.testing.expectEqual(@as(?i64, 3), st.num(skin_model.versus_judged));
+    try std.testing.expect(st.opt(skin_model.versus_present));
+    try std.testing.expect(!st.opt(skin_model.versus_present + 1));
 }
 
 test "a round closes what was open over song select" {

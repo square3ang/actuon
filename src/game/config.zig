@@ -312,38 +312,38 @@ test "a slot overrides the default skin, and can ask for the built-in look" {
     try std.testing.expectEqualStrings("", cfg.skinFor(.result));
 }
 
-pub var set_aside = false;
+/// `stuck`: the unreadable file could not be moved, so `save` leaves it alone.
+pub const File = enum { read, set_aside, stuck };
 
 /// The defaults are saved on exit: keep the player's settings out of their way.
-fn setAside(a: std.mem.Allocator, p: []const u8, why: anyerror) void {
+fn setAside(a: std.mem.Allocator, p: []const u8, why: anyerror) File {
     std.log.warn("config unreadable: {t}", .{why});
     // Until it has moved, saving defaults would write over the only copy of the player's settings.
-    stuck = true;
-    const bad = std.fmt.allocPrint(a, "{s}.bad", .{p}) catch return;
-    fs.rename(p, bad) catch |e| return std.log.warn("could not move {s}: {t}", .{ p, e });
-    stuck = false;
-    set_aside = true;
+    const bad = std.fmt.allocPrint(a, "{s}.bad", .{p}) catch return .stuck;
+    fs.rename(p, bad) catch |e| {
+        std.log.warn("could not move {s}: {t}", .{ p, e });
+        return .stuck;
+    };
+    return .set_aside;
 }
 
-/// Set when the unreadable file could not be moved: `save` then leaves it alone.
-pub var stuck = false;
+pub const Loaded = struct { cfg: Config = .{}, file: File = .read };
 
 /// The result's strings live in `a`. A broken file falls back to defaults rather than blocking startup.
-pub fn load(a: std.mem.Allocator, io: std.Io) Config {
+pub fn load(a: std.mem.Allocator, io: std.Io) Loaded {
     const p = path(a) catch return .{};
     const bytes = fs.readAlloc(a, io, p, 1 << 20) catch |e| {
-        if (e != error.FileNotFound) setAside(a, p, e);
-        return .{};
+        if (e == error.FileNotFound) return .{};
+        return .{ .file = setAside(a, p, e) };
     };
     var cfg = std.json.parseFromSliceLeaky(Config, a, bytes, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch |e| {
-        setAside(a, p, e);
-        return .{};
+        return .{ .file = setAside(a, p, e) };
     };
     cfg.clampCovers();
     clampOptions(&cfg);
     cfg.download_url = migrateDownloadUrl(cfg.download_url);
     dropPlainIr(&cfg);
-    return cfg;
+    return .{ .cfg = cfg };
 }
 
 /// An older save may hold plain HTTP to the internet, which would send its token and next password readable.
@@ -363,8 +363,8 @@ fn migrateDownloadUrl(url: []const u8) []const u8 {
     return url;
 }
 
-pub fn save(gpa: std.mem.Allocator, io: std.Io, cfg: Config) !void {
-    if (stuck) return error.ConfigUnreadable;
+pub fn save(gpa: std.mem.Allocator, io: std.Io, file: File, cfg: Config) !void {
+    if (file == .stuck) return error.ConfigUnreadable;
     const p = try path(gpa);
     defer gpa.free(p);
     const text = try std.json.Stringify.valueAlloc(gpa, cfg, .{ .whitespace = .indent_2, .emit_null_optional_fields = false });
@@ -432,11 +432,10 @@ test "a broken config is kept aside instead of being overwritten" {
     const bad = try std.fmt.allocPrint(a, "{s}.bad", .{p});
     defer fs.remove(io, bad);
     defer fs.remove(io, p);
-    defer set_aside = false;
     try fs.write(io, p, "{ not json");
-    const cfg = load(a, io);
-    try std.testing.expectEqual(@as(Config, .{}).green_ms, cfg.green_ms);
-    try std.testing.expect(set_aside);
+    const loaded = load(a, io);
+    try std.testing.expectEqual(@as(Config, .{}).green_ms, loaded.cfg.green_ms);
+    try std.testing.expectEqual(File.set_aside, loaded.file);
     try std.testing.expect(!fs.exists(io, p));
     try std.testing.expectEqualStrings("{ not json", try fs.readAlloc(a, io, bad, 64));
 }
@@ -453,11 +452,10 @@ test "an unreadable config that cannot be moved is never written over" {
     try fs.mkdirs(io, try std.fmt.allocPrint(a, "{s}/x", .{bad}));
     defer fs.removeTree(io, bad);
     defer fs.remove(io, p);
-    defer stuck = false;
     try fs.write(io, p, "{ not json");
-    _ = load(a, io);
-    try std.testing.expect(stuck and !set_aside);
-    try std.testing.expectError(error.ConfigUnreadable, save(a, io, .{}));
+    const loaded = load(a, io);
+    try std.testing.expectEqual(File.stuck, loaded.file);
+    try std.testing.expectError(error.ConfigUnreadable, save(a, io, loaded.file, loaded.cfg));
     try std.testing.expectEqualStrings("{ not json", try fs.readAlloc(a, io, p, 64));
 }
 

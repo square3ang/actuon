@@ -5,6 +5,7 @@ const core = @import("actuon_core");
 const gfx = @import("../ui/gfx.zig");
 const bitfont = @import("bitfont.zig");
 const bga = @import("../ui/bga.zig");
+const State = @import("scene.zig").State;
 
 pub const Key = struct {
     time: i32 = 0,
@@ -172,15 +173,8 @@ pub fn clampDigits(d: i32) i32 {
 }
 
 pub const Ctx = struct {
-    ud: *anyopaque,
+    st: *State,
     now_ms: i64,
-    /// Start time per timer id in ms, -1 when off.
-    timers: []const i64,
-    opt: *const fn (ud: *anyopaque, id: i32) bool,
-    num: *const fn (ud: *anyopaque, id: i32) ?i64,
-    float: *const fn (ud: *anyopaque, id: i32) f32,
-    str: *const fn (ud: *anyopaque, id: i32) []const u8,
-    set_float: ?*const fn (ud: *anyopaque, id: i32, value: f32) bool = null,
     /// Lift and hidden in skin pixels.
     lift_px: f32 = 0,
     hidden_px: f32 = 0,
@@ -230,14 +224,14 @@ test "a mouseRect counts up from the object's bottom-left" {
 
 fn timerStart(ctx: *const Ctx, id: i32) i64 {
     if (id == 0) return 0;
-    if (id < 0 or id >= ctx.timers.len) return -1;
-    return ctx.timers[@intCast(id)];
+    if (id < 0 or id >= ctx.st.timers.len) return -1;
+    return ctx.st.timers[@intCast(id)];
 }
 
 fn opOk(s: *const Skin, ctx: *const Ctx, op: i32) bool {
     if (op == 0) return true;
     const abs = @abs(op);
-    const on = s.enabled.contains(@intCast(abs)) or ctx.opt(ctx.ud, @intCast(abs));
+    const on = s.enabled.contains(@intCast(abs)) or ctx.st.opt(@intCast(abs));
     return if (op > 0) on else !on;
 }
 
@@ -337,14 +331,14 @@ pub const Renderer = struct {
         const n = @max(src.divx, 1) * @max(src.divy, 1);
         const st = timerStart(r.ctx, src.timer);
         const t = if (st < 0) 0 else r.ctx.now_ms - st;
-        const row = if (src.len > 1) r.ctx.num(r.ctx.ud, imageRef(src.ref)) orelse 0 else 0;
+        const row = if (src.len > 1) r.ctx.st.num(imageRef(src.ref)) orelse 0 else 0;
         return runFrame(n, src.len, row, t, src.cycle);
     }
 
     pub fn blit(r: *const Renderer, src_in: *const Src, frame: i32, k: Key, blend: u8, center: u8, crop: ?[4]f32) void {
         var src = src_in;
         if (src.set.len > 0) {
-            const v = r.ctx.num(r.ctx.ud, imageRef(src.set_ref)) orelse 0;
+            const v = r.ctx.st.num(imageRef(src.set_ref)) orelse 0;
             src = &src.set[@intCast(std.math.clamp(v, 0, @as(i64, @intCast(src.set.len)) - 1))];
         }
         const dst: c.SDL_FRect = .{ .x = k.x * r.sx, .y = k.y * r.sy, .w = k.w * r.sx, .h = k.h * r.sy };
@@ -399,7 +393,7 @@ pub const Renderer = struct {
     }
 
     fn drawNumber(r: *const Renderer, o: *const Object, k: Key) void {
-        const v = if (o.lua_value != 0 and r.ctx.lua_call_num != null) @as(?i64, @intFromFloat(r.ctx.lua_call_num.?(r.s, o.lua_value))) else r.ctx.num(r.ctx.ud, o.ref);
+        const v = if (o.lua_value != 0 and r.ctx.lua_call_num != null) @as(?i64, @intFromFloat(r.ctx.lua_call_num.?(r.s, o.lua_value))) else r.ctx.st.num(o.ref);
         // beatoraja's value for "nothing to show", such as an empty ranking row.
         if (v == std.math.minInt(i32)) return;
         r.drawValue(o, k, v orelse return);
@@ -463,7 +457,7 @@ pub const Renderer = struct {
         var buf: [512]u8 = undefined;
         const s = if (o.lua_value != 0 and r.ctx.lua_call_str != null)
             r.ctx.lua_call_str.?(r.s, o.lua_value, &buf)
-        else if (o.constant.len > 0) o.constant else r.ctx.str(r.ctx.ud, o.ref);
+        else if (o.constant.len > 0) o.constant else r.ctx.st.str(o.ref);
         if (s.len == 0 or k.a <= 0) return;
         const col: gfx.Color = .{ .r = @intFromFloat(std.math.clamp(k.r, 0, 255)), .g = @intFromFloat(std.math.clamp(k.g, 0, 255)), .b = @intFromFloat(std.math.clamp(k.b, 0, 255)), .a = @intFromFloat(std.math.clamp(k.a, 0, 255)) };
         if (o.bitmap) |font| return r.drawBitmapText(font, o, k, s, col, o.align_, font.lr2);
@@ -520,7 +514,7 @@ pub const Renderer = struct {
     }
 
     fn drawTintedFill(r: *const Renderer, o: *const Object, k: Key, v: f32) void {
-        const border = std.math.clamp(r.ctx.float(r.ctx.ud, gauge_border), 0, 1); // 0 when all red
+        const border = std.math.clamp(r.ctx.st.float(gauge_border), 0, 1); // 0 when all red
         const split = @min(v, border);
         var kk = k;
         if (split > 0) {
@@ -542,13 +536,13 @@ pub const Renderer = struct {
 
     fn drawGauge(r: *const Renderer, o: *const Object, k: Key) void {
         if (o.nodes.len < 4) return;
-        const pct = r.ctx.float(r.ctx.ud, gauge_value); // 0..1
-        const border = r.ctx.float(r.ctx.ud, gauge_border); // 0..1, 0 when all parts are red
+        const pct = r.ctx.st.float(gauge_value); // 0..1
+        const border = r.ctx.st.float(gauge_border); // 0..1, 0 when all parts are red
         const parts = @max(o.parts, 1);
         // Six nodes per gauge type when the skin draws each type its own way, the last two for the tip.
         const per_type: usize = if (o.nodes.len >= 6) 6 else 4;
         const types = o.nodes.len / per_type;
-        const ty: usize = @intCast(std.math.clamp(r.ctx.num(r.ctx.ud, gauge_type) orelse 0, 0, @as(i64, @intCast(types)) - 1));
+        const ty: usize = @intCast(std.math.clamp(r.ctx.st.num(gauge_type) orelse 0, 0, @as(i64, @intCast(types)) - 1));
         const nodes = o.nodes[ty * per_type ..][0..per_type];
         const pw = k.w / @as(f32, @floatFromInt(parts));
         const lit: i32 = @intFromFloat(@ceil(pct * @as(f32, @floatFromInt(parts))));
@@ -601,7 +595,7 @@ pub const Renderer = struct {
             .text => r.drawText(o, k),
             .gauge => r.drawGauge(o, k),
             .graph => {
-                const v = std.math.clamp(r.ctx.float(r.ctx.ud, o.ref), 0, 1);
+                const v = std.math.clamp(r.ctx.st.float(o.ref), 0, 1);
                 if (o.gauge_tint) return r.drawTintedFill(o, k, v);
                 var kk = k;
                 if (o.dir == 1) {
@@ -614,12 +608,12 @@ pub const Renderer = struct {
                 }
             },
             .slider => {
-                if (o.changeable and r.g.down) if (r.ctx.set_float) |set| {
+                if (o.changeable and r.g.down) {
                     if (sliderValue(o.dir, o.range, k, r.g.mx / r.sx, r.g.my / r.sy)) |value| {
-                        if (set(r.ctx.ud, o.ref, value)) r.g.clicked = false;
+                        if (r.ctx.st.setFloat(o.ref, value)) r.g.clicked = false;
                     }
-                };
-                const v = std.math.clamp(r.ctx.float(r.ctx.ud, o.ref), 0, 1);
+                }
+                const v = std.math.clamp(r.ctx.st.float(o.ref), 0, 1);
                 var kk = k;
                 switch (o.dir) {
                     0 => kk.y -= v * o.range,
