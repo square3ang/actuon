@@ -93,8 +93,8 @@ fn isSkinFile(name: []const u8) bool {
     return false;
 }
 
-/// One osu! skin.ini serves these key modes; shortcut: not the 14, 10 and 9 key slots until asked for.
-const osu_types = [_]i32{ 0, 1, type_beat4, type_beat6 };
+/// One osu! skin.ini serves every key mode, each from its own [Mania] Keys section.
+const osu_types = [_]i32{ playType(.beat7), playType(.beat5), playType(.beat14), playType(.beat10), playType(.popn9), type_beat4, type_beat6 };
 
 fn hasType(a: std.mem.Allocator, io: std.Io, path: []const u8, want: i32) bool {
     if (osuskin.isIni(path)) return std.mem.indexOfScalar(i32, &osu_types, want) != null and osuskin.hasMania(a, io, path);
@@ -460,7 +460,7 @@ test "listing every skin file stops when asked" {
     try std.testing.expectError(error.Canceled, allFiles(a, io, dir, &stop));
 }
 
-test "a skin.ini stands for the 7, 6, 5 and 4 key screens only" {
+test "a skin.ini stands for every play screen only" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -474,8 +474,11 @@ test "a skin.ini stands for the 7, 6, 5 and 4 key screens only" {
     try std.testing.expectEqualStrings(ini, find(a, io, ini, playType(.beat5)).?);
     try std.testing.expectEqualStrings(ini, find(a, io, dir, playType(.beat4)).?);
     try std.testing.expectEqualStrings(ini, find(a, io, dir, playType(.beat6)).?);
-    try std.testing.expect(find(a, io, dir, playType(.beat14)) == null);
+    try std.testing.expectEqualStrings(ini, find(a, io, dir, playType(.beat14)).?);
+    try std.testing.expectEqualStrings(ini, find(a, io, dir, playType(.beat10)).?);
+    try std.testing.expectEqualStrings(ini, find(a, io, dir, playType(.popn9)).?);
     try std.testing.expect(find(a, io, dir, type_select) == null);
+    try std.testing.expect(find(a, io, dir, type_result) == null);
     const rows = try options(a, io, dir, playType(.beat7));
     try std.testing.expectEqual(@as(usize, 4), rows.len);
     try std.testing.expectEqualStrings(osuskin.bga_dim_name, rows[1].name);

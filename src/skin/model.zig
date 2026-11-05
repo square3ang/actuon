@@ -80,6 +80,10 @@ pub const Object = struct {
     window: u32 = 64,
     decay: bool = false,
     digit_srcs: []const Src = &.{},
+    /// Each digit's width over the key's, as an osu! font draws each digit image at its own size.
+    digit_ws: []const f32 = &.{},
+    /// Every digit advances the key's width, its image centred there, as osu!'s fixed width score font.
+    digit_cells: bool = false,
     /// Overlap of each digit on the last, in skin pixels.
     digit_gap: f32 = 0,
     gauge_tint: bool = false,
@@ -303,6 +307,15 @@ pub const combo_on: i32 = 90110;
 pub const acc_whole: i32 = 90111;
 pub const acc_frac: i32 = 90112;
 pub const key_held: i32 = 90120;
+
+/// beatoraja numbering: scratch is 0, keys 1..9, 2P adds 10.
+pub fn laneTimer(mode: core.types.Mode, lane: u8) i32 {
+    const per: u8 = mode.keys() / mode.players();
+    const side = lane / per;
+    const sc = mode.scratchOf(lane) >= 0;
+    return @as(i32, side) * 10 + (if (sc) 0 else lane % per + @as(i32, 1));
+}
+
 /// Private ids, one per versus player in room order: EX (the checked score once there is one), notes judged, name, seat taken.
 pub const versus_ex: i32 = 90200;
 pub const versus_judged: i32 = 90210;
@@ -311,6 +324,34 @@ pub const versus_present: i32 = 90230;
 
 const center_x = [_]f32{ 0.5, 0, 0.5, 1, 0, 0.5, 1, 0, 0.5, 1 };
 const center_y = [_]f32{ 0.5, 1, 1, 1, 0.5, 0.5, 0.5, 0, 0, 0 };
+
+fn glyphWidth(o: *const Object, k: Key, glyph: usize) f32 {
+    return if (o.digit_ws.len == 10 and glyph < 10) k.w * o.digit_ws[glyph] else k.w;
+}
+
+fn glyphAdvance(o: *const Object, k: Key, glyph: usize) f32 {
+    return (if (o.digit_cells) k.w else glyphWidth(o, k, glyph)) - o.digit_gap;
+}
+
+fn glyphKey(o: *const Object, k: Key, x: f32, glyph: usize) Key {
+    var kk = k;
+    kk.w = glyphWidth(o, k, glyph);
+    kk.x = if (o.digit_cells) x + (k.w - kk.w) / 2 else x;
+    return kk;
+}
+
+/// The places hold `width` glyphs of the key's width; aligning shares out what the drawn glyphs leave.
+fn numberStart(o: *const Object, k: Key, digits: []const u8, pads: usize, pad_glyph: ?i32, width: usize) f32 {
+    var used: f32 = if (o.signed) k.w - o.digit_gap else 0;
+    if (pad_glyph) |g| used += @as(f32, @floatFromInt(pads)) * glyphAdvance(o, k, @intCast(g));
+    for (digits) |d| used += glyphAdvance(o, k, d);
+    const slack = @as(f32, @floatFromInt(width)) * (k.w - o.digit_gap) - used;
+    return k.x + switch (o.align_) {
+        1 => 0,
+        2 => slack / 2,
+        else => slack,
+    };
+}
 
 fn runFrame(n: i32, len: i32, row: i64, t: i64, cycle: i32) i32 {
     const runs = std.math.clamp(len, 1, n);
@@ -418,26 +459,19 @@ pub const Renderer = struct {
         if (o.signed and n >= width and width > 1) n = width - 1;
         const used = n + @intFromBool(o.signed);
         const pad = width -| used;
-        const advance = k.w - o.digit_gap;
-        const shift: f32 = switch (o.align_) {
-            1 => 0, // left aligned digits start at x
-            2 => @as(f32, @floatFromInt(pad)) * advance / 2,
-            else => @as(f32, @floatFromInt(pad)) * advance, // right aligned
-        };
         // Eleven glyphs: the last is what empty places show, whatever `zeropadding` says.
         const pad_glyph: ?i32 = if (!o.signed and per_row == 11) 10 else if (o.zero_pad and !o.signed) 0 else null;
-        var x = k.x + (if (pad_glyph != null and o.align_ != 1) 0 else shift);
-        var kk = k;
-        if (pad_glyph) |glyph| if (o.align_ != 1) {
-            for (0..pad) |_| {
-                kk.x = x;
-                if (o.digit_srcs.len == 10) {
-                    r.blit(&o.digit_srcs[@intCast(glyph)], 0, kk, o.blend, o.center, null);
-                } else r.blit(&o.src, row * per_row + glyph, kk, o.blend, o.center, null);
-                x += advance;
-            }
+        const pads = if (pad_glyph != null and o.align_ != 1) pad else 0;
+        var x = numberStart(o, k, digits[0..n], pads, pad_glyph, width);
+        if (pad_glyph) |glyph| for (0..pads) |_| {
+            const kk = glyphKey(o, k, x, @intCast(glyph));
+            if (o.digit_srcs.len == 10) {
+                r.blit(&o.digit_srcs[@intCast(glyph)], 0, kk, o.blend, o.center, null);
+            } else r.blit(&o.src, row * per_row + glyph, kk, o.blend, o.center, null);
+            x += glyphAdvance(o, k, @intCast(glyph));
         };
         if (o.signed) {
+            var kk = k;
             kk.x = x;
             r.blit(&o.src, row * per_row + sign_rows + 11, kk, o.blend, o.center, null);
             x += k.w;
@@ -445,11 +479,11 @@ pub const Renderer = struct {
         var i = n;
         while (i > 0) {
             i -= 1;
-            kk.x = x;
+            const kk = glyphKey(o, k, x, digits[i]);
             if (o.digit_srcs.len == 10) {
                 r.blit(&o.digit_srcs[digits[i]], 0, kk, o.blend, o.center, null);
             } else r.blit(&o.src, row * per_row + sign_rows + digits[i], kk, o.blend, o.center, null);
-            x += advance;
+            x += glyphAdvance(o, k, digits[i]);
         }
     }
 
@@ -699,4 +733,22 @@ test "skin numbers are bounded" {
     try std.testing.expectEqual(@as(u16, 8), fontSize(-1e30));
     try std.testing.expectEqual(@as(i32, 0), clampDigits(-5));
     try std.testing.expectEqual(@as(i32, 32), clampDigits(std.math.maxInt(i32)));
+}
+
+test "an osu! font gives each digit its own width, or centres it in a fixed cell" {
+    const ws = [_]f32{ 1, 0.5, 1, 1, 1, 1, 1, 1, 1, 1 };
+    const k: Key = .{ .w = 20 };
+    const ten = [_]u8{ 0, 1 };
+    var o: Object = .{ .align_ = 2, .digit_ws = &ws };
+    // A narrow 1 makes "10" 30 wide, centred in six 20 wide places.
+    try std.testing.expectEqual(@as(f32, 45), numberStart(&o, k, &ten, 0, null, 6));
+    try std.testing.expectEqual(@as(f32, 10), glyphAdvance(&o, k, 1));
+    o.digit_cells = true;
+    try std.testing.expectEqual(@as(f32, 40), numberStart(&o, k, &ten, 0, null, 6));
+    const one = glyphKey(&o, k, 40, 1);
+    try std.testing.expectEqual(@as(f32, 45), one.x);
+    try std.testing.expectEqual(@as(f32, 10), one.w);
+    // Zero padded and right aligned, the cells fill the places from the key's x.
+    o.align_ = 0;
+    try std.testing.expectEqual(@as(f32, 0), numberStart(&o, k, &ten, 4, 0, 6));
 }

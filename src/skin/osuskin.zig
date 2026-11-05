@@ -204,8 +204,10 @@ fn columnKind(col: usize, n: usize) u8 {
     return if (@min(col, n - 1 - col) % 2 == 0) '1' else '2';
 }
 
-fn timerCode(mode: core.types.Mode, lane: u8) i32 {
-    return if (mode.scratchOf(lane) >= 0) 0 else lane + @as(i32, 1);
+/// Double play is two stages, as osu!'s co-op, and each takes its kinds from its own edges.
+fn stageKind(mode: core.types.Mode, col: usize) u8 {
+    const per = mode.keys() / mode.players();
+    return columnKind(col % per, per);
 }
 
 const Layout = struct {
@@ -237,8 +239,8 @@ fn hitPosition(mania: []const u8) f32 {
 
 fn addKeys(b: *Build, mode: core.types.Mode, order: []const u8, l: *const Layout) !void {
     for (order, 0..) |lane, i| {
-        const kind = columnKind(i, order.len);
-        const held = m.key_held + timerCode(mode, lane);
+        const kind = stageKind(mode, i);
+        const held = m.key_held + m.laneTimer(mode, lane);
         if (try b.keyImage(i, "", kind)) |img| {
             try b.objects.append(b.a, .{
                 .src = img.src(),
@@ -267,7 +269,7 @@ fn addNotes(b: *Build, skin: *m.Skin, general: []const u8, mode: core.types.Mode
     const stretches = if (get(b.mania, "NoteBodyStyle")) |v| std.mem.eql(u8, v, "0") else !modern(general);
     n.ln_body_span = if (stretches) 0 else 32800 / unit;
     for (order, 0..) |lane, i| {
-        const kind = columnKind(i, order.len);
+        const kind = stageKind(mode, i);
         const note = try b.noteImage(i, "", kind);
         const head = try b.noteImage(i, "H", kind) orelse note;
         const tail = try b.noteImage(i, "T", kind) orelse head;
@@ -321,26 +323,30 @@ fn addJudge(b: *Build, l: *const Layout) !void {
     try b.objects.append(b.a, .{ .kind = .judge, .judge_images = images });
 }
 
+/// `w` and `h` are the reference digit's; `ws` gives every digit's width over its.
 const Font = struct {
     digits: []const m.Src,
+    ws: []const f32,
     w: f32,
     h: f32,
 };
 
-/// A skin font is one file per digit. shortcut: every digit takes the 0's width, as a fixed width font does.
-fn fontOf(b: *Build, prefix: []const u8) !?Font {
+/// A skin font is one file per digit. Lazer sizes fixed width text by the 5.
+fn fontOf(b: *Build, prefix: []const u8, reference: usize) !?Font {
     const digits = try b.a.alloc(m.Src, 10);
-    var first: ?Image = null;
-    for (digits, 0..) |*d, i| {
-        const img = try b.file(try std.fmt.allocPrint(b.a, "{s}-{d}", .{ prefix, i }), false) orelse return null;
-        if (first == null) first = img;
+    var images: [10]Image = undefined;
+    for (digits, &images, 0..) |*d, *img, i| {
+        img.* = try b.file(try std.fmt.allocPrint(b.a, "{s}-{d}", .{ prefix, i }), false) orelse return null;
         d.* = img.src();
     }
-    return .{ .digits = digits, .w = first.?.w, .h = first.?.h };
+    const ref = images[reference];
+    const ws = try b.a.alloc(f32, 10);
+    for (ws, images) |*w, img| w.* = img.w / ref.w;
+    return .{ .digits = digits, .ws = ws, .w = ref.w, .h = ref.h };
 }
 
 fn addCombo(b: *Build, fonts: []const u8, l: *const Layout) !void {
-    const font = try fontOf(b, get(fonts, "ComboPrefix") orelse "score") orelse return;
+    const font = try fontOf(b, get(fonts, "ComboPrefix") orelse "score", 0) orelse return;
     const w = font.w / unit;
     const h = font.h / unit;
     const gap = number(fonts, "ComboOverlap", 0) / unit;
@@ -350,6 +356,7 @@ fn addCombo(b: *Build, fonts: []const u8, l: *const Layout) !void {
         .kind = .number,
         .ref = 104,
         .digit_srcs = font.digits,
+        .digit_ws = font.ws,
         .digit_gap = gap,
         .digits = places,
         .align_ = 2,
@@ -358,11 +365,11 @@ fn addCombo(b: *Build, fonts: []const u8, l: *const Layout) !void {
     });
 }
 
-/// The score shown is the EX score.
+/// The score shown is the EX score. Lazer's score and accuracy are fixed width, its combo not.
 fn addScore(b: *Build, fonts: []const u8) !void {
     const prefix = get(fonts, "ScorePrefix") orelse "score";
     const overlap = number(fonts, "ScoreOverlap", 0);
-    const font = try fontOf(b, prefix) orelse return;
+    const font = try fontOf(b, prefix, 5) orelse return;
 
     const score_scale = 0.96 / unit;
     const w = font.w * score_scale;
@@ -373,6 +380,8 @@ fn addScore(b: *Build, fonts: []const u8) !void {
         .kind = .number,
         .ref = 71,
         .digit_srcs = font.digits,
+        .digit_ws = font.ws,
+        .digit_cells = true,
         .digit_gap = gap,
         .digits = places,
         .zero_pad = true,
@@ -391,13 +400,13 @@ fn addScore(b: *Build, fonts: []const u8) !void {
         right += agap;
     }
     right -= aw * 2 - agap;
-    try b.objects.append(b.a, .{ .kind = .number, .ref = m.acc_frac, .digit_srcs = font.digits, .digit_gap = agap, .digits = 2, .zero_pad = true, .keys = try b.fixed(right, y, aw, ah, white) });
+    try b.objects.append(b.a, .{ .kind = .number, .ref = m.acc_frac, .digit_srcs = font.digits, .digit_ws = font.ws, .digit_cells = true, .digit_gap = agap, .digits = 2, .zero_pad = true, .keys = try b.fixed(right, y, aw, ah, white) });
     if (try b.file(try std.fmt.allocPrint(b.a, "{s}-dot", .{prefix}), false)) |img| {
         right -= img.w * acc_scale - agap;
         try b.sprite(img, right, y, img.w * acc_scale, img.h * acc_scale);
     }
     right -= (aw - agap) * 3;
-    try b.objects.append(b.a, .{ .kind = .number, .ref = m.acc_whole, .digit_srcs = font.digits, .digit_gap = agap, .digits = 3, .keys = try b.fixed(right, y, aw, ah, white) });
+    try b.objects.append(b.a, .{ .kind = .number, .ref = m.acc_whole, .digit_srcs = font.digits, .digit_ws = font.ws, .digit_cells = true, .digit_gap = agap, .digits = 3, .keys = try b.fixed(right, y, aw, ah, white) });
 }
 
 /// A marker image makes it LegacyHealthDisplay's new style, placed a little differently.
@@ -423,7 +432,7 @@ fn addLighting(b: *Build, general: []const u8, mode: core.types.Mode, order: []c
     const normal = try b.image("LightingN", "lightingN", true);
     const long = try b.image("LightingL", "lightingL", true);
     for (order, 0..) |lane, i| {
-        const code = timerCode(mode, lane);
+        const code = m.laneTimer(mode, lane);
         const cx = l.xs[i] + l.ws[i] / 2;
         const scaleOf = struct {
             fn f(mania: []const u8, gen: []const u8, key: []const u8, col: usize, col_w: f32) f32 {
@@ -511,7 +520,7 @@ fn build(b: *Build, skin: *m.Skin, general: []const u8, fonts: []const u8, mode:
         if (light) |img| {
             const tint = colour(b.mania, try std.fmt.allocPrint(b.a, "ColourLight{d}", .{i + 1}), white);
             const h = img.h / unit;
-            try b.objects.append(b.a, .{ .src = img.src(), .timer = 100 + timerCode(mode, lane), .keys = try b.fixed(l.xs[i], light_y - h, l.ws[i], h, tint) });
+            try b.objects.append(b.a, .{ .src = img.src(), .timer = 100 + m.laneTimer(mode, lane), .keys = try b.fixed(l.xs[i], light_y - h, l.ws[i], h, tint) });
         }
     }
     const line = colour(b.mania, "ColourColumnLine", white);
@@ -649,6 +658,44 @@ test "a 7+1 chart takes the 8 key section, scratch first, @2x and frame 0 prefer
     _ = try load(&narrow, std.testing.io, path, .beat7, .{}, 0.6);
     const last = narrow.notes.lane[6].?;
     try std.testing.expect(last[0] + last[2] <= narrow.w);
+}
+
+test "double play takes the 16 key section, two stages of kinds and the 2P timers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const path = try std.fs.path.join(a, &.{ dir, "skin.ini" });
+    try fs.write(std.testing.io, path, "[Mania]\nKeys: 8\nColumnStart: 1\n[Mania]\nKeys: 16\nColumnStart: 10\n");
+    const png = testPng(30, 10);
+    for ([_][]const u8{ "mania-note1.png", "mania-note2.png", "mania-key1D.png" }) |f| {
+        try fs.write(std.testing.io, try std.fs.path.join(a, &.{ dir, f }), &png);
+    }
+    for (0..10) |i| {
+        const digit = testPng(@intCast(10 + i), 10);
+        try fs.write(std.testing.io, try std.fs.path.join(a, &.{ dir, try std.fmt.allocPrint(a, "score-{d}.png", .{i}) }), &digit);
+    }
+    var skin: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
+    defer skin.arena.deinit();
+    const paths = try load(&skin, std.testing.io, path, .beat14, .{}, 4.0 / 3.0);
+    // The combo's digits keep their own widths against the 0; the score's sit in cells of the 5.
+    for (skin.objects) |obj| if (obj.kind == .number) {
+        try std.testing.expectEqual(obj.ref != 104, obj.digit_cells);
+        const ref_w: f32 = if (obj.ref == 104) 10 else 15;
+        try std.testing.expectApproxEqAbs(19 / ref_w, obj.digit_ws[9], 1e-6);
+    };
+    // The 2P scratch is the last of 16 columns.
+    try std.testing.expectEqual(@as(f32, 10 + 15 * 30), skin.notes.lane[15].?[0]);
+    // Columns 8 and 9 start the second stage, so they are a 1 and a 2 again.
+    try std.testing.expect(std.mem.endsWith(u8, paths[@intCast(skin.notes.note[8].tex)].?, "mania-note1.png"));
+    try std.testing.expect(std.mem.endsWith(u8, paths[@intCast(skin.notes.note[9].tex)].?, "mania-note2.png"));
+    var scratch_2p = false;
+    for (skin.objects) |obj| for (obj.ops) |op| {
+        if (op == m.key_held + 10) scratch_2p = true;
+    };
+    try std.testing.expect(scratch_2p);
 }
 
 test "an ini for other modes only is not a mania skin" {

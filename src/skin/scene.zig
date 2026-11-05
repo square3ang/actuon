@@ -231,15 +231,6 @@ pub const State = struct {
         }
     }
 
-    fn laneTimer(st: *const State, lane: u8) ?i32 {
-        // beatoraja numbering: scratch is 0, keys 1..9, 2P adds 10.
-        const per: u8 = st.mode.keys() / st.mode.players();
-        const side = lane / per;
-        const idx = lane % per;
-        const sc = st.mode.scratchOf(lane) >= 0;
-        return @as(i32, side) * 10 + (if (sc) @as(i32, 0) else idx + 1);
-    }
-
     /// All timer times are scene ms.
     pub fn update(st: *State, snap: Snapshot) void {
         st.snap = snap;
@@ -261,7 +252,7 @@ pub const State = struct {
         }
         for (0..st.mode.keys()) |l| {
             const lane: u8 = @intCast(l);
-            const code = st.laneTimer(lane) orelse continue;
+            const code = m.laneTimer(st.mode, lane);
             if (code >= 20) continue;
             if (snap.flash_at_us[l] != st.flash_seen[l]) {
                 st.flash_seen[l] = snap.flash_at_us[l];
