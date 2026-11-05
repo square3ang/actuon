@@ -14,8 +14,7 @@ const max_sound_bytes = 64 << 20;
 
 const Hit = struct { time_us: i64, wav: i32, start_us: i64, dur_us: i64 };
 
-/// Owned by `out_gpa`.
-pub fn render(gpa: std.mem.Allocator, out_gpa: std.mem.Allocator, io: std.Io, path: []const u8, rate: u32, cancel: *const std.atomic.Value(bool)) ![]f32 {
+pub fn render(gpa: std.mem.Allocator, io: std.Io, path: []const u8, rate: u32, cancel: *const std.atomic.Value(bool)) ![]f32 {
     const bytes = try fs.readAlloc(gpa, io, path, max_chart_bytes);
     defer gpa.free(bytes);
     var chart = try session.Session.parseBytes(gpa, path, bytes, null, 0);
@@ -23,8 +22,8 @@ pub fn render(gpa: std.mem.Allocator, out_gpa: std.mem.Allocator, io: std.Io, pa
     const start_us = @divTrunc(@max(chart.last_note_us, 0), 3);
     const hits = try collectHits(gpa, &chart, start_us +| clip_us);
     defer gpa.free(hits);
-    const out = try out_gpa.alloc(f32, @as(usize, @intCast(toFrames(clip_us, rate))) * 2);
-    errdefer out_gpa.free(out);
+    const out = try gpa.alloc(f32, @as(usize, @intCast(toFrames(clip_us, rate))) * 2);
+    errdefer gpa.free(out);
     @memset(out, 0);
     var groups: std.ArrayList(usize) = .empty;
     defer groups.deinit(gpa);
@@ -216,7 +215,7 @@ test "a chart's sounds become a faded clip, and a huge or soundless chart is ref
     var cancel: std.atomic.Value(bool) = .init(false);
 
     try fs.write(io, chart, "#BPM 120\n#WAV01 a.wav\n#00101:01\n");
-    try std.testing.expectError(error.Silent, render(gpa, gpa, io, chart, 1000, &cancel));
+    try std.testing.expectError(error.Silent, render(gpa, io, chart, 1000, &cancel));
 
     // 100 frames of 1000 Hz mono 8-bit: a tenth of a second, from 2 s.
     var buf: [44 + 100]u8 = @splat(200);
@@ -233,7 +232,7 @@ test "a chart's sounds become a faded clip, and a huge or soundless chart is ref
     @memcpy(buf[36..40], "data");
     std.mem.writeInt(u32, buf[40..44], 100, .little);
     try fs.write(io, wav, &buf);
-    const clip = try render(gpa, gpa, io, chart, 1000, &cancel);
+    const clip = try render(gpa, io, chart, 1000, &cancel);
     defer gpa.free(clip);
     try std.testing.expectEqual(@as(usize, 12_000 * 2), clip.len);
     try std.testing.expectEqual(@as(f32, 0), clip[0]);
@@ -241,15 +240,15 @@ test "a chart's sounds become a faded clip, and a huge or soundless chart is ref
     try std.testing.expectEqual(@as(f32, 0), clip[2150 * 2]);
 
     cancel.store(true, .release);
-    try std.testing.expectError(error.Canceled, render(gpa, gpa, io, chart, 1000, &cancel));
+    try std.testing.expectError(error.Canceled, render(gpa, io, chart, 1000, &cancel));
 
     const huge = try gpa.alloc(u8, max_chart_bytes + 1);
     defer gpa.free(huge);
     @memset(huge, '#');
     try fs.write(io, chart, huge);
-    try std.testing.expectError(error.StreamTooLong, render(gpa, gpa, io, chart, 1000, &cancel));
+    try std.testing.expectError(error.StreamTooLong, render(gpa, io, chart, 1000, &cancel));
     try fs.write(io, chart, "\x00\xff#WAVZZ\n#99999:ZZ\n#BPM -0\n");
-    if (render(gpa, gpa, io, chart, 1000, &cancel)) |x| {
+    if (render(gpa, io, chart, 1000, &cancel)) |x| {
         gpa.free(x);
         return error.TestUnexpectedResult;
     } else |_| {}

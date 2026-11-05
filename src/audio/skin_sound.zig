@@ -61,20 +61,15 @@ pub const Entry = struct {
     path: []const u8,
     data: []const f32 = &.{},
     ready: std.atomic.Value(bool) = .init(false),
-    thread: ?*c.SDL_Thread = null,
     /// Main thread only.
     pending: ?struct { loop: bool, gain: f32 } = null,
     loop_slot: ?u8 = null,
 
-    fn run(ud: ?*anyopaque) callconv(.c) c_int {
-        const e: *Entry = @ptrCast(@alignCast(ud));
+    fn load(e: *Entry) void {
         defer e.ready.store(true, .release);
-        const bytes = fs.readAlloc(e.gpa, e.io, e.path, 1 << 28) catch return 0;
+        const bytes = fs.readAlloc(e.gpa, e.io, e.path, 1 << 28) catch return;
         defer e.gpa.free(bytes);
-        // Voices read this until exit, past the engine, like the menu sounds.
-        const s = decode.decode(std.heap.page_allocator, bytes, e.path, e.rate) catch return 0;
-        e.data = s.data;
-        return 0;
+        e.data = (decode.decode(e.gpa, bytes, e.path, e.rate) catch return).data;
     }
 };
 
@@ -85,33 +80,59 @@ pub fn nextSlot(slot: *u8) u8 {
 }
 
 const max_entries = 256;
+const workers = 2;
 
 pub const Player = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     engine: *engine_mod.Engine,
     slot: *u8,
-    entries: std.ArrayList(*Entry) = .empty,
+    /// Fixed, as workers read it while the main thread adds.
+    entries: [max_entries]*Entry = undefined,
+    len: usize = 0,
+    queued: ?*c.SDL_Semaphore = null,
+    next: std.atomic.Value(usize) = .init(0),
+    quit: std.atomic.Value(bool) = .init(false),
+    threads: [workers]?*c.SDL_Thread = @splat(null),
 
-    /// shortcut: one thread per new file, fine for a skin's few dozen; a worker queue if a skin floods this.
     pub fn entry(p: *Player, path: []const u8) ?*Entry {
-        for (p.entries.items) |e| if (std.mem.eql(u8, e.path, path)) return e;
-        // A script naming a new file each frame would start a thread and grow this list every time.
-        if (p.entries.items.len >= max_entries) return null;
+        for (p.entries[0..p.len]) |e| if (std.mem.eql(u8, e.path, path)) return e;
+        // A script naming a new file each frame would grow this list every time.
+        if (p.len >= max_entries) return null;
         const owned = p.gpa.dupe(u8, path) catch return null;
         const e = p.gpa.create(Entry) catch {
             p.gpa.free(owned);
             return null;
         };
         e.* = .{ .gpa = p.gpa, .io = p.io, .rate = p.engine.rate, .path = owned };
-        p.entries.append(p.gpa, e) catch {
-            p.gpa.free(owned);
-            p.gpa.destroy(e);
-            return null;
-        };
-        e.thread = c.SDL_CreateThread(Entry.run, "skin sound", e);
-        if (e.thread == null) e.ready.store(true, .release);
+        p.entries[p.len] = e;
+        p.len += 1;
+        if (p.startWorkers()) c.SDL_SignalSemaphore(p.queued) else e.ready.store(true, .release);
         return e;
+    }
+
+    fn startWorkers(p: *Player) bool {
+        if (p.queued != null) return true;
+        const sem = c.SDL_CreateSemaphore(0) orelse return false;
+        p.queued = sem;
+        var started = false;
+        for (&p.threads) |*t| {
+            t.* = c.SDL_CreateThread(work, "skin sound", p);
+            started = started or t.* != null;
+        }
+        if (started) return true;
+        c.SDL_DestroySemaphore(sem);
+        p.queued = null;
+        return false;
+    }
+
+    fn work(ud: ?*anyopaque) callconv(.c) c_int {
+        const p: *Player = @ptrCast(@alignCast(ud));
+        while (true) {
+            c.SDL_WaitSemaphore(p.queued);
+            if (p.quit.load(.acquire)) return 0;
+            p.entries[p.next.fetchAdd(1, .monotonic)].load();
+        }
     }
 
     pub fn request(p: *Player, path: []const u8, op: Op, gain: f32) void {
@@ -129,7 +150,7 @@ pub const Player = struct {
 
     /// The engine's command queue takes one producer, this thread.
     pub fn tick(p: *Player) void {
-        for (p.entries.items) |e| {
+        for (p.entries[0..p.len]) |e| {
             const want = e.pending orelse continue;
             if (!e.ready.load(.acquire)) continue;
             e.pending = null;
@@ -140,13 +161,18 @@ pub const Player = struct {
         }
     }
 
+    /// Only once the engine has stopped, as its voices may still read this audio.
     pub fn deinit(p: *Player) void {
-        for (p.entries.items) |e| {
-            if (e.thread) |t| c.SDL_WaitThread(t, null);
+        p.quit.store(true, .release);
+        // Each worker leaves on its first wake after quit, so one count per worker frees them all.
+        for (p.threads) |t| if (t != null) c.SDL_SignalSemaphore(p.queued);
+        for (p.threads) |t| if (t) |th| c.SDL_WaitThread(th, null);
+        if (p.queued) |s| c.SDL_DestroySemaphore(s);
+        for (p.entries[0..p.len]) |e| {
+            p.gpa.free(e.data);
             p.gpa.free(e.path);
             p.gpa.destroy(e);
         }
-        p.entries.deinit(p.gpa);
     }
 };
 
@@ -172,6 +198,23 @@ test "a script naming a new sound every frame stops adding them" {
     defer p.deinit();
     var buf: [32]u8 = undefined;
     for (0..max_entries + 10) |i| p.request(try std.fmt.bufPrint(&buf, "missing/{d}.ogg", .{i}), .cache, 1);
-    try std.testing.expectEqual(@as(usize, max_entries), p.entries.items.len);
+    try std.testing.expectEqual(@as(usize, max_entries), p.len);
     try std.testing.expect(p.entry("missing/0.ogg") != null);
+}
+
+test "a burst of new sounds is loaded by the few workers, each one once" {
+    var eng: engine_mod.Engine = undefined;
+    eng.rate = 48000;
+    var slot: u8 = engine_mod.first_oneshot_slot;
+    var p: Player = .{ .gpa = std.testing.allocator, .io = std.testing.io, .engine = &eng, .slot = &slot };
+    defer p.deinit();
+    var buf: [32]u8 = undefined;
+    for (0..40) |i| _ = p.entry(try std.fmt.bufPrint(&buf, "missing/{d}.ogg", .{i}));
+    for (p.entries[0..p.len]) |e| {
+        var waited: u32 = 0;
+        while (!e.ready.load(.acquire) and waited < 5000) : (waited += 1) c.SDL_Delay(1);
+        try std.testing.expect(e.ready.load(.acquire));
+    }
+    try std.testing.expectEqual(@as(usize, 40), p.next.load(.monotonic));
+    for (p.threads) |t| try std.testing.expect(t != null);
 }

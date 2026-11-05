@@ -263,9 +263,8 @@ pub const App = struct {
     /// Rendered off the main thread so startup doesn't wait on the reverb.
     fn sfxThread(ud: ?*anyopaque) callconv(.c) c_int {
         const a: *App = @ptrCast(@alignCast(ud));
-        // Menu sounds live until exit, past the engine that reads them.
         for (std.enums.values(menu_sound.Sfx), 0..) |which, i| {
-            a.sfx_data[i] = menu_sound.renderSfx(std.heap.page_allocator, which, a.engine.rate) catch &.{};
+            a.sfx_data[i] = menu_sound.renderSfx(a.gpa, which, a.engine.rate) catch &.{};
         }
         a.sfx_ready.store(true, .release);
         return 0;
@@ -273,9 +272,15 @@ pub const App = struct {
 
     fn bgmThread(ud: ?*anyopaque) callconv(.c) c_int {
         const a: *App = @ptrCast(@alignCast(ud));
-        a.bgm_data = menu_sound.renderBgm(std.heap.page_allocator, a.engine.rate) catch return 0;
+        a.bgm_data = menu_sound.renderBgm(a.gpa, a.engine.rate) catch return 0;
         a.bgm_ready.store(true, .release);
         return 0;
+    }
+
+    /// Only once the engine has stopped and run has joined the threads that render these.
+    fn freeMenuSounds(a: *App) void {
+        for (a.sfx_data) |d| a.gpa.free(d);
+        a.gpa.free(a.bgm_data);
     }
 
     /// The loop renders when a menu first shows, so a chart launched from the command line never pays for it.
@@ -1197,6 +1202,9 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, opts: Options) !void {
     defer app.sounds.deinit();
     app.preview = .{ .gpa = gpa, .io = io, .rate = app.engine.rate };
     defer app.preview.deinit();
+    defer app.freeMenuSounds();
+    // Voices read the buffers freed above until the writer stops; destroy closes again harmlessly.
+    defer engine.close();
     skin_mod.lua_mod.audio_hook = .{ .ud = app, .f = App.skinAudio };
     // Textures stay cached, so a play's skins come up without the wait.
     app.reloadSkins(.beat7);

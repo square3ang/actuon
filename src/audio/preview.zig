@@ -21,14 +21,14 @@ const Job = struct {
     fn run(ud: ?*anyopaque) callconv(.c) c_int {
         const j: *Job = @ptrCast(@alignCast(ud));
         defer j.done.store(true, .release);
-        j.data = (if (j.from_chart) clip.render(j.gpa, std.heap.page_allocator, j.io, j.path, j.rate, &j.cancel) else j.decodeFile()) catch return 0;
+        j.data = (if (j.from_chart) clip.render(j.gpa, j.io, j.path, j.rate, &j.cancel) else j.decodeFile()) catch return 0;
         return 0;
     }
 
     fn decodeFile(j: *Job) ![]f32 {
         const bytes = try fs.readAlloc(j.gpa, j.io, j.path, 1 << 28);
         defer j.gpa.free(bytes);
-        return (try decode.decode(std.heap.page_allocator, bytes, j.path, j.rate)).data;
+        return (try decode.decode(j.gpa, bytes, j.path, j.rate)).data;
     }
 
     /// Hands over `path`, which the caller keeps or frees.
@@ -53,7 +53,7 @@ pub const Preview = struct {
 
     fn retire(p: *Preview, data: []const f32, now: u64) void {
         if (data.len == 0) return;
-        p.retired.append(p.gpa, .{ .data = data, .at = now }) catch {};
+        p.retired.appendAssumeCapacity(.{ .data = data, .at = now });
     }
 
     pub fn tick(p: *Preview, path: ?[]const u8, from_chart: bool, now: u64) void {
@@ -64,9 +64,11 @@ pub const Preview = struct {
                 i += 1;
                 continue;
             }
-            std.heap.page_allocator.free(r.data);
+            p.gpa.free(r.data);
             _ = p.retired.swapRemove(i);
         }
+        // A tick retires at most once; out of memory, nothing changes until a later tick has room.
+        p.retired.ensureUnusedCapacity(p.gpa, 1) catch return;
         if (p.job) |j| if (j.done.load(.acquire)) {
             const data = j.data;
             const job_path = j.finish();
@@ -77,7 +79,7 @@ pub const Preview = struct {
                 p.current = data;
                 p.current_path = job_path;
             } else {
-                if (data.len > 0) std.heap.page_allocator.free(data);
+                p.gpa.free(data);
                 p.gpa.free(job_path);
             }
         };
@@ -100,13 +102,18 @@ pub const Preview = struct {
         p.job = j;
     }
 
-    /// Decoded audio stays mapped until exit, past the engine.
+    /// Only once the engine has stopped, as its voices may still read this audio.
     pub fn deinit(p: *Preview) void {
         if (p.job) |j| {
             j.cancel.store(true, .release);
+            if (j.thread) |t| c.SDL_WaitThread(t, null);
+            j.thread = null;
+            p.gpa.free(j.data);
             p.gpa.free(j.finish());
         }
+        p.gpa.free(p.current);
         p.gpa.free(p.current_path);
+        for (p.retired.items) |r| p.gpa.free(r.data);
         p.retired.deinit(p.gpa);
     }
 };
@@ -132,7 +139,7 @@ test "a folder's preview is known by its name and type" {
 test "with nothing wanted, a preview goes silent and its audio waits out the fade" {
     var p: Preview = .{ .gpa = std.testing.allocator, .io = std.testing.io, .rate = 48000 };
     defer p.deinit();
-    const data = try std.heap.page_allocator.alloc(f32, 2);
+    const data = try std.testing.allocator.alloc(f32, 2);
     p.current = data;
     p.current_path = try std.testing.allocator.dupe(u8, "x");
     p.tick(null, false, 1000);
@@ -153,10 +160,24 @@ test "a preview still mixing for a chart the cursor left is told to stop, then d
     try std.testing.expect(!j.cancel.load(.acquire));
     p.tick("b.bms", true, 0);
     try std.testing.expect(j.cancel.load(.acquire));
-    j.data = try std.heap.page_allocator.alloc(f32, 2);
+    j.data = try std.testing.allocator.alloc(f32, 2);
     j.done.store(true, .release);
     p.tick("b.bms", true, 0);
     try std.testing.expectEqual(@as(usize, 0), p.current.len);
     try std.testing.expect(p.job != null);
     try std.testing.expectEqualStrings("b.bms", p.job.?.path);
+}
+
+test "out of memory, a preview keeps playing what it has rather than lose track of it" {
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 2 });
+    var p: Preview = .{ .gpa = failing.allocator(), .io = std.testing.io, .rate = 48000 };
+    defer p.deinit();
+    p.current = try p.gpa.alloc(f32, 2);
+    p.current_path = try p.gpa.dupe(u8, "x");
+    p.tick(null, false, 1000);
+    try std.testing.expectEqual(@as(usize, 2), p.current.len);
+    failing.fail_index = std.math.maxInt(usize);
+    p.tick(null, false, 1000);
+    try std.testing.expectEqual(@as(usize, 0), p.current.len);
+    try std.testing.expectEqual(@as(usize, 1), p.retired.items.len);
 }
