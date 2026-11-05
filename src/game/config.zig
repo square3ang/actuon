@@ -427,7 +427,7 @@ test "a broken config is kept aside instead of being overwritten" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try fs.mkdirs(io, fs.test_data_dir);
+    try fs.mkdirs(io, try fs.dataDir(a));
     const p = try path(a);
     const bad = try std.fmt.allocPrint(a, "{s}.bad", .{p});
     defer fs.remove(io, bad);
@@ -445,7 +445,7 @@ test "an unreadable config that cannot be moved is never written over" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try fs.mkdirs(io, fs.test_data_dir);
+    try fs.mkdirs(io, try fs.dataDir(a));
     const p = try path(a);
     const bad = try std.fmt.allocPrint(a, "{s}.bad", .{p});
     // A folder in the way makes the move fail.

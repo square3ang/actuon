@@ -152,11 +152,9 @@ pub fn listChecked(a: std.mem.Allocator, io: Io, path: []const u8) ![]Entry {
     return out.toOwnedSlice(a);
 }
 
-pub const test_data_dir = ".zig-cache/tmp/actuon-test-data";
-
 pub fn dataDir(gpa: std.mem.Allocator) ![]u8 {
-    // Tests must never touch the player's settings and scores.
-    if (@import("builtin").is_test) return gpa.dupe(u8, test_data_dir ++ "/");
+    // Tests must never touch the player's settings and scores. Per run, as test runs at once would empty each other's database.
+    if (@import("builtin").is_test) return std.fmt.allocPrint(gpa, ".zig-cache/tmp/actuon-test-data-{x}/", .{std.testing.random_seed});
     const p = c.SDL_GetPrefPath("actuon", "actuon") orelse return error.NoPrefPath;
     defer c.SDL_free(p);
     return gpa.dupe(u8, std.mem.span(p));
