@@ -5,6 +5,11 @@ mod rooms;
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
+use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
+use hyper::body::{Bytes, Incoming};
+use hyper::header::{CONNECTION, CONTENT_TYPE, UPGRADE};
+use hyper::{Method, Request, Response};
+use hyper_util::rt::{TokioIo, TokioTimer};
 use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -17,7 +22,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tiny_http::{Header, Method, Request, Response, Server};
+use tokio::sync::Semaphore;
 
 const MAX_CHART: usize = 16 << 20;
 const MAX_REPLAY: usize = 16 << 20;
@@ -29,7 +34,7 @@ const LOGIN_ATTEMPTS: u32 = 10;
 const REGISTER_WINDOW_SECS: u64 = 24 * 3600;
 const REGISTER_ATTEMPTS: u32 = 10;
 const MAX_OWNER_CLAIMS: i64 = 50_000;
-/// Checks plus hashes stay below the 8 workers, so reads still get through.
+/// Checks plus hashes stay below DB_CONNECTIONS, so reads still get through.
 const MAX_CHECKS: usize = 2;
 const MAX_HASHES: usize = 4;
 /// A real chart takes far less: about 500 bytes a note.
@@ -50,6 +55,8 @@ CREATE TABLE IF NOT EXISTS claim(
   user INTEGER NOT NULL, sha256 TEXT NOT NULL, clear INTEGER NOT NULL, ex INTEGER NOT NULL, max_combo INTEGER NOT NULL, miss INTEGER NOT NULL,
   date INTEGER NOT NULL, PRIMARY KEY(user, sha256));
 CREATE INDEX IF NOT EXISTS claim_rank ON claim(sha256, ex DESC);
+CREATE TABLE IF NOT EXISTS attempt(key TEXT PRIMARY KEY, expires INTEGER NOT NULL, count INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS attempt_expires ON attempt(expires);
 DROP VIEW IF EXISTS best;
 CREATE VIEW best AS
   SELECT user,sha256,clear,ex,max_combo,miss,date,1 AS verified FROM score s
@@ -59,15 +66,58 @@ CREATE VIEW best AS
 ";
 
 struct Ctx {
-    /// shortcut: per-process and lost on restart, move to a shared store if the server ever runs multiple instances
-    attempts: Mutex<HashMap<String, (Instant, u32)>>,
     checks: Mutex<HashSet<i64>>,
     hashes: AtomicUsize,
     rooms: Mutex<rooms::Rooms>,
     online: Mutex<HashMap<i64, usize>>,
 }
 
-/// shortcut: a thread per multiplayer connection, move to async I/O if this many players are ever online.
+/// Each connection serves one request at a time: WAL lets them read while another writes.
+struct Pool {
+    free: Semaphore,
+    conns: Mutex<Vec<Connection>>,
+}
+
+impl Pool {
+    /// Database work blocks, so it runs off the async threads.
+    async fn run<T: Send + 'static>(
+        self: &Arc<Self>,
+        job: impl FnOnce(&Connection) -> T + Send + 'static,
+    ) -> Result<T, ApiError> {
+        let busy = || ApiError::new(500, "internal error");
+        let _permit = self.free.acquire().await.map_err(|_| busy())?;
+        let db = self
+            .conns
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop()
+            .ok_or_else(busy)?;
+        let lease = Lease(self.clone(), Some(db));
+        tokio::task::spawn_blocking(move || job(lease.1.as_ref().expect("leased")))
+            .await
+            .map_err(|e| {
+                eprintln!("request failed: {e}");
+                busy()
+            })
+    }
+}
+
+/// Gives the connection back even when the job panics, or the pool would shrink for good.
+struct Lease(Arc<Pool>, Option<Connection>);
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        if let Some(db) = self.1.take() {
+            self.0
+                .conns
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(db);
+        }
+    }
+}
+
+const DB_CONNECTIONS: usize = 8;
 const MAX_PLAYERS_ONLINE: usize = 1024;
 /// A dropped connection stays open here until the proxy gives up on it, so a reconnect overlaps it.
 const MAX_CONNECTIONS_PER_PLAYER: usize = 4;
@@ -169,21 +219,39 @@ fn new_token() -> Result<String, ApiError> {
     Ok(hex(&raw))
 }
 
-fn read_body(req: &mut Request, limit: usize) -> Result<Vec<u8>, ApiError> {
-    if req.body_length().is_some_and(|n| n > limit) {
-        return Err(ApiError::new(413, "body too large"));
+/// The body comes whole, read up to its route's limit.
+type Req = Request<Bytes>;
+
+fn body_limit(method: &Method, path: &str) -> usize {
+    if method == Method::POST && path.starts_with("/scores/") {
+        MAX_CHART + MAX_REPLAY
+    } else {
+        MAX_JSON
     }
-    let mut body = Vec::new();
-    req.as_reader()
-        .take(limit as u64 + 1)
-        .read_to_end(&mut body)?;
-    if body.len() > limit {
-        return Err(ApiError::new(413, "body too large"));
-    }
-    Ok(body)
 }
 
-fn auth(req: &Request, db: &Connection) -> Result<i64, ApiError> {
+async fn read_body(req: Request<Incoming>) -> Result<Req, ApiError> {
+    let limit = body_limit(req.method(), req.uri().path());
+    let (head, body) = req.into_parts();
+    let body = Limited::new(body, limit)
+        .collect()
+        .await
+        .map_err(|e| {
+            if e.is::<LengthLimitError>() {
+                ApiError::new(413, "body too large")
+            } else {
+                ApiError::new(400, "body could not be read")
+            }
+        })?
+        .to_bytes();
+    Ok(Request::from_parts(head, body))
+}
+
+fn url_of<B>(req: &Request<B>) -> &str {
+    req.uri().path_and_query().map_or("/", |p| p.as_str())
+}
+
+fn auth<B>(req: &Request<B>, db: &Connection) -> Result<i64, ApiError> {
     let header = header_of(req, "Authorization");
     let token = header
         .as_deref()
@@ -204,10 +272,10 @@ fn client_key(real_ip: Option<&str>, peer: Option<IpAddr>) -> String {
     }
 }
 
-fn client_of(req: &Request) -> String {
+fn client_of(req: &Req) -> String {
     client_key(
         header_of(req, "X-Real-IP").as_deref(),
-        req.remote_addr().map(|a| a.ip()),
+        req.extensions().get::<IpAddr>().copied(),
     )
 }
 
@@ -250,12 +318,13 @@ struct Credentials {
 fn valid_name(n: &str) -> bool {
     (1..=32).contains(&n.chars().count())
         && n.trim() == n
-        && n.chars().all(|c| c.is_alphanumeric() || "_-./ ".contains(c))
+        && n.chars()
+            .all(|c| c.is_alphanumeric() || "_-./ ".contains(c))
 }
 
-fn register(req: &mut Request, db: &Connection, ctx: &Ctx) -> ApiResult {
-    let c: Credentials = serde_json::from_slice(&read_body(req, MAX_JSON)?)
-        .map_err(|_| ApiError::new(400, "bad json"))?;
+fn register(req: &Req, db: &Connection, ctx: &Ctx) -> ApiResult {
+    let c: Credentials =
+        serde_json::from_slice(req.body()).map_err(|_| ApiError::new(400, "bad json"))?;
     if !valid_name(&c.name) || c.password.len() < 8 || c.password.len() > 1024 {
         return Err(ApiError::new(
             400,
@@ -263,7 +332,7 @@ fn register(req: &mut Request, db: &Connection, ctx: &Ctx) -> ApiResult {
         ));
     }
     throttle(
-        ctx,
+        db,
         &format!("register:{}", client_of(req)),
         REGISTER_WINDOW_SECS,
         REGISTER_ATTEMPTS,
@@ -300,39 +369,47 @@ struct NewName {
     name: String,
 }
 
-fn rename(req: &mut Request, db: &Connection) -> ApiResult {
+fn rename(req: &Req, db: &Connection) -> ApiResult {
     let user = auth(req, db)?;
-    let q: NewName = serde_json::from_slice(&read_body(req, MAX_JSON)?)
-        .map_err(|_| ApiError::new(400, "bad json"))?;
+    let q: NewName =
+        serde_json::from_slice(req.body()).map_err(|_| ApiError::new(400, "bad json"))?;
     if !valid_name(&q.name) {
-        return Err(ApiError::new(400, "name must be 1-32 letters, digits or _ - . /"));
+        return Err(ApiError::new(
+            400,
+            "name must be 1-32 letters, digits or _ - . /",
+        ));
     }
     db.execute("UPDATE user SET name=?1 WHERE id=?2", params![q.name, user])
         .map_err(name_conflict)?;
     Ok(json!({"name": q.name}))
 }
 
-fn throttle(ctx: &Ctx, key: &str, window_secs: u64, limit: u32) -> Result<(), ApiError> {
-    let mut attempts = ctx.attempts.lock().unwrap_or_else(|e| e.into_inner());
-    let now = Instant::now();
-    attempts.retain(|_, (expires, _)| *expires > now);
-    let (_, count) = attempts
-        .entry(key.to_string())
-        .or_insert((now + Duration::from_secs(window_secs), 0));
-    *count += 1;
-    if *count > limit {
+/// In the database, so a restart or a second instance does not reset the counts. The key is hashed to keep addresses out of backups.
+fn throttle(db: &Connection, key: &str, window_secs: u64, limit: u32) -> Result<(), ApiError> {
+    let now = now();
+    db.prepare_cached("DELETE FROM attempt WHERE expires<=?1")?
+        .execute([now])?;
+    let count: u32 = db
+        .prepare_cached(
+            "INSERT INTO attempt(key,expires,count) VALUES(?1,?2,1)
+             ON CONFLICT(key) DO UPDATE SET count=count+1 RETURNING count",
+        )?
+        .query_row(params![token_hash(key), now + window_secs as i64], |r| {
+            r.get(0)
+        })?;
+    if count > limit {
         return Err(ApiError::new(429, "too many attempts"));
     }
     Ok(())
 }
 
 /// Login rotates the token, so a leaked one dies at the next login.
-fn login(req: &mut Request, db: &Connection, ctx: &Ctx) -> ApiResult {
-    let c: Credentials = serde_json::from_slice(&read_body(req, MAX_JSON)?)
-        .map_err(|_| ApiError::new(400, "bad json"))?;
+fn login(req: &Req, db: &Connection, ctx: &Ctx) -> ApiResult {
+    let c: Credentials =
+        serde_json::from_slice(req.body()).map_err(|_| ApiError::new(400, "bad json"))?;
     // Hashed because the name is still unchecked and can be 1 MiB long.
     throttle(
-        ctx,
+        db,
         &format!("login:{}:{}", client_of(req), token_hash(&c.name)),
         LOGIN_WINDOW_SECS,
         LOGIN_ATTEMPTS,
@@ -426,13 +503,13 @@ fn verify_isolated(
         .map_err(|_| ApiError::new(422, rejected))
 }
 
-fn submit(req: &mut Request, db: &Connection, ctx: &Ctx, sha: &str) -> ApiResult {
+fn submit(req: &Req, db: &Connection, ctx: &Ctx, sha: &str) -> ApiResult {
     let user = auth(req, db)?;
     // Per score, not per chart: a wrong format then costs only the one who sent it.
-    let format = format_of(req.url())?;
-    let upload = read_body(req, MAX_CHART + MAX_REPLAY)?;
+    let format = format_of(url_of(req))?;
+    let upload = req.body();
     // The chart comes with every score and is dropped after the check, so the server holds no charts.
-    let chart_len = query_of(req.url())
+    let chart_len = query_of(url_of(req))
         .get("chart")
         .and_then(|n| n.parse::<usize>().ok())
         .filter(|n| *n <= MAX_CHART && *n <= upload.len())
@@ -442,7 +519,7 @@ fn submit(req: &mut Request, db: &Connection, ctx: &Ctx, sha: &str) -> ApiResult
     }
     let (info, v) = {
         let _slot = CheckSlot::take(ctx, user)?;
-        verify_isolated(format, chart_len, &upload)?
+        verify_isolated(format, chart_len, upload)?
     };
     if !v.ok {
         return Err(ApiError::new(422, "replay could not be verified"));
@@ -461,7 +538,7 @@ fn submit(req: &mut Request, db: &Connection, ctx: &Ctx, sha: &str) -> ApiResult
         params![user, sha, v.clear, v.ex_score, v.max_combo, v.miss, v.total_notes, v.gauge_type, now()],
     )?;
     // After the save: the room must not show a final score the database does not hold.
-    if let Some(code) = query_of(req.url()).get("room") {
+    if let Some(code) = query_of(url_of(req)).get("room") {
         lock_rooms(ctx).record_final(code, user, sha, v.seed, v.ex_score as u32);
     }
     Ok(
@@ -493,16 +570,23 @@ fn standing(
     Ok((rank, total, clears))
 }
 
-fn ranking(req: &Request, db: &Connection, sha: &str, url: &str) -> ApiResult {
+/// `offset` is echoed, so a client can tell a page from an older server's top rows.
+fn ranking(req: &Req, db: &Connection, sha: &str, url: &str) -> ApiResult {
     let me = auth(req, db).ok();
-    let limit: i64 = query_of(url)
+    let query = query_of(url);
+    let limit: i64 = query
         .get("limit")
         .and_then(|l| l.parse().ok())
         .unwrap_or(100)
         .clamp(1, 1000);
-    let mut st = db.prepare_cached(&format!("SELECT u.name,s.ex,s.clear,s.miss,s.max_combo,s.date,s.verified,s.user FROM best s JOIN user u ON u.id=s.user WHERE s.sha256=?1 {RANK_ORDER} LIMIT ?2"))?;
+    let offset: i64 = query
+        .get("offset")
+        .and_then(|o| o.parse().ok())
+        .unwrap_or(0)
+        .max(0);
+    let mut st = db.prepare_cached(&format!("SELECT u.name,s.ex,s.clear,s.miss,s.max_combo,s.date,s.verified,s.user FROM best s JOIN user u ON u.id=s.user WHERE s.sha256=?1 {RANK_ORDER} LIMIT ?2 OFFSET ?3"))?;
     let scores = st
-        .query_map(params![sha, limit], |r| {
+        .query_map(params![sha, limit, offset], |r| {
             Ok(json!({"name": r.get::<_, String>(0)?, "ex": r.get::<_, i64>(1)?, "clear": r.get::<_, i64>(2)?, "miss": r.get::<_, i64>(3)?, "max_combo": r.get::<_, i64>(4)?, "date": r.get::<_, i64>(5)?, "verified": r.get::<_, i64>(6)? != 0, "you": Some(r.get::<_, i64>(7)?) == me}))
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -516,7 +600,7 @@ fn ranking(req: &Request, db: &Connection, sha: &str, url: &str) -> ApiResult {
         .optional()?
         .unwrap_or_default();
     Ok(
-        json!({"scores": scores, "rank": rank, "total": total, "clears": clears, "title": title, "artist": artist}),
+        json!({"scores": scores, "offset": offset, "rank": rank, "total": total, "clears": clears, "title": title, "artist": artist}),
     )
 }
 
@@ -537,7 +621,7 @@ fn recent(db: &Connection, url: &str) -> ApiResult {
 }
 
 /// For IR sync: the client must see a verified score beside a claim to know which replays are still worth sending.
-fn my_scores(req: &Request, db: &Connection) -> ApiResult {
+fn my_scores(req: &Req, db: &Connection) -> ApiResult {
     let user = auth(req, db)?;
     let mut st = db.prepare_cached(
         "SELECT sha256,ex,clear,miss,max_combo,date,1 FROM score WHERE user=?1 UNION ALL SELECT sha256,ex,clear,miss,max_combo,date,0 FROM claim WHERE user=?1",
@@ -566,10 +650,10 @@ struct Claims {
 }
 
 /// Scores without a replay are unchecked: they rank below every verified score, and any verified score replaces them.
-fn add_claims(req: &mut Request, db: &Connection) -> ApiResult {
+fn add_claims(req: &Req, db: &Connection) -> ApiResult {
     let user = auth(req, db)?;
-    let q: Claims = serde_json::from_slice(&read_body(req, MAX_JSON)?)
-        .map_err(|_| ApiError::new(400, "bad json"))?;
+    let q: Claims =
+        serde_json::from_slice(req.body()).map_err(|_| ApiError::new(400, "bad json"))?;
     if !q
         .scores
         .iter()
@@ -608,7 +692,7 @@ fn add_claims(req: &mut Request, db: &Connection) -> ApiResult {
     Ok(json!({"stored": q.scores.len()}))
 }
 
-fn add_rival(req: &Request, db: &Connection, name: &str) -> ApiResult {
+fn add_rival(req: &Req, db: &Connection, name: &str) -> ApiResult {
     let user = auth(req, db)?;
     let rival: i64 = db
         .query_row("SELECT id FROM user WHERE name=?1", [name], |r| r.get(0))
@@ -621,7 +705,7 @@ fn add_rival(req: &Request, db: &Connection, name: &str) -> ApiResult {
     Ok(json!({"added": name}))
 }
 
-fn remove_rival(req: &Request, db: &Connection, name: &str) -> ApiResult {
+fn remove_rival(req: &Req, db: &Connection, name: &str) -> ApiResult {
     let user = auth(req, db)?;
     db.execute(
         "DELETE FROM rival WHERE user=?1 AND rival=(SELECT id FROM user WHERE name=?2)",
@@ -630,7 +714,7 @@ fn remove_rival(req: &Request, db: &Connection, name: &str) -> ApiResult {
     Ok(json!({"removed": name}))
 }
 
-fn rivals(req: &Request, db: &Connection) -> ApiResult {
+fn rivals(req: &Req, db: &Connection) -> ApiResult {
     let user = auth(req, db)?;
     let mut st = db.prepare_cached(
         "SELECT u.name FROM rival r JOIN user u ON u.id=r.rival WHERE r.user=?1 ORDER BY u.name",
@@ -641,7 +725,7 @@ fn rivals(req: &Request, db: &Connection) -> ApiResult {
     Ok(json!({"rivals": names}))
 }
 
-fn rival_scores(req: &Request, db: &Connection, sha: &str) -> ApiResult {
+fn rival_scores(req: &Req, db: &Connection, sha: &str) -> ApiResult {
     let user = auth(req, db)?;
     let mut st = db.prepare_cached(&format!(
         "SELECT u.name,s.ex,s.clear,s.miss,s.verified FROM best s JOIN user u ON u.id=s.user
@@ -660,9 +744,9 @@ struct TableQuery {
     sha256: Vec<String>,
 }
 
-fn table_ranking(req: &mut Request, db: &Connection) -> ApiResult {
-    let q: TableQuery = serde_json::from_slice(&read_body(req, MAX_JSON)?)
-        .map_err(|_| ApiError::new(400, "bad json"))?;
+fn table_ranking(req: &Req, db: &Connection) -> ApiResult {
+    let q: TableQuery =
+        serde_json::from_slice(req.body()).map_err(|_| ApiError::new(400, "bad json"))?;
     if q.sha256.len() > 8192 || !q.sha256.iter().all(|s| valid_sha(s)) {
         return Err(ApiError::new(400, "bad chart list"));
     }
@@ -681,11 +765,9 @@ fn table_ranking(req: &mut Request, db: &Connection) -> ApiResult {
     Ok(json!({"players": players}))
 }
 
-fn route(req: &mut Request, db: &Connection, ctx: &Ctx) -> ApiResult {
-    let url = req.url().to_string();
-    let path = url.split('?').next().unwrap_or("").to_string();
-    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
-    let method = req.method().clone();
+fn route(req: &Req, db: &Connection, ctx: &Ctx) -> ApiResult {
+    let url = url_of(req);
+    let parts: Vec<&str> = req.uri().path().trim_matches('/').split('/').collect();
     let sha_ok = |s: &str| {
         if valid_sha(s) {
             Ok(())
@@ -693,112 +775,167 @@ fn route(req: &mut Request, db: &Connection, ctx: &Ctx) -> ApiResult {
             Err(ApiError::new(400, "bad hash"))
         }
     };
-    match (&method, parts.as_slice()) {
-        (Method::Get, ["health"]) => Ok(json!({"ok": true})),
-        (Method::Post, ["register"]) => register(req, db, ctx),
-        (Method::Post, ["login"]) => login(req, db, ctx),
-        (Method::Post, ["scores", sha]) => {
+    match (req.method(), parts.as_slice()) {
+        (&Method::GET, ["health"]) => Ok(json!({"ok": true})),
+        (&Method::POST, ["register"]) => register(req, db, ctx),
+        (&Method::POST, ["login"]) => login(req, db, ctx),
+        (&Method::POST, ["scores", sha]) => {
             sha_ok(sha)?;
             submit(req, db, ctx, sha)
         }
-        (Method::Get, ["scores", sha]) => {
+        (&Method::GET, ["scores", sha]) => {
             sha_ok(sha)?;
-            ranking(req, db, sha, &url)
+            ranking(req, db, sha, url)
         }
-        (Method::Get, ["scores", sha, "rivals"]) => {
+        (&Method::GET, ["scores", sha, "rivals"]) => {
             sha_ok(sha)?;
             rival_scores(req, db, sha)
         }
-        (Method::Get, ["recent"]) => recent(db, &url),
-        (Method::Get, ["me", "scores"]) => my_scores(req, db),
-        (Method::Post, ["me", "claims"]) => add_claims(req, db),
-        (Method::Post, ["me", "name"]) => rename(req, db),
-        (Method::Get, ["rivals"]) => rivals(req, db),
-        (Method::Put, ["rivals", name]) => add_rival(req, db, &percent_decode(name)?),
-        (Method::Delete, ["rivals", name]) => remove_rival(req, db, &percent_decode(name)?),
-        (Method::Post, ["table-ranking"]) => table_ranking(req, db),
+        (&Method::GET, ["recent"]) => recent(db, url),
+        (&Method::GET, ["me", "scores"]) => my_scores(req, db),
+        (&Method::POST, ["me", "claims"]) => add_claims(req, db),
+        (&Method::POST, ["me", "name"]) => rename(req, db),
+        (&Method::GET, ["rivals"]) => rivals(req, db),
+        (&Method::PUT, ["rivals", name]) => add_rival(req, db, &percent_decode(name)?),
+        (&Method::DELETE, ["rivals", name]) => remove_rival(req, db, &percent_decode(name)?),
+        (&Method::POST, ["table-ranking"]) => table_ranking(req, db),
         _ => Err(ApiError::new(404, "not found")),
     }
 }
 
-fn header_of(req: &Request, name: &'static str) -> Option<String> {
+fn header_of<B>(req: &Request<B>, name: &'static str) -> Option<String> {
     req.headers()
-        .iter()
-        .find(|h| h.field.equiv(name))
-        .map(|h| h.value.as_str().to_string())
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
 }
 
 fn user_name(db: &Connection, user: i64) -> Result<String, ApiError> {
     Ok(db.query_row("SELECT name FROM user WHERE id=?1", [user], |r| r.get(0))?)
 }
 
-/// Hands the request's socket to a thread of its own, so a connection that stays open holds no worker.
-fn open_play(req: Request, db: &Connection, ctx: &Arc<Ctx>) {
-    let accepted = (|| {
-        let user = auth(&req, db)?;
-        let key = header_of(&req, "Sec-WebSocket-Key")
-            .filter(|_| {
-                header_of(&req, "Upgrade").is_some_and(|u| u.eq_ignore_ascii_case("websocket"))
-            })
-            .ok_or(ApiError::new(400, "websocket required"))?;
-        let name = user_name(db, user)?;
-        let mut online = ctx.online.lock().unwrap_or_else(|e| e.into_inner());
-        if online.values().sum::<usize>() >= MAX_PLAYERS_ONLINE {
-            return Err(ApiError::new(503, "server is busy"));
-        }
-        let mine = online.entry(user).or_default();
-        if *mine >= MAX_CONNECTIONS_PER_PLAYER {
-            return Err(ApiError::new(429, "too many connections"));
-        }
-        *mine += 1;
-        Ok((user, play::Session::new(user, name), key))
-    })();
-    let (user, session, key) = match accepted {
-        Ok(got) => got,
-        Err(ApiError(code, msg)) => {
-            let _ = req.respond(
-                Response::from_string(json!({"error": msg}).to_string()).with_status_code(code),
-            );
-            return;
-        }
+type Reply = Response<Full<Bytes>>;
+
+fn reply(result: ApiResult) -> Reply {
+    let (code, body) = match result {
+        Ok(v) => (200, v),
+        Err(ApiError(code, msg)) => (code, json!({"error": msg})),
     };
-    let accept = tungstenite::handshake::derive_accept_key(key.as_bytes());
-    let header =
-        Header::from_bytes("Sec-WebSocket-Accept", accept).expect("accept key is a header value");
-    let stream = req.upgrade("websocket", Response::empty(101).with_header(header));
-    let ctx = ctx.clone();
-    std::thread::spawn(move || {
-        play::serve(stream, &ctx.rooms, session);
-        let mut online = ctx.online.lock().unwrap_or_else(|e| e.into_inner());
-        let mine = online.entry(user).or_default();
-        *mine = mine.saturating_sub(1);
-        // A player leaves with their last connection: one who reconnected is already back in the room.
-        if *mine == 0 {
-            online.remove(&user);
-            lock_rooms(&ctx).leave(user);
-        }
-    });
+    let mut out = Response::new(Full::new(Bytes::from(body.to_string())));
+    *out.status_mut() =
+        hyper::StatusCode::from_u16(code).unwrap_or(hyper::StatusCode::INTERNAL_SERVER_ERROR);
+    out.headers_mut().insert(
+        CONTENT_TYPE,
+        "application/json".parse().expect("static header"),
+    );
+    out
 }
 
-/// Each worker keeps its own connection: WAL lets them read while another writes.
-fn worker(server: Arc<Server>, ctx: Arc<Ctx>, db: Connection) {
-    loop {
-        let Ok(mut req) = server.recv() else { return };
-        if req.method() == &Method::Get && req.url() == "/play" {
-            open_play(req, &db, &ctx);
-            continue;
+/// Counts the connection before the upgrade, so the limits hold while it is being opened.
+fn admit(
+    head: &Request<()>,
+    db: &Connection,
+    ctx: &Ctx,
+) -> Result<(i64, play::Session, String), ApiError> {
+    let user = auth(head, db)?;
+    let key = header_of(head, "Sec-WebSocket-Key")
+        .filter(|_| header_of(head, "Upgrade").is_some_and(|u| u.eq_ignore_ascii_case("websocket")))
+        .ok_or(ApiError::new(400, "websocket required"))?;
+    let name = user_name(db, user)?;
+    let mut online = ctx.online.lock().unwrap_or_else(|e| e.into_inner());
+    if online.values().sum::<usize>() >= MAX_PLAYERS_ONLINE {
+        return Err(ApiError::new(503, "server is busy"));
+    }
+    let mine = online.entry(user).or_default();
+    if *mine >= MAX_CONNECTIONS_PER_PLAYER {
+        return Err(ApiError::new(429, "too many connections"));
+    }
+    *mine += 1;
+    Ok((user, play::Session::new(user, name), key))
+}
+
+fn close_play(ctx: &Ctx, user: i64) {
+    let mut online = ctx.online.lock().unwrap_or_else(|e| e.into_inner());
+    let mine = online.entry(user).or_default();
+    *mine = mine.saturating_sub(1);
+    // A player leaves with their last connection: one who reconnected is already back in the room.
+    if *mine == 0 {
+        online.remove(&user);
+        lock_rooms(ctx).leave(user);
+    }
+}
+
+/// An open room connection is a task, not a thread, so it holds nothing while it waits.
+async fn open_play(mut req: Request<Incoming>, ctx: Arc<Ctx>, pool: Arc<Pool>) -> Reply {
+    let upgrade = hyper::upgrade::on(&mut req);
+    let head = Request::from_parts(req.into_parts().0, ());
+    let admitted = {
+        let ctx = ctx.clone();
+        pool.run(move |db| admit(&head, db, &ctx)).await
+    };
+    let (user, session, key) = match admitted.and_then(|got| got) {
+        Ok(got) => got,
+        Err(e) => return reply(Err(e)),
+    };
+    tokio::spawn(async move {
+        match upgrade.await {
+            Ok(stream) => play::serve(TokioIo::new(stream), &ctx.rooms, session).await,
+            Err(e) => eprintln!("websocket upgrade: {e}"),
         }
-        let result = route(&mut req, &db, &ctx);
-        let (code, body) = match result {
-            Ok(v) => (200, v),
-            Err(ApiError(code, msg)) => (code, json!({"error": msg})),
+        close_play(&ctx, user);
+    });
+    let accept = tokio_tungstenite::tungstenite::handshake::derive_accept_key(key.as_bytes());
+    let mut out = Response::new(Full::new(Bytes::new()));
+    *out.status_mut() = hyper::StatusCode::SWITCHING_PROTOCOLS;
+    let headers = out.headers_mut();
+    headers.insert(UPGRADE, "websocket".parse().expect("static header"));
+    headers.insert(CONNECTION, "Upgrade".parse().expect("static header"));
+    headers.insert(
+        "Sec-WebSocket-Accept",
+        accept.parse().expect("accept key is a header value"),
+    );
+    out
+}
+
+async fn handle(mut req: Request<Incoming>, peer: IpAddr, ctx: Arc<Ctx>, pool: Arc<Pool>) -> Reply {
+    if req.method() == Method::GET && req.uri().path() == "/play" {
+        return open_play(req, ctx, pool).await;
+    }
+    req.extensions_mut().insert(peer);
+    let result = match read_body(req).await {
+        Ok(req) => pool
+            .run(move |db| route(&req, db, &ctx))
+            .await
+            .and_then(|r| r),
+        Err(e) => Err(e),
+    };
+    reply(result)
+}
+
+async fn serve(listener: tokio::net::TcpListener, ctx: Arc<Ctx>, pool: Arc<Pool>) {
+    loop {
+        let (stream, peer) = match listener.accept().await {
+            Ok(got) => got,
+            Err(e) => {
+                // Out of file descriptors, most likely: retrying at once would spin.
+                eprintln!("accept: {e}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
         };
-        let header = Header::from_bytes("Content-Type", "application/json").expect("static header");
-        let _ = req.respond(
-            Response::from_string(body.to_string())
-                .with_status_code(code)
-                .with_header(header),
-        );
+        let (ctx, pool) = (ctx.clone(), pool.clone());
+        tokio::spawn(async move {
+            let service = hyper::service::service_fn(move |req| {
+                let reply = handle(req, peer.ip(), ctx.clone(), pool.clone());
+                async move { Ok::<_, std::convert::Infallible>(reply.await) }
+            });
+            // A client that drops mid-request is no fault of the server's.
+            let _ = hyper::server::conn::http1::Builder::new()
+                .timer(TokioTimer::new())
+                .serve_connection(TokioIo::new(stream), service)
+                .with_upgrades()
+                .await;
+        });
     }
 }
 
@@ -899,25 +1036,31 @@ fn main() {
     std::fs::create_dir_all(&data).expect("create data directory");
     let db_path = data.join("ir.db");
     initialize(&open_db(&db_path).expect("open database")).expect("initialize database");
-    let server = Arc::new(Server::http(&addr).expect("bind address"));
+    let pool = Arc::new(Pool {
+        free: Semaphore::new(DB_CONNECTIONS),
+        conns: Mutex::new(
+            (0..DB_CONNECTIONS)
+                .map(|_| open_db(&db_path).expect("open database"))
+                .collect(),
+        ),
+    });
     let ctx = Arc::new(Ctx {
-        attempts: Mutex::new(HashMap::new()),
         checks: Mutex::new(HashSet::new()),
         hashes: AtomicUsize::new(0),
         rooms: Mutex::new(rooms::Rooms::default()),
         online: Mutex::new(HashMap::new()),
     });
-    eprintln!("actuon IR on http://{addr}");
-    let threads: Vec<_> = (0..8)
-        .map(|_| {
-            let (s, c) = (server.clone(), ctx.clone());
-            let db = open_db(&db_path).expect("open database");
-            std::thread::spawn(move || worker(s, c, db))
-        })
-        .collect();
-    for t in threads {
-        let _ = t.join();
-    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("start runtime");
+    runtime.block_on(async {
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .expect("bind address");
+        eprintln!("actuon IR on http://{addr}");
+        serve(listener, ctx, pool).await
+    });
 }
 
 #[cfg(test)]
@@ -1024,7 +1167,6 @@ mod tests {
 
     fn test_ctx() -> Ctx {
         Ctx {
-            attempts: Mutex::new(HashMap::new()),
             checks: Mutex::new(HashSet::new()),
             hashes: AtomicUsize::new(0),
             rooms: Mutex::default(),
@@ -1096,16 +1238,88 @@ mod tests {
     }
 
     #[test]
-    fn throttle_counts_per_key_within_window() {
-        let ctx = test_ctx();
-        assert!(throttle(&ctx, "a", 60, 1).is_ok());
-        assert_eq!(throttle(&ctx, "a", 60, 1).unwrap_err().0, 429);
-        assert!(throttle(&ctx, "b", 60, 1).is_ok());
-        assert!(throttle(&ctx, "c", 0, 1).is_ok());
+    fn throttle_counts_per_key_within_window_across_restarts() {
+        let path = std::env::temp_dir().join(format!("actuon-throttle-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = open_db(&path).unwrap();
+        initialize(&db).unwrap();
+        assert!(throttle(&db, "a", 60, 1).is_ok());
+        assert_eq!(throttle(&db, "a", 60, 1).unwrap_err().0, 429);
+        assert!(throttle(&db, "b", 60, 1).is_ok());
+        assert!(throttle(&db, "c", 0, 1).is_ok());
         assert!(
-            throttle(&ctx, "c", 0, 1).is_ok(),
+            throttle(&db, "c", 0, 1).is_ok(),
             "an expired window starts over"
         );
+        drop(db);
+        let other = open_db(&path).unwrap();
+        assert_eq!(
+            throttle(&other, "a", 60, 1).unwrap_err().0,
+            429,
+            "a restart keeps the count"
+        );
+        let stored: String = other
+            .query_row("SELECT key FROM attempt LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert!(valid_sha(&stored), "keys are stored hashed");
+        drop(other);
+        for end in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{end}", path.display()));
+        }
+    }
+
+    #[test]
+    fn a_page_of_the_ranking_starts_at_its_offset() {
+        let db = Connection::open_in_memory().unwrap();
+        initialize(&db).unwrap();
+        let sha = "a".repeat(64);
+        for (id, ex) in [(1, 30), (2, 20), (3, 10)] {
+            db.execute(
+                "INSERT INTO user(id,name,pass,token) VALUES(?1,?2,'','t'||?1)",
+                params![id, format!("p{id}")],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO score VALUES(?1,?2,0,?3,0,0,0,0,0)",
+                params![id, sha, ex],
+            )
+            .unwrap();
+        }
+        let req = Request::new(Bytes::new());
+        let names = |url: &str| {
+            let v = ranking(&req, &db, &sha, url).unwrap();
+            let names: Vec<String> = v["scores"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s["name"].as_str().unwrap().to_string())
+                .collect();
+            (
+                names,
+                v["offset"].as_i64().unwrap(),
+                v["total"].as_i64().unwrap(),
+            )
+        };
+        assert_eq!(names("/x?limit=2"), (vec!["p1".into(), "p2".into()], 0, 3));
+        assert_eq!(
+            names("/x?limit=2&offset=1"),
+            (vec!["p2".into(), "p3".into()], 1, 3)
+        );
+        assert_eq!(
+            names("/x?offset=-5"),
+            (vec!["p1".into(), "p2".into(), "p3".into()], 0, 3)
+        );
+        assert_eq!(names("/x?offset=9").0, Vec::<String>::new());
+    }
+
+    #[test]
+    fn only_score_uploads_take_a_large_body() {
+        assert_eq!(
+            body_limit(&Method::POST, &format!("/scores/{}", "a".repeat(64))),
+            MAX_CHART + MAX_REPLAY
+        );
+        assert_eq!(body_limit(&Method::POST, "/login"), MAX_JSON);
+        assert_eq!(body_limit(&Method::GET, "/scores/x"), MAX_JSON);
     }
 
     #[test]

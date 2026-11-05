@@ -10,10 +10,6 @@ const db_mod = @import("../db/db.zig");
 
 pub const Upload = struct {
     gpa: std.mem.Allocator,
-    io: std.Io,
-    base: []u8,
-    token: []u8,
-    sha: []u8,
     chart_path: []u8,
     replay: []u8,
     /// Empty outside a versus room.
@@ -36,31 +32,98 @@ pub const Board = struct {
     prev_rank: i64 = 0,
     total: i64 = 0,
     clears: [11]i64 = @splat(0),
+    /// One page of the ranking: place `first` + 1 onwards.
     rows: []Row = &.{},
-    /// Only the UI thread touches it once the board is ready.
+    first: usize = 0,
+    /// Only the UI thread touches it once the board is ready. A place, counted from 0 over the whole ranking.
     offset: usize = 0,
+    /// Null in tests: no more pages are fetched.
+    source: ?Source = null,
+    page: std.atomic.Value(u8) = .init(page_idle),
+    /// Written by the page thread before `page` becomes page_ready.
+    next_rows: []Row = &.{},
+    next_first: usize = 0,
+    /// A page asked once is not asked again, so a server that ignores the offset is not asked every frame.
+    asked: ?usize = null,
+
+    pub const Source = struct { io: std.Io, base: []u8, token: []u8, sha: []u8 };
+    const page_idle = 0;
+    const page_busy = 1;
+    const page_ready = 2;
 
     pub fn release(b: *Board) void {
         if (b.refs.fetchSub(1, .acq_rel) != 1) return;
         b.gpa.free(b.rows);
+        b.gpa.free(b.next_rows);
+        if (b.source) |s| {
+            b.gpa.free(s.base);
+            b.gpa.free(s.token);
+            b.gpa.free(s.sha);
+        }
         b.gpa.destroy(b);
+    }
+
+    fn places(b: *const Board) usize {
+        return @intCast(@max(b.total, 0));
     }
 
     /// As beatoraja's AbstractResult: a wheel step is one row, and the slider's last place does nothing.
     pub fn scroll(b: *Board, rows: i32) void {
-        if (!b.ready() or b.rows.len == 0) return;
+        if (!b.ready() or b.places() == 0) return;
         const to = @as(i64, @intCast(b.offset)) + rows;
-        b.offset = @intCast(std.math.clamp(to, 0, @as(i64, @intCast(b.rows.len)) - 1));
+        b.offset = @intCast(std.math.clamp(to, 0, @as(i64, @intCast(b.places())) - 1));
+        b.update();
     }
 
     pub fn position(b: *const Board) f32 {
         if (!b.ready()) return 0;
-        return @as(f32, @floatFromInt(b.offset)) / @as(f32, @floatFromInt(@max(b.rows.len, 1)));
+        return @as(f32, @floatFromInt(b.offset)) / @as(f32, @floatFromInt(@max(b.places(), 1)));
     }
 
     pub fn setPosition(b: *Board, value: f32) void {
         if (!b.ready() or value < 0 or value >= 1) return;
-        b.offset = @intFromFloat(@as(f32, @floatFromInt(b.rows.len)) * value);
+        b.offset = @intFromFloat(@as(f32, @floatFromInt(b.places())) * value);
+        b.update();
+    }
+
+    /// UI thread, every frame: takes a fetched page, and asks for the one the shown rows need.
+    pub fn update(b: *Board) void {
+        if (!b.ready()) return;
+        switch (b.page.load(.acquire)) {
+            page_busy => return,
+            page_ready => {
+                b.gpa.free(b.rows);
+                b.rows = b.next_rows;
+                b.first = b.next_first;
+                b.next_rows = &.{};
+                b.page.store(page_idle, .release);
+            },
+            else => {},
+        }
+        const start = b.pageWanted() orelse return;
+        const src = b.source orelse return;
+        b.asked = start;
+        b.page.store(page_busy, .release);
+        _ = b.refs.fetchAdd(1, .acq_rel);
+        const f = b.gpa.create(PageFetch) catch return b.pageFailed();
+        f.* = .{ .src = src, .board = b, .start = start };
+        if (!runDetached(pageThread, "ir-page", f)) {
+            b.gpa.destroy(f);
+            b.pageFailed();
+        }
+    }
+
+    fn pageFailed(b: *Board) void {
+        b.page.store(page_idle, .release);
+        b.release();
+    }
+
+    /// Centred on the shown rows, so scrolling either way stays inside it for a while.
+    fn pageWanted(b: *const Board) ?usize {
+        const end = @min(b.offset + rows_shown, b.places());
+        if (b.offset >= b.first and end <= b.first + b.rows.len) return null;
+        const start = b.offset -| page_len / 2;
+        return if (b.asked == start) null else start;
     }
 
     pub fn ready(b: *const Board) bool {
@@ -129,34 +192,61 @@ pub const Board = struct {
     fn rowAt(b: *const Board, i: i32) ?*const Row {
         if (i < 0) return null;
         const at = b.offset + @as(usize, @intCast(i));
-        return if (at < b.rows.len) &b.rows[at] else null;
+        return if (at >= b.first and at - b.first < b.rows.len) &b.rows[at - b.first] else null;
     }
 };
+
+/// Skins show ten rows: ids 120 to 129 and 380 to 389.
+const rows_shown = 10;
+/// The most the server sends at once.
+const page_len = 1000;
+
+const PageFetch = struct { src: Board.Source, board: *Board, start: usize };
+
+fn fetchPage(a: std.mem.Allocator, f: *PageFetch) !void {
+    const s = f.src;
+    const got = try fetchStanding(a, s.io, s.base, s.token, s.sha, f.start);
+    f.board.next_rows = try toRows(f.board.gpa, got.scores);
+    f.board.next_first = got.offset;
+}
+
+fn pageThread(ud: ?*anyopaque) callconv(.c) c_int {
+    const f: *PageFetch = @ptrCast(@alignCast(ud));
+    const b = f.board;
+    var arena = std.heap.ArenaAllocator.init(b.gpa);
+    defer arena.deinit();
+    if (fetchPage(arena.allocator(), f)) |_| {
+        b.page.store(Board.page_ready, .release);
+    } else |e| {
+        std.log.warn("IR ranking page: {t}", .{e});
+        b.page.store(Board.page_idle, .release);
+    }
+    b.gpa.destroy(f);
+    b.release();
+    _ = detached_threads.fetchSub(1, .acq_rel);
+    return 0;
+}
 
 const Standing = struct {
     const Score = struct { name: []const u8, ex: i64, clear: i64, verified: bool = true, you: bool = false };
     scores: []Score,
+    /// An older server sends no offset and always its top rows, which this default then places right.
+    offset: usize = 0,
     rank: i64 = 0,
     total: i64 = 0,
     clears: []const i64 = &.{},
 };
 
-fn fetchStanding(a: std.mem.Allocator, io: std.Io, base: []const u8, token: []const u8, sha: []const u8) !Standing {
-    // shortcut: the server's limit, so places past 1000 cannot be scrolled to; page if a chart ever gets there
-    const url = try std.fmt.allocPrint(a, "{s}/scores/{s}?limit=1000", .{ base, sha });
+fn fetchStanding(a: std.mem.Allocator, io: std.Io, base: []const u8, token: []const u8, sha: []const u8, offset: usize) !Standing {
+    const url = try std.fmt.allocPrint(a, "{s}/scores/{s}?limit={d}&offset={d}", .{ base, sha, page_len, offset });
     const r = try http.request(a, io, .GET, url, null, try bearer(a, token));
     if (r.status != 200) return error.HttpStatus;
     return std.json.parseFromSliceLeaky(Standing, a, r.body, .{ .ignore_unknown_fields = true });
 }
 
-fn fillBoard(b: *Board, s: Standing) void {
-    b.rank = s.rank;
-    b.total = s.total;
-    for (b.clears[0..@min(b.clears.len, s.clears.len)], s.clears[0..@min(b.clears.len, s.clears.len)]) |*d, v| d.* = v;
-    b.rows = b.gpa.alloc(Board.Row, s.scores.len) catch return;
-    // Opens on the player's own place, like beatoraja's MusicResult.
-    b.offset = if (s.rank > 10) @intCast(@min(s.rank - 5, @as(i64, @intCast(s.scores.len -| 1)))) else 0;
-    for (b.rows, s.scores) |*row, score| {
+fn toRows(gpa: std.mem.Allocator, scores: []const Standing.Score) ![]Board.Row {
+    const rows = try gpa.alloc(Board.Row, scores.len);
+    for (rows, scores) |*row, score| {
         // Short: skins leave little room before the score column.
         const label = if (score.you or score.verified) "" else " (unv.)";
         const shown = std.fmt.bufPrint(&row.name_buf, "{s}{s}", .{ if (score.you) "YOU" else score.name, label }) catch row.name_buf[0..0];
@@ -164,6 +254,20 @@ fn fillBoard(b: *Board, s: Standing) void {
         row.ex = score.ex;
         row.clear = score.clear;
     }
+    return rows;
+}
+
+fn fillBoard(b: *Board, s: Standing) void {
+    b.rank = s.rank;
+    b.total = s.total;
+    for (b.clears[0..@min(b.clears.len, s.clears.len)], s.clears[0..@min(b.clears.len, s.clears.len)]) |*d, v| d.* = v;
+    // Opens on the player's own place, like beatoraja's MusicResult; a place past this page is fetched by update.
+    b.offset = if (s.rank > 10) @intCast(@max(@min(s.rank - 5, s.total - 1), 0)) else 0;
+    b.rows = toRows(b.gpa, s.scores) catch |e| {
+        std.log.warn("IR ranking: {t}", .{e});
+        return;
+    };
+    b.first = s.offset;
 }
 
 fn bearer(a: std.mem.Allocator, token: []const u8) ![]const std.http.Header {
@@ -211,20 +315,18 @@ fn uploadThread(ud: ?*anyopaque) callconv(.c) c_int {
     var arena = std.heap.ArenaAllocator.init(u.gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    var client = http.client(u.gpa, u.io);
+    const s = u.board.source.?;
+    var client = http.client(u.gpa, s.io);
     defer client.deinit();
-    const code = submit(u.gpa, &client, u.base, u.token, u.sha, u.chart_path, u.replay, u.room, &u.board.prev_rank) catch |e| blk: {
+    const code = submit(u.gpa, &client, s.base, s.token, s.sha, u.chart_path, u.replay, u.room, &u.board.prev_rank) catch |e| blk: {
         std.log.warn("IR upload: {t}", .{e});
         break :blk 0;
     };
     // Rankings are a bonus: without them the upload still counts.
-    if (fetchStanding(a, u.io, u.base, u.token, u.sha)) |after| fillBoard(u.board, after) else |e| std.log.warn("IR ranking: {t}", .{e});
+    if (fetchStanding(a, s.io, s.base, s.token, s.sha, 0)) |after| fillBoard(u.board, after) else |e| std.log.warn("IR ranking: {t}", .{e});
     u.board.state.store(if (code == 200) Board.accepted else Board.failed, .release);
     u.board.release();
     const gpa = u.gpa;
-    gpa.free(u.base);
-    gpa.free(u.token);
-    gpa.free(u.sha);
     gpa.free(u.chart_path);
     gpa.free(u.replay);
     gpa.free(u.room);
@@ -254,42 +356,39 @@ pub fn waitForThreads() bool {
     return false;
 }
 
-const RankingFetch = struct { io: std.Io, base: []u8, token: []u8, sha: []u8, board: *Board };
-
 fn rankingThread(ud: ?*anyopaque) callconv(.c) c_int {
-    const f: *RankingFetch = @ptrCast(@alignCast(ud));
-    const gpa = f.board.gpa;
-    var arena = std.heap.ArenaAllocator.init(gpa);
+    const b: *Board = @ptrCast(@alignCast(ud));
+    const s = b.source.?;
+    var arena = std.heap.ArenaAllocator.init(b.gpa);
     defer arena.deinit();
-    if (fetchStanding(arena.allocator(), f.io, f.base, f.token, f.sha)) |s| {
-        fillBoard(f.board, s);
-        f.board.state.store(Board.accepted, .release);
+    if (fetchStanding(arena.allocator(), s.io, s.base, s.token, s.sha, 0)) |got| {
+        fillBoard(b, got);
+        b.state.store(Board.accepted, .release);
     } else |e| {
         std.log.warn("IR ranking: {t}", .{e});
-        f.board.state.store(Board.failed, .release);
+        b.state.store(Board.failed, .release);
     }
-    f.board.release();
-    gpa.free(f.base);
-    gpa.free(f.token);
-    gpa.free(f.sha);
-    gpa.destroy(f);
+    b.release();
     _ = detached_threads.fetchSub(1, .acq_rel);
     return 0;
 }
 
-/// The caller owns one reference, as with startUpload.
-pub fn startRanking(gpa: std.mem.Allocator, io: std.Io, base: []const u8, token: []const u8, sha: []const u8) ?*Board {
+/// Keeps where it came from, to fetch more pages as the player scrolls.
+fn newBoard(gpa: std.mem.Allocator, io: std.Io, base: []const u8, token: []const u8, sha: []const u8) ?*Board {
     const board = gpa.create(Board) catch return null;
-    board.* = .{ .gpa = gpa };
-    const f = gpa.create(RankingFetch) catch return null;
-    f.* = .{
+    board.* = .{ .gpa = gpa, .source = .{
         .io = io,
         .base = gpa.dupe(u8, base) catch return null,
         .token = gpa.dupe(u8, token) catch return null,
         .sha = gpa.dupe(u8, sha) catch return null,
-        .board = board,
-    };
-    if (!runDetached(rankingThread, "ir-ranking", f)) {
+    } };
+    return board;
+}
+
+/// The caller owns one reference, as with startUpload.
+pub fn startRanking(gpa: std.mem.Allocator, io: std.Io, base: []const u8, token: []const u8, sha: []const u8) ?*Board {
+    const board = newBoard(gpa, io, base, token, sha) orelse return null;
+    if (!runDetached(rankingThread, "ir-ranking", board)) {
         board.state.store(Board.failed, .release);
         board.release();
     }
@@ -298,15 +397,10 @@ pub fn startRanking(gpa: std.mem.Allocator, io: std.Io, base: []const u8, token:
 
 /// The caller owns one reference to the answer and gives it back with release.
 pub fn startUpload(gpa: std.mem.Allocator, io: std.Io, base: []const u8, token: []const u8, sha: []const u8, chart_path: []const u8, replay: []const u8, room: []const u8) ?*Board {
-    const board = gpa.create(Board) catch return null;
-    board.* = .{ .gpa = gpa };
+    const board = newBoard(gpa, io, base, token, sha) orelse return null;
     const u = gpa.create(Upload) catch return null;
     u.* = .{
         .gpa = gpa,
-        .io = io,
-        .base = gpa.dupe(u8, base) catch return null,
-        .token = gpa.dupe(u8, token) catch return null,
-        .sha = gpa.dupe(u8, sha) catch return null,
         .chart_path = gpa.dupe(u8, chart_path) catch return null,
         .replay = gpa.dupe(u8, replay) catch return null,
         .room = gpa.dupe(u8, room) catch return null,
@@ -935,18 +1029,18 @@ test "board answers the ids skins read" {
     };
     const clears = [_]i64{ 0, 1, 0, 0, 1, 0, 1, 0, 1, 0, 0 };
     var b: Board = .{ .gpa = a };
-    fillBoard(&b, .{ .scores = &scores, .rank = 3, .total = 4, .clears = &clears });
+    fillBoard(&b, .{ .scores = &scores, .rank = 3, .total = 3, .clears = &clears });
     defer a.free(b.rows);
     b.prev_rank = 4;
     try std.testing.expectEqual(@as(?i64, null), b.number(179)); // still pending
     try std.testing.expectEqualStrings("", b.name(120));
     b.state.store(Board.accepted, .release);
     try std.testing.expectEqual(@as(?i64, 3), b.number(179));
-    try std.testing.expectEqual(@as(?i64, 4), b.number(180));
-    try std.testing.expectEqual(@as(?i64, 75), b.number(181));
+    try std.testing.expectEqual(@as(?i64, 3), b.number(180));
+    try std.testing.expectEqual(@as(?i64, 100), b.number(181));
     try std.testing.expectEqual(@as(?i64, 4), b.number(182));
     try std.testing.expectEqual(@as(?i64, 1), b.number(210)); // failed count
-    try std.testing.expectEqual(@as(?i64, 25), b.number(211)); // failed percent
+    try std.testing.expectEqual(@as(?i64, 33), b.number(211)); // failed percent
     try std.testing.expectEqual(@as(?i64, 1), b.number(216)); // hard count
     try std.testing.expectEqual(@as(?i64, 1), b.number(218)); // full combo count
     try std.testing.expectEqual(@as(?i64, 90), b.number(380));
@@ -985,6 +1079,44 @@ test "the list opens on a player far down it" {
     try std.testing.expectEqual(@as(usize, 15), b.offset);
     try std.testing.expectEqualStrings("YOU", b.name(124));
     try std.testing.expectEqual(@as(?i64, 20), b.number(394));
+}
+
+test "scrolling past the loaded page asks for the next and shows it once it comes" {
+    const a = std.testing.allocator;
+    const scores = try a.alloc(Standing.Score, page_len);
+    defer a.free(scores);
+    @memset(scores, .{ .name = "top", .ex = 1, .clear = 1 });
+    var b: Board = .{ .gpa = a };
+    fillBoard(&b, .{ .scores = scores, .rank = 2000, .total = 2500 });
+    defer a.free(b.rows);
+    b.state.store(Board.accepted, .release);
+    try std.testing.expectEqual(@as(usize, 1995), b.offset);
+    try std.testing.expectEqualStrings("", b.name(120));
+    try std.testing.expectEqual(@as(?usize, 1495), b.pageWanted());
+    b.scroll(-1995);
+    try std.testing.expectEqual(@as(?usize, null), b.pageWanted());
+    b.scroll(9999);
+    try std.testing.expectEqual(@as(usize, 2499), b.offset);
+    const page = try a.alloc(Standing.Score, 1);
+    defer a.free(page);
+    page[0] = .{ .name = "last", .ex = 1, .clear = 1 };
+    b.next_rows = try toRows(a, page);
+    b.next_first = 2499;
+    b.page.store(Board.page_ready, .release);
+    b.update();
+    try std.testing.expectEqualStrings("last", b.name(120));
+    try std.testing.expectEqual(@as(?i64, 2500), b.number(390));
+    try std.testing.expectEqual(@as(u8, Board.page_idle), b.page.load(.acquire));
+    b.asked = 0;
+    b.scroll(-9999);
+    try std.testing.expectEqual(@as(?usize, null), b.pageWanted());
+}
+
+test "a server's place numbers cannot underflow the list" {
+    var b: Board = .{ .gpa = std.testing.allocator };
+    fillBoard(&b, .{ .scores = &.{}, .rank = 50, .total = 0 });
+    defer std.testing.allocator.free(b.rows);
+    try std.testing.expectEqual(@as(usize, 0), b.offset);
 }
 
 test "the format numbers sent to the IR stay what the server reads" {
