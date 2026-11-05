@@ -9,9 +9,9 @@ replay. The chart must hash to SHA. The server checks both and keeps only the ch
 Scores and accounts live in SQLite in WAL mode (`ir.db`) in the data directory.
 
 It listens on `127.0.0.1:8730` over plain HTTP, so put a TLS proxy in front before opening it to the internet. Use one
-that buffers request bodies, as nginx does by default: a worker waits for the whole body, so a few very slow clients could
-otherwise hold all eight. A score upload can be 32 MiB, a 16 MiB chart and a 16 MiB replay, so let the proxy take that
-much (`client_max_body_size 32m`).
+that buffers request bodies, as nginx does by default: the server reads at most eight score uploads at once, answers 503
+to more, and drops a body that takes longer than 150 seconds, so slow clients would otherwise crowd out the rest. A score
+upload can be 32 MiB, a 16 MiB chart and a 16 MiB replay, so let the proxy take that much (`client_max_body_size 32m`).
 
 Registration allows 10 accounts a day per client address, and login 10 tries a minute per address and name. Each account
 can hold 50,000 unverified claims, and a chart must parse with notes. Two checks run at once, one per player, and four password hashes: the next gets a 503 until
@@ -27,8 +27,8 @@ cd server && cargo build --release
 ./target/release/actuon-ir 127.0.0.1:8730 ir-data
 ```
 
-Run one instance on a local disk: WAL does not work over a network filesystem, and login attempt counters live in the
-process, so a restart resets them. A database from an older server opens as it is.
+Run one instance on a local disk: WAL does not work over a network filesystem, and rooms live in the process. Login and
+registration attempts are counted in the database, so a restart keeps them. A database from an older server opens as it is.
 
 To install or update it on a Linux host over SSH, fill in `server/.env` from `server/.env.example`, then run
 `server/deploy.sh root@HOST`. It builds static binaries of the server and the web page here, which needs
@@ -82,7 +82,8 @@ BEST panel and reaches select skins through the same ids as below, and skins' IR
 
 Result skins get the chart's ranking, your rank before and after the upload, and the clear counts through beatoraja's IR
 ids. Your own row is named `YOU`, and unverified rows end in `(unv.)`. The wheel, Up and Down, and the skin's slider
-scroll the list through the first 1000 places.
+scroll the whole list: `GET /scores/SHA?limit=N&offset=M` sends up to 1000 places at a time, and the next page is fetched
+as the list scrolls past the one loaded.
 
 `tests/ir_e2e.py` runs the whole round trip.
 
@@ -104,6 +105,9 @@ an HTTP status number to tell the cases apart.
 | `{type: "chart", sha256, title}` | Host only: changes the chart |
 | `{type: "start"}` | Host only: starts a round after 8 seconds. 409 while one is about to start, as for `chart` |
 | `{type: "report", round, has_chart, ex, judged, gauge, done}` | This player's live numbers |
+
+The room answer holds `starts_in_ms` until the round starts. A player whose chart loads after that starts the song as far
+in as the others are, and the notes it skipped count as missed.
 
 Closing a player's last connection leaves the room, so a client that reconnects keeps its seat while the server still
 holds the dropped connection. A player can have four connections open. The client reports ten times a second; the server answers no faster than once per

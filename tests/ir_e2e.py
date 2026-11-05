@@ -118,6 +118,8 @@ try:
     r = call("GET", f"/scores/{sha}?limit=1", None, bob)[1]
     assert (r["rank"], r["total"], sum(r["clears"]), len(r["scores"])) == (2, 2, 2, 1), r
     assert r["scores"][0]["you"] is False
+    r = call("GET", f"/scores/{sha}?limit=1&offset=1", None, bob)[1]
+    assert (r["offset"], r["total"], [s["you"] for s in r["scores"]]) == (1, 2, [True]), "a page starts at its offset"
     r = call("GET", f"/scores/{sha}", None, bob)[1]
     assert [s["you"] for s in r["scores"]] == [False, True], r
     assert call("GET", f"/scores/{sha}")[1]["rank"] == 0, "no token, no rank"
@@ -136,6 +138,9 @@ try:
     assert call("POST", "/login", {"name": "alicia", "password": "correct horse"})[0] == 200
     guess = {"name": "nobody", "password": "wrong password"}
     assert [call("POST", "/login", guess)[0] for _ in range(11)] == [401] * 10 + [429], "attempts are counted"
+    stop_server()
+    proc = start_server()
+    assert call("POST", "/login", guess)[0] == 429, "a restart keeps the count"
     assert call("POST", "/login", guess, None, "198.51.100.1")[0] == 401, "another client has its own count"
     account = {"name": "throttled", "password": "correct horse"}
     tries = [call("POST", "/register", {**account, "name": f"throttled{i}"}, None, "198.51.100.2")[0] for i in range(11)]

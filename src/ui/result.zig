@@ -237,6 +237,7 @@ fn drawSkinned(a: *App, sk: *@import("../skin/model.zig").Skin) void {
     const shown: i64 = @intCast(now - r.shown_at);
     st.timers[1] = if (shown >= skin.input_ms) skin.input_ms else -1;
     if (r.board) |b| {
+        b.update();
         if (st.timers[172] < 0) st.timers[172] = shown;
         const done: usize = switch (b.state.load(.acquire)) {
             ir.Board.pending => 0,
@@ -481,7 +482,7 @@ test "up and down scroll the ranking" {
     const a = try testing.open();
     defer testing.close(a);
     var rows: [3]ir.Board.Row = @splat(.{});
-    var b: ir.Board = .{ .gpa = a.gpa, .rows = &rows };
+    var b: ir.Board = .{ .gpa = a.gpa, .rows = &rows, .total = 3 };
     b.state.store(ir.Board.accepted, .release);
     a.res.board = &b;
     defer a.res.board = null;

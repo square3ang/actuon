@@ -543,7 +543,6 @@ pub const App = struct {
             const least: i64 = std.math.clamp(sk.loadend_ms, 0, 5000);
             if (a.load_skin_at != 0 and a.load_params.start_us == 0 and elapsed < least) return;
         }
-        // shortcut: a player who loads after the clock starts late and plays behind, send seek time if that is common.
         if (a.versus.in_round and c.SDL_GetTicks() < a.versus.start_tick) return;
         c.SDL_WaitThread(a.load_thread, null);
         a.load_thread = null;
@@ -593,7 +592,7 @@ pub const App = struct {
             a.engine.uiPlay(skin_sound.nextSlot(&a.sfx_slot), e.data, false, a.cfg.sfx_volume);
         };
         input.setPollRate(if (s.params.autoplay or s.params.replay != null) 0 else a.cfg.input_poll_hz);
-        s.start();
+        s.start(versus.lateUs(&a.versus, c.SDL_GetTicks()));
     }
 
     fn dropStagefile(a: *App) void {

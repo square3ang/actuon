@@ -1,11 +1,13 @@
 use crate::rooms::{self, Report, RoomError, Rooms};
+use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::io::{Read, Write};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tungstenite::protocol::{Role, WebSocketConfig};
-use tungstenite::{Message, WebSocket};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
 
 /// A player's own limit, so one connection cannot make the server work flat out.
 const MIN_GAP: Duration = Duration::from_millis(40);
@@ -134,23 +136,27 @@ impl Session {
     }
 }
 
-pub fn serve<S: Read + Write>(stream: S, rooms: &Mutex<Rooms>, mut session: Session) {
+pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: S,
+    rooms: &Mutex<Rooms>,
+    mut session: Session,
+) {
     let config = WebSocketConfig::default()
         .max_message_size(Some(MAX_MESSAGE))
         .max_frame_size(Some(MAX_MESSAGE));
-    let mut ws = WebSocket::from_raw_socket(stream, Role::Server, Some(config));
+    let mut ws = WebSocketStream::from_raw_socket(stream, Role::Server, Some(config)).await;
     let mut last = Instant::now();
     loop {
-        let text = match ws.read() {
-            Ok(Message::Text(text)) => text,
+        let text = match ws.next().await {
+            Some(Ok(Message::Text(text))) => text,
             // tungstenite answers a ping itself, on the next read or send.
-            Ok(Message::Ping(_) | Message::Pong(_)) => continue,
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
             _ => break,
         };
-        std::thread::sleep(MIN_GAP.saturating_sub(last.elapsed()));
+        tokio::time::sleep(MIN_GAP.saturating_sub(last.elapsed())).await;
         last = Instant::now();
         let answer = session.handle(rooms, text.as_str(), last);
-        if ws.send(Message::text(answer.to_string())).is_err() {
+        if ws.send(Message::text(answer.to_string())).await.is_err() {
             break;
         }
     }

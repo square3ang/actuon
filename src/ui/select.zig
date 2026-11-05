@@ -1102,6 +1102,7 @@ fn tickBoard(a: *App, now_ms: u64) void {
         s.board_since_ms = now_ms;
         return;
     }
+    if (s.board) |b| b.update();
     if (sha.len == 0 or s.board_asked or now_ms - s.board_since_ms < board_delay_ms) return;
     s.board_asked = true;
     s.board = ir.startRanking(a.gpa, a.io, a.cfg.ir_url, a.cfg.ir_token, sha);
@@ -2649,6 +2650,10 @@ test "a chart's ranking is asked for once the cursor rests, and only when signed
     try std.testing.expectEqual(first, a.sel.board.?);
 
     while (!first.ready()) c.SDL_Delay(5);
+    first.next_rows = try a.gpa.alloc(ir.Board.Row, 1);
+    first.page.store(ir.Board.page_ready, .release);
+    tickBoard(a, 9000);
+    try std.testing.expectEqual(@as(usize, 1), first.rows.len);
     dropBoard(a);
     try std.testing.expect(a.select_state.ir_board == null);
 }

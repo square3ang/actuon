@@ -332,12 +332,13 @@ pub const Session = struct {
         return out;
     }
 
-    pub fn start(s: *Session) void {
+    /// `late_us` is how long ago a shared versus start was, so a slow loader joins where the others are.
+    pub fn start(s: *Session, late_us: i64) void {
         input.clear();
-        const first = firstUs(s.params.start_us);
-        // Starting mid-chart is a preview: the sim catches up silently, the same way a seek does.
-        if (s.params.start_us > 0) {
-            s.sim.advance(s.params.start_us);
+        const first = firstUs(s.params.start_us, late_us);
+        // Starting mid-chart is a preview or a late versus player: the sim catches up silently, the same way a seek does.
+        if (first > 0) {
+            s.sim.advance(first);
             var sink: [256]core.sim.Out = undefined;
             while (s.sim.drain(&sink) > 0) {}
         }
@@ -482,7 +483,7 @@ pub const Session = struct {
         s.events.clearRetainingCapacity();
         s.timed_hits.clearRetainingCapacity();
         s.last_event_t = std.math.minInt(i64);
-        const first = firstUs(s.params.start_us);
+        const first = firstUs(s.params.start_us, 0);
         s.engine.seek(s.engine.usToFrame(first));
         // Paused, the clock stays here: at the old time the new sim would miss every note up to it.
         s.pause_t.store(first, .release);
@@ -558,8 +559,8 @@ fn isTimedHit(judge: u8) bool {
     return judge < 4;
 }
 
-fn firstUs(start_us: i64) i64 {
-    return start_us - (if (start_us > 0) @as(i64, 0) else preroll_us);
+fn firstUs(start_us: i64, late_us: i64) i64 {
+    return start_us - (if (start_us > 0) @as(i64, 0) else preroll_us) + late_us;
 }
 
 /// Notes can end long before the music, so play on until the sound ends; a practice section ends where set.
@@ -636,8 +637,10 @@ test "a practice section ends where it was set, and every loop has a lead-in fro
     chart.notes = &.{};
     try std.testing.expectEqual(@as(i64, 1000), playEnd(&chart, &samples, 4000, true));
     try std.testing.expectEqual(@as(i64, 1_000_000), playEnd(&chart, &samples, 4000, false));
-    try std.testing.expectEqual(-preroll_us, firstUs(0));
-    try std.testing.expectEqual(@as(i64, 5), firstUs(5));
+    try std.testing.expectEqual(-preroll_us, firstUs(0, 0));
+    try std.testing.expectEqual(@as(i64, 5), firstUs(5, 0));
+    try std.testing.expectEqual(1_000_000 - preroll_us, firstUs(0, 1_000_000));
+    try std.testing.expectEqual(@as(i64, 3_000_000), firstUs(0, 3_000_000 + preroll_us));
 }
 
 test "only a hit with a timing is kept for the graph" {

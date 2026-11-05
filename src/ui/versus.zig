@@ -230,6 +230,12 @@ fn startRound(a: *App) void {
     a.skin_state.versus = &v.view;
 }
 
+/// How far past the room's start a load ended: the song begins there, level with the others.
+pub fn lateUs(v: *const State, now: u64) i64 {
+    if (!v.in_round or now <= v.start_tick) return 0;
+    return @intCast((now - v.start_tick) * 1000);
+}
+
 pub fn opponent(v: *const room_mod.View) ?*const room_mod.Player {
     var best: ?*const room_mod.Player = null;
     for (v.players[0..v.count]) |*p| {
@@ -667,6 +673,14 @@ test "a pad leaves the lounge, and a room code keeps the letters bound to it" {
     a.versus.joining = false;
     try std.testing.expect(select.pad(a, a.cfg.p1[1], true, false));
     try std.testing.expectEqual(.select, a.scene);
+}
+
+test "a load that ends after the room's start begins the song as far in" {
+    var v: State = .{ .start_tick = 10_000 };
+    try std.testing.expectEqual(@as(i64, 0), lateUs(&v, 12_000));
+    v.in_round = true;
+    try std.testing.expectEqual(@as(i64, 0), lateUs(&v, 9_000));
+    try std.testing.expectEqual(@as(i64, 2_500_000), lateUs(&v, 12_500));
 }
 
 test "the room finds its chart, leaves for the lounge, and a finished round comes back to it" {
