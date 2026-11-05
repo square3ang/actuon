@@ -42,7 +42,9 @@ pub fn sanitize(a: std.mem.Allocator, src: []const u8) ![]u8 {
     return out.toOwnedSlice(a);
 }
 
-pub fn parseFile(a: std.mem.Allocator, io: std.Io, path: []const u8) !J {
+pub const ParseFileError = std.Io.Dir.ReadFileAllocError || std.json.ParseError(std.json.Scanner) || error{BadJson};
+
+pub fn parseFile(a: std.mem.Allocator, io: std.Io, path: []const u8) ParseFileError!J {
     const raw = try fs.readAlloc(a, io, path, 1 << 25);
     const text = if (std.unicode.utf8ValidateSlice(raw)) raw else try core.encoding.toUtf8(a, raw, .sjis);
     const clean = try sanitize(a, if (std.mem.startsWith(u8, text, "\xEF\xBB\xBF")) text[3..] else text);
@@ -124,6 +126,25 @@ pub const Offset = struct {
             else => &o.a,
         };
     }
+
+    /// `k` is bottom-up.
+    pub fn apply(o: Offset, k: *m.Key) void {
+        k.x += @floatFromInt(o.x);
+        k.y += @floatFromInt(o.y);
+        k.w += @floatFromInt(o.w);
+        k.h += @floatFromInt(o.h);
+        k.angle += @floatFromInt(o.r);
+        k.a += @floatFromInt(o.a);
+    }
+};
+
+pub const Option = struct {
+    kind: enum { property, file, offset },
+    name: []const u8,
+    choices: []const []const u8 = &.{},
+    def: []const u8 = "",
+    /// offset: which field of Offset.
+    field: u3 = 0,
 };
 
 /// The loaders read only defaults, so the player's choices are written over them.
@@ -179,6 +200,10 @@ pub fn resolveWild(a: std.mem.Allocator, io: std.Io, dir: []const u8, files: []c
         def = str(f.object.get("def"));
     };
     const names = wildChoices(a, io, dir, rel) catch return rel;
+    return std.fmt.allocPrint(a, "{s}{s}{s}", .{ rel[0..base_end], closest(names, def) orelse return rel, foot });
+}
+
+pub fn closest(names: []const []const u8, def: []const u8) ?[]const u8 {
     var best: ?[]const u8 = null;
     var best_score: usize = 0;
     for (names) |name| {
@@ -188,7 +213,7 @@ pub fn resolveWild(a: std.mem.Allocator, io: std.Io, dir: []const u8, files: []c
             best_score = score;
         }
     }
-    return std.fmt.allocPrint(a, "{s}{s}{s}", .{ rel[0..base_end], best orelse return rel, foot });
+    return best;
 }
 
 fn hexColor(s: []const u8) gfx.Color {
@@ -233,7 +258,9 @@ const Loader = struct {
         }
     }
 
-    fn expand(l: *Loader, v: J, depth: u32) anyerror!J {
+    const ExpandError = ParseFileError || error{BadInclude};
+
+    fn expand(l: *Loader, v: J, depth: u32) ExpandError!J {
         if (depth > 32) return v;
         switch (v) {
             .array => |list| {
@@ -270,7 +297,7 @@ const Loader = struct {
         }
     }
 
-    fn loadInclude(l: *Loader, rel: []const u8, depth: u32) anyerror!J {
+    fn loadInclude(l: *Loader, rel: []const u8, depth: u32) ExpandError!J {
         if (std.mem.indexOf(u8, rel, "..") != null or std.fs.path.isAbsolute(rel)) return error.BadInclude;
         l.includes += 1;
         if (l.includes > lr2.max_includes) return error.BadInclude;
@@ -345,14 +372,7 @@ const Loader = struct {
         for (ids.items) |id| {
             if (int(id, 0) == 3) out.lifted = true;
             const o = l.offsets.get(int(id, 0)) orelse continue;
-            for (keys.items) |*k| {
-                k.x += @floatFromInt(o.x);
-                k.y += @floatFromInt(o.y);
-                k.w += @floatFromInt(o.w);
-                k.h += @floatFromInt(o.h);
-                k.angle += @floatFromInt(o.r);
-                k.a += @floatFromInt(o.a);
-            }
+            for (keys.items) |*k| o.apply(k);
         }
         for (keys.items) |*k| k.y = l.skin.h - (k.y + k.h);
         out.keys = keys.items;

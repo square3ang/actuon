@@ -180,6 +180,7 @@ test {
     _ = @import("ui/result.zig");
     _ = @import("ui/practice.zig");
     _ = @import("skin/bitfont.zig");
+    _ = @import("skin/dxa.zig");
     _ = @import("ui/select.zig");
     _ = @import("ui/settings.zig");
     _ = @import("ui/skinslots.zig");

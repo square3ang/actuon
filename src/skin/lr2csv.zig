@@ -16,7 +16,7 @@ const Parser = struct {
     fonts: std.ArrayList(?*bitfont.BitmapFont) = .empty,
     fonts_loaded: u32 = 0,
     objects: std.ArrayList(m.Object) = .empty,
-    keys: std.ArrayList(std.ArrayList(m.Key)) = .empty,
+    keys: std.ArrayList(Dst) = .empty,
     current: ?usize = null,
     judge_obj: ?usize = null,
     judge_cur: [6]?usize = @splat(null),
@@ -26,12 +26,21 @@ const Parser = struct {
     includes: u32 = 0,
     resolver: *const fn (i32) bool,
     conf: jsonskin.Conf = .{},
+    /// #CUSTOMFILE entries in the shape jsonskin.resolveWild reads, "def" already the player's pick.
+    files: std.ArrayList(std.json.Value) = .empty,
+    offsets: std.AutoHashMapUnmanaged(i32, jsonskin.Offset) = .empty,
     judge_imgs: [6]m.Object = @splat(.{}),
     judge_nums: [6]m.Object = @splat(.{}),
-    judge_keys: [12]std.ArrayList(m.Key) = @splat(.empty),
+    judge_keys: [12]Dst = @splat(.{}),
     has_judge: bool = false,
     has_notes: bool = false,
     judge_shift: bool = true,
+};
+
+const Dst = struct {
+    keys: std.ArrayList(m.Key) = .empty,
+    /// DST fields 21 to 23 of the object's first line; 0 names no offset.
+    offset_ids: [3]i32 = @splat(0),
 };
 
 fn int(s: []const u8) i32 {
@@ -61,13 +70,13 @@ fn vals(str: []const []const u8) [24]i32 {
 }
 
 fn resolve(p: *Parser, raw: []const u8) ?[]const u8 {
-    return resolvePath(p.a, p.io, p.root, raw);
+    return resolvePath(p.a, p.io, p.root, p.files.items, raw);
 }
 
-fn resolvePath(a: std.mem.Allocator, io: std.Io, root: []const u8, raw: []const u8) ?[]const u8 {
+/// Null when the path leaves the skin folder.
+fn skinRel(a: std.mem.Allocator, raw: []const u8) ?[]const u8 {
     const norm = a.dupe(u8, raw) catch return null;
     std.mem.replaceScalar(u8, norm, '\\', '/');
-    // shortcut: wildcard picks the first match or the #CUSTOMFILE default; a chooser UI can come with skin settings
     var rel: []const u8 = norm;
     if (std.ascii.findIgnoreCase(rel, "theme/")) |i| {
         rel = rel[i + "theme/".len ..];
@@ -75,7 +84,13 @@ fn resolvePath(a: std.mem.Allocator, io: std.Io, root: []const u8, raw: []const 
         if (std.mem.indexOfScalar(u8, rel, '/')) |sl| rel = rel[sl + 1 ..];
     }
     if (fs.climbs(rel) or std.fs.path.isAbsolute(rel)) return null;
-    return walk(a, io, root, rel);
+    return rel;
+}
+
+/// A wildcard no #CUSTOMFILE names takes the first match.
+fn resolvePath(a: std.mem.Allocator, io: std.Io, root: []const u8, files: []const std.json.Value, raw: []const u8) ?[]const u8 {
+    const rel = skinRel(a, raw) orelse return null;
+    return walk(a, io, root, jsonskin.resolveWild(a, io, root, files, rel) catch return null);
 }
 
 pub fn walk(a: std.mem.Allocator, io: std.Io, root: []const u8, rel: []const u8) ?[]const u8 {
@@ -139,7 +154,7 @@ fn runtimeImage(gr: i32) ?m.Object {
 
 fn begin(p: *Parser, o: m.Object) !void {
     try p.objects.append(p.a, o);
-    try p.keys.append(p.a, .empty);
+    try p.keys.append(p.a, .{});
     p.current = p.objects.items.len - 1;
 }
 
@@ -171,8 +186,8 @@ fn keyOf(v: [24]i32) m.Key {
     };
 }
 
-fn applyDst(p: *Parser, o: *m.Object, list: *std.ArrayList(m.Key), v: [24]i32) !void {
-    if (list.items.len == 0) {
+fn applyDst(p: *Parser, o: *m.Object, dst: *Dst, v: [24]i32) !void {
+    if (dst.keys.items.len == 0) {
         o.blend = @intCast(std.math.clamp(v[12], 0, 255));
         o.center = @intCast(std.math.clamp(v[15], 0, 9));
         o.loop = v[16];
@@ -182,8 +197,18 @@ fn applyDst(p: *Parser, o: *m.Object, list: *std.ArrayList(m.Key), v: [24]i32) !
         ops[1] = v[19];
         ops[2] = v[20];
         o.ops = ops;
+        dst.offset_ids = v[21..24].*;
     }
-    try list.append(p.a, keyOf(v));
+    var k = keyOf(v);
+    // As beatoraja's LR2 loader: the first line's fields from 21 name offsets for every key.
+    for (dst.offset_ids) |id| {
+        const off = p.offsets.get(id) orelse continue;
+        // Offsets move the rect bottom-up: flip y around 0 and back.
+        k.y = -(k.y + k.h);
+        off.apply(&k);
+        k.y = -(k.y + k.h);
+    }
+    try dst.keys.append(p.a, k);
 }
 
 fn condition(p: *Parser, str: []const []const u8) bool {
@@ -207,7 +232,9 @@ fn pickedItem(p: *Parser, str: []const []const u8) i32 {
     return 0;
 }
 
-fn line(p: *Parser, raw: []const u8) anyerror!void {
+const Error = std.Io.Dir.ReadFileAllocError || error{BadInclude};
+
+fn line(p: *Parser, raw: []const u8) Error!void {
     const text = std.mem.trimEnd(u8, raw, " \r\t");
     if (text.len == 0 or text[0] != '#') return;
     var parts: std.ArrayList([]const u8) = .empty;
@@ -242,6 +269,15 @@ fn line(p: *Parser, raw: []const u8) anyerror!void {
     const v = vals(str);
     if (eq(cmd, "CUSTOMOPTION")) {
         if (str.len > 2) try p.skin.enabled.put(p.a, int(str[2]) + pickedItem(p, str), {});
+    } else if (eq(cmd, "CUSTOMFILE")) {
+        if (str.len < 3) return;
+        var o: std.json.ObjectMap = .empty;
+        try o.put(p.a, "path", .{ .string = skinRel(p.a, str[2]) orelse return });
+        try o.put(p.a, "def", .{ .string = p.conf.file.map.get(str[1]) orelse if (str.len > 3) str[3] else "" });
+        try p.files.append(p.a, .{ .object = o });
+    } else if (eq(cmd, "CUSTOMOFFSET")) {
+        // 0 fills the DST fields a line leaves empty, so it can never name an offset.
+        if (str.len > 2 and int(str[2]) != 0) if (p.conf.offset.map.get(str[1])) |o| try p.offsets.put(p.a, int(str[2]), o);
     } else if (eq(cmd, "SETOPTION")) {
         if (str.len > 2 and int(str[2]) != 0) try p.skin.enabled.put(p.a, int(str[1]), {});
     } else if (eq(cmd, "RESOLUTION")) {
@@ -262,7 +298,6 @@ fn line(p: *Parser, raw: []const u8) anyerror!void {
     } else if (eq(cmd, "IMAGE")) {
         try p.images.append(p.a, if (str.len > 1) resolve(p, str[1]) else null);
     } else if (eq(cmd, "LR2FONT")) {
-        // shortcut: only unpacked .lr2font files, as in beatoraja; a skin's encrypted .dxa archives get the built-in font.
         try p.fonts.append(p.a, if (str.len > 1) if (resolve(p, str[1])) |path| bitfont.loadCapped(p.a, p.io, path, &p.fonts_loaded) else null else null);
     } else if (eq(cmd, "SRC_IMAGE")) {
         p.current = null;
@@ -355,37 +390,48 @@ fn readText(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
     return if (std.unicode.utf8ValidateSlice(bytes)) bytes else core.encoding.toUtf8(a, bytes, .sjis);
 }
 
-pub const CustomOption = struct { title: []const u8, items: []const []const u8 };
-
-/// #IF is ignored: a chooser shows every #CUSTOMOPTION.
-pub fn customOptions(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]const CustomOption {
-    var out: std.ArrayList(CustomOption) = .empty;
+/// #IF is ignored: a chooser shows every #CUSTOMOPTION, #CUSTOMFILE and #CUSTOMOFFSET.
+pub fn customOptions(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]const jsonskin.Option {
+    var out: std.ArrayList(jsonskin.Option) = .empty;
     var includes: u32 = 0;
     try scanOptions(a, io, skinRoot(path), path, &out, 0, &includes);
     return out.items;
 }
 
-fn scanOptions(a: std.mem.Allocator, io: std.Io, root: []const u8, path: []const u8, out: *std.ArrayList(CustomOption), depth: u32, includes: *u32) anyerror!void {
+fn scanOptions(a: std.mem.Allocator, io: std.Io, root: []const u8, path: []const u8, out: *std.ArrayList(jsonskin.Option), depth: u32, includes: *u32) Error!void {
     var lines = std.mem.splitScalar(u8, try readText(a, io, path), '\n');
     while (lines.next()) |raw| {
-        const text = std.mem.trimEnd(u8, raw, " \r\t");
-        var fields = std.mem.splitScalar(u8, text, ',');
-        const cmd = fields.next().?;
-        if (std.ascii.eqlIgnoreCase(cmd, "#INCLUDE")) {
-            if (depth > 8) continue;
-            const inc = resolvePath(a, io, root, fields.next() orelse continue) orelse continue;
+        var parts: std.ArrayList([]const u8) = .empty;
+        var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, raw, " \r\t"), ',');
+        while (it.next()) |s| try parts.append(a, s);
+        const f = parts.items;
+        const eq = std.ascii.eqlIgnoreCase;
+        if (eq(f[0], "#INCLUDE")) {
+            if (depth > 8 or f.len < 2) continue;
+            const inc = resolvePath(a, io, root, &.{}, f[1]) orelse continue;
             includes.* += 1;
             if (includes.* > max_includes) return error.BadInclude;
             try scanOptions(a, io, root, inc, out, depth + 1, includes);
-        } else if (std.ascii.eqlIgnoreCase(cmd, "#CUSTOMOPTION")) {
-            const title = fields.next() orelse continue;
-            _ = fields.next() orelse continue;
+        } else if (eq(f[0], "#CUSTOMOPTION")) {
+            if (f.len < 3) continue;
             var items: std.ArrayList([]const u8) = .empty;
-            while (fields.next()) |item| {
+            for (f[3..]) |item| {
                 const name = std.mem.trim(u8, item, " ");
                 if (name.len > 0) try items.append(a, name);
             }
-            try out.append(a, .{ .title = title, .items = items.items });
+            try out.append(a, .{ .kind = .property, .name = f[1], .choices = items.items, .def = if (items.items.len > 0) items.items[0] else "" });
+        } else if (eq(f[0], "#CUSTOMFILE")) {
+            if (f.len < 3) continue;
+            // A folder that cannot be listed has nothing to choose from.
+            const names = jsonskin.wildChoices(a, io, root, skinRel(a, f[2]) orelse continue) catch continue;
+            try out.append(a, .{ .kind = .file, .name = f[1], .choices = names, .def = jsonskin.closest(names, if (f.len > 3) f[3] else "") orelse "" });
+        } else if (eq(f[0], "#CUSTOMOFFSET")) {
+            if (f.len < 3) continue;
+            // #CUSTOMOFFSET,name,id,x,y,w,h,r,a: an axis left out is on.
+            for (0..jsonskin.Offset.axes.len) |i| {
+                if (f.len > i + 3 and int(f[i + 3]) <= 0) continue;
+                try out.append(a, .{ .kind = .offset, .name = f[1], .field = @intCast(i) });
+            }
         }
     }
 }
@@ -406,10 +452,10 @@ pub fn load(skin: *m.Skin, io: std.Io, path: []const u8, mode: core.types.Mode, 
     const a = skin.arena.allocator();
     var p: Parser = .{ .a = a, .io = io, .skin = skin, .mode = mode, .root = skinRoot(path), .resolver = resolver, .conf = conf };
     try runFile(&p, path);
-    for (p.objects.items, p.keys.items) |*o, k| o.keys = k.items;
+    for (p.objects.items, p.keys.items) |*o, d| o.keys = d.keys.items;
     if (p.has_judge) {
-        for (&p.judge_imgs, 0..) |*o, i| o.keys = p.judge_keys[i].items;
-        for (&p.judge_nums, 0..) |*o, i| o.keys = p.judge_keys[i + 6].items;
+        for (&p.judge_imgs, 0..) |*o, i| o.keys = p.judge_keys[i].keys.items;
+        for (&p.judge_nums, 0..) |*o, i| o.keys = p.judge_keys[i + 6].keys.items;
         try p.objects.append(a, .{ .kind = .judge, .judge_images = &p.judge_imgs, .judge_numbers = &p.judge_nums, .shift = p.judge_shift });
         // the arrays above live on this stack frame
         const last = &p.objects.items[p.objects.items.len - 1];
@@ -441,9 +487,9 @@ test "a saved pick selects its #CUSTOMOPTION item, includes too" {
 
     const got = try customOptions(a, std.testing.io, path);
     try std.testing.expectEqual(@as(usize, 2), got.len);
-    try std.testing.expectEqualStrings("T", got[0].title);
-    try std.testing.expectEqual(@as(usize, 3), got[0].items.len);
-    try std.testing.expectEqualStrings("U", got[1].title);
+    try std.testing.expectEqualStrings("T", got[0].name);
+    try std.testing.expectEqual(@as(usize, 3), got[0].choices.len);
+    try std.testing.expectEqualStrings("U", got[1].name);
 
     var conf: jsonskin.Conf = .{};
     try conf.property.map.put(a, "T", "C");
@@ -458,6 +504,56 @@ test "a saved pick selects its #CUSTOMOPTION item, includes too" {
     try std.testing.expect(skin.enabled.contains(902));
     try std.testing.expect(!skin.enabled.contains(900));
     try std.testing.expect(skin.enabled.contains(910));
+}
+
+test "#CUSTOMFILE and #CUSTOMOFFSET are offered, and a saved pick moves the image and its rect" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const frame = try std.fs.path.join(a, &.{ root, "frame" });
+    try fs.mkdirs(io, frame);
+    for ([_][]const u8{ "a.png", "b.png", "c.png" }) |f| try fs.write(io, try std.fs.path.join(a, &.{ frame, f }), "");
+    const play = try std.fs.path.join(a, &.{ root, "play" });
+    try fs.mkdirs(io, play);
+    const path = try std.fs.path.join(a, &.{ play, "s.lr2skin" });
+    try fs.write(io, path,
+        \\#CUSTOMFILE,Frame,LR2files\Theme\x\frame\*.png,b
+        \\#CUSTOMOFFSET,Pos,40,1,1,0,0,0,0
+        \\#IMAGE,LR2files\Theme\x\frame\*.png
+        \\#SRC_IMAGE,0,0,0,0,10,10,1,1,0,0
+        \\#DST_IMAGE,0,0,5,6,10,10,0,255,255,255,255,0,0,0,0,0,0,0,0,0,40
+        \\#DST_IMAGE,0,100,8,6,10,10
+    );
+
+    const got = try customOptions(a, io, path);
+    try std.testing.expectEqual(@as(usize, 3), got.len);
+    try std.testing.expectEqual(@as(usize, 3), got[0].choices.len);
+    try std.testing.expectEqualStrings("b.png", got[0].def);
+    try std.testing.expectEqual(@as(u3, 0), got[1].field);
+    try std.testing.expectEqual(@as(u3, 1), got[2].field);
+
+    var skin: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
+    defer skin.arena.deinit();
+    const plain = try load(&skin, io, path, .beat7, &noneEnabled, .{});
+    try std.testing.expect(std.mem.endsWith(u8, plain[0].?, "b.png"));
+    try std.testing.expectEqual(@as(f32, 5), skin.objects[0].keys[0].x);
+
+    var conf: jsonskin.Conf = .{};
+    try conf.file.map.put(a, "Frame", "c.png");
+    try conf.offset.map.put(a, "Pos", .{ .x = 2, .y = 3 });
+    var picked: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
+    defer picked.arena.deinit();
+    const images = try load(&picked, io, path, .beat7, &noneEnabled, conf);
+    try std.testing.expect(std.mem.endsWith(u8, images[0].?, "c.png"));
+    try std.testing.expectEqual(@as(f32, 7), picked.objects[0].keys[0].x);
+    try std.testing.expectEqual(@as(f32, 3), picked.objects[0].keys[0].y);
+    // The second line names no offset; the first line's moves it too.
+    try std.testing.expectEqual(@as(f32, 10), picked.objects[0].keys[1].x);
+    try std.testing.expectEqual(@as(f32, 3), picked.objects[0].keys[1].y);
 }
 
 test "runtime images become the chart's images and plain colors" {
@@ -481,10 +577,10 @@ test "paths that climb out of the skin are refused" {
     try fs.mkdirs(std.testing.io, inner);
     try fs.write(std.testing.io, try std.fs.path.join(a, &.{ inner, "in.png" }), "");
     try fs.write(std.testing.io, try std.fs.path.join(a, &.{ root, "out.png" }), "");
-    try std.testing.expect(resolvePath(a, std.testing.io, inner, "LR2files\\Theme\\x\\in.png") != null);
-    try std.testing.expectEqual(@as(?[]const u8, null), resolvePath(a, std.testing.io, inner, "LR2files\\Theme\\x\\..\\out.png"));
-    try std.testing.expectEqual(@as(?[]const u8, null), resolvePath(a, std.testing.io, inner, "../out.png"));
-    try std.testing.expectEqual(@as(?[]const u8, null), resolvePath(a, std.testing.io, inner, "/etc/hostname"));
+    try std.testing.expect(resolvePath(a, std.testing.io, inner, &.{}, "LR2files\\Theme\\x\\in.png") != null);
+    try std.testing.expectEqual(@as(?[]const u8, null), resolvePath(a, std.testing.io, inner, &.{}, "LR2files\\Theme\\x\\..\\out.png"));
+    try std.testing.expectEqual(@as(?[]const u8, null), resolvePath(a, std.testing.io, inner, &.{}, "../out.png"));
+    try std.testing.expectEqual(@as(?[]const u8, null), resolvePath(a, std.testing.io, inner, &.{}, "/etc/hostname"));
 }
 
 fn noneEnabled(_: i32) bool {
