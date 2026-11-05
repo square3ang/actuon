@@ -238,7 +238,8 @@ fn getPath(l: ?*c.lua_State) callconv(.c) c_int {
 
 /// Its arena is freed before the push, since a Lua error past that point skips Zig's defers.
 fn wildPath(host: *const Host, dir: []const u8, rel: []const u8, buf: []u8) ?[]const u8 {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    // malloc like the state's own memory: the skin arena would grow at every call, and pages cost a mmap each.
+    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena.deinit();
     const picked = jsonskin.resolveWild(arena.allocator(), host.io, dir, host.path_files, rel) catch rel;
     return std.fmt.bufPrint(buf, "{s}/{s}", .{ dir, picked }) catch null;
@@ -350,7 +351,7 @@ const Matcher = struct {
     }
 
     fn singleMatch(mt: *Matcher, s: usize, p: usize, ep: usize) Stop!bool {
-        try mt.step(1);
+        try mt.step(if (mt.pat[p] == '[') ep - p else 1);
         if (s >= mt.src.len) return false;
         const ch = mt.src[s];
         return switch (mt.pat[p]) {
@@ -365,10 +366,10 @@ const Matcher = struct {
         if (mt.depth == max_match_depth) return error.Malformed;
         mt.depth += 1;
         defer mt.depth -= 1;
-        try mt.step(1);
         var s = s_start;
         var p = p_start;
         while (true) {
+            try mt.step(1);
             if (p == mt.pat.len) return s;
             switch (mt.pat[p]) {
                 '(' => return if (byteAt(mt.pat, p + 1) == ')') mt.startCapture(s, p + 2, cap_position) else mt.startCapture(s, p + 1, cap_unfinished),
@@ -384,6 +385,7 @@ const Matcher = struct {
                         p += 2;
                         if (byteAt(mt.pat, p) != '[') return error.Malformed;
                         const ep = try mt.classEnd(p);
+                        try mt.step(ep - p);
                         const prev = if (s == 0) 0 else mt.src[s - 1];
                         if (mt.bracketMatches(prev, p, ep - 1) or !mt.bracketMatches(byteAt(mt.src, s), p, ep - 1)) return null;
                         p = ep;
@@ -489,6 +491,19 @@ const Matcher = struct {
         mt.level = 0;
         return mt.match(s, p);
     }
+
+    /// lstrlib's lmemfind: memchr for the first byte, then a compare of the whole needle at each hit.
+    fn plainFind(mt: *Matcher, init: usize) Stop!void {
+        if (mt.pat.len == 0 or mt.pat.len > mt.src.len - init) return;
+        const starts = mt.src[0 .. mt.src.len - mt.pat.len + 1];
+        var s = init;
+        // memchr covers about 32 bytes in the time of one step.
+        while (std.mem.indexOfScalarPos(u8, starts, s, mt.pat[0])) |hit| : (s = hit + 1) {
+            try mt.step((hit - s) / 32 + mt.pat.len);
+            if (std.mem.eql(u8, mt.src[hit..][0..mt.pat.len], mt.pat)) return;
+        }
+        try mt.step((starts.len - s) / 32);
+    }
 };
 
 const PatternCall = enum { find, match, gmatch, gsub };
@@ -505,28 +520,29 @@ fn startOf(l: ?*c.lua_State, idx: c_int, len: usize) ?usize {
     return len - back + 1;
 }
 
-/// Walks the search the real call would make; true when it ends within the step budget.
-fn patternFits(call: PatternCall, l: ?*c.lua_State, src: []const u8, pat_full: []const u8) Matcher.Stop!bool {
-    const anchor = call != .gmatch and pat_full.len > 0 and pat_full[0] == '^';
-    var mt: Matcher = .{ .src = src, .pat = if (anchor) pat_full[1..] else pat_full };
+/// Walks the search the real call would make, counting its steps in mt.
+fn walkPattern(call: PatternCall, l: ?*c.lua_State, mt: *Matcher) Matcher.Stop!void {
+    const src = mt.src;
+    const plain = c.lua_toboolean(l, 5) != 0 or std.mem.indexOfAny(u8, mt.pat, "^$*+?.([%-") == null;
+    const anchor = call != .gmatch and mt.pat.len > 0 and mt.pat[0] == '^';
+    if (anchor and !(call == .find and plain)) mt.pat = mt.pat[1..];
     switch (call) {
         .find, .match => {
-            const init = startOf(l, 4, src.len) orelse return true;
-            if (init > src.len + 1) return true;
-            const plain = c.lua_toboolean(l, 5) != 0 or std.mem.indexOfAny(u8, pat_full, "^$*+?.([%-") == null;
-            if (call == .find and plain) return true;
+            const init = startOf(l, 4, src.len) orelse return;
+            if (init > src.len + 1) return;
+            if (call == .find and plain) return mt.plainFind(init - 1);
             var s = init - 1;
             while (true) : (s += 1) {
-                if (try mt.attempt(s, 0) != null or anchor or s == src.len) return true;
+                if (try mt.attempt(s, 0) != null or anchor or s == src.len) return;
             }
         },
         .gmatch, .gsub => {
-            var s: usize = if (call == .gsub) 0 else @min(startOf(l, 4, src.len) orelse return true, src.len + 1) - 1;
+            var s: usize = if (call == .gsub) 0 else @min(startOf(l, 4, src.len) orelse return, src.len + 1) - 1;
             var max_n: usize = src.len + 1;
             if (call == .gsub and c.lua_type(l, 5) > c.LUA_TNIL) {
                 var ok: c_int = 0;
                 max_n = std.math.cast(usize, c.lua_tointegerx(l, 5, &ok)) orelse 0;
-                if (ok == 0) return true;
+                if (ok == 0) return;
             }
             var last: ?usize = null;
             var n: usize = 0;
@@ -535,15 +551,29 @@ fn patternFits(call: PatternCall, l: ?*c.lua_State, src: []const u8, pat_full: [
                     n += 1;
                     s = e;
                     last = e;
-                    if (anchor) return true;
+                    if (anchor) return;
                     continue;
                 };
-                if (anchor) return true;
+                if (anchor) return;
                 s += 1;
             }
-            return true;
         },
     }
+}
+
+/// Pattern steps spend the call's hook firings, so a loop of slow matches runs out like any loop.
+fn chargeSteps(l: ?*c.lua_State, steps: u32) bool {
+    const host = hostOf(l);
+    host.pattern_steps += steps;
+    const firings = host.pattern_steps / hook_every;
+    host.pattern_steps %= hook_every;
+    if (firings <= host.steps) {
+        host.steps -= firings;
+        return true;
+    }
+    host.steps = 0;
+    _ = c.lua_sethook(l, onCount, c.LUA_MASKCOUNT, 1);
+    return false;
 }
 
 /// fits(call, s, p, ...): false refuses the call; anything lstrlib raises on is left for it to raise.
@@ -555,7 +585,11 @@ fn fitsPattern(l: ?*c.lua_State) callconv(.c) c_int {
         var pn: usize = 0;
         const s = c.lua_tolstring(l, 2, &sn);
         const p = c.lua_tolstring(l, 3, &pn);
-        fits = patternFits(call, l, s[0..sn], p[0..pn]) catch |e| e != error.TooSlow;
+        var mt: Matcher = .{ .src = s[0..sn], .pat = p[0..pn] };
+        walkPattern(call, l, &mt) catch |e| {
+            fits = e != error.TooSlow;
+        };
+        fits = chargeSteps(l, mt.steps) and fits;
     }
     c.lua_pushboolean(l, @intFromBool(fits));
     return 1;
@@ -655,6 +689,8 @@ const Host = struct {
     capped: bool = false,
     /// Hook firings left in this call; 0 means the script ran out and stays out.
     steps: u32 = load_steps,
+    /// Pattern steps short of one hook firing, kept so many small matches still add up.
+    pattern_steps: u32 = 0,
     io: std.Io,
     /// The skin folder with symlinks resolved.
     root: []const u8,
@@ -1034,6 +1070,12 @@ test "a backtracking pattern on a long string is refused, not run" {
         \\assert(not pcall(string.match, long, slow))
         \\assert(not pcall(string.gmatch, long, slow))
         \\assert(long:find("b", 1, true) == nil)
+        \\assert(long:find("aab") == nil)
+        \\local needle = string.rep("a", 5e4) .. "b"
+        \\assert(not pcall(string.find, long, needle))
+        \\assert(not pcall(string.find, long, needle, 1, true))
+        \\assert(not pcall(string.find, long, "^[" .. string.rep("b", 1e5) .. "a]*x"))
+        \\assert(not pcall(string.gsub, string.rep("a ", 5e3), string.rep("%f[%a]", 2e5) .. "x", ""))
         \\assert(("bg_01.png"):match("^(.-)%.(%a+)$") == "bg_01")
         \\assert(select(2, ("a,b,c"):gsub(",", ";")) == 2)
         \\-- Fast on a long string though a worst-case bound on their quantifiers would refuse them.
@@ -1043,6 +1085,19 @@ test "a backtracking pattern on a long string is refused, not run" {
         \\local n = 0 for w in (long .. " x"):gmatch("%S+") do n = n + 1 end assert(n == 2)
         \\assert(not pcall(string.gsub, ("("):rep(1e5), "%b()", ""))
     );
+}
+
+test "a loop of slow matches runs out of the callback's steps" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const l = try newState(arena.allocator(), std.testing.io, ".");
+    defer c.lua_close(l);
+    try std.testing.expectEqual(c.LUA_OK, c.luaL_loadstring(l, "s = string.rep('a', 15e5) function f(n) for i = 1, n do s:find('%d') end end"));
+    try std.testing.expectEqual(c.LUA_OK, protectedCall(l, 0, 0, load_steps));
+    try std.testing.expectEqual(c.LUA_OK, c.luaL_loadstring(l, "f(1)"));
+    try std.testing.expectEqual(c.LUA_OK, protectedCall(l, 0, 0, call_steps));
+    try std.testing.expectEqual(c.LUA_OK, c.luaL_loadstring(l, "f(10)"));
+    try std.testing.expect(protectedCall(l, 0, 0, call_steps) != c.LUA_OK);
 }
 
 test "get_path picks a wildcard file after the load too" {
