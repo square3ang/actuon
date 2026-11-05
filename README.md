@@ -69,7 +69,17 @@ zig build -Doptimize=ReleaseSafe
 ./zig-out/bin/actuon
 ```
 
-Packaging scripts for each OS are in [`packaging/`](packaging). To release, set `.version` in `build.zig.zon` and push the tag `v` plus that version: CI publishes the packages, and the game offers them under Settings, Online.
+Packaging scripts for each OS are in [`packaging/`](packaging). To release, set `.version` in `build.zig.zon` and push the tag `v` plus that version: CI builds the packages into a draft release. Then sign them on your own machine and publish, and the game offers them under Settings, Online:
+
+```sh
+gh release download v1.2.3 --dir out
+zig-out/bin/release_sign sign ~/actuon-release.key v1.2.3 out/*
+gh release upload v1.2.3 out/*.sig
+gh release edit v1.2.3 --draft=false
+```
+
+The game installs only assets signed by the key in the `update-key` build option. A build without it, such as a source build or the Flatpak, never replaces itself and opens the releases page instead.
+Make the key once with `zig build tools && zig-out/bin/release_sign keygen ~/actuon-release.key`, keep that file off GitHub and CI, and set the printed public key as the repository variable `ACTUON_UPDATE_KEY`.
 
 ## Controls
 

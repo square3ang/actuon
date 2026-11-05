@@ -3,7 +3,7 @@
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"
-zig build -Doptimize=ReleaseSafe
+zig build -Doptimize=ReleaseSafe -Dupdate-key="${ACTUON_UPDATE_KEY:-}"
 dir=zig-out/actuon-windows
 rm -rf "$dir"
 mkdir -p "$dir"

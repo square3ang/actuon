@@ -31,15 +31,19 @@ pub fn build(b: *std.Build) void {
     core_step.dependOn(&b.addInstallArtifact(core_lib, .{}).step);
     core_step.dependOn(&b.addInstallHeaderFile(b.path("src/core/actuon_core.h"), "actuon_core.h").step);
 
+    const release_sig = b.createModule(.{ .root_source_file = b.path("src/net/release_sig.zig") });
     const tools = b.step("tools", "Build developer tools");
-    for ([_][]const u8{ "chartdump", "mkreplay", "fuzz_parser" }) |name| {
+    for ([_][]const u8{ "chartdump", "mkreplay", "fuzz_parser", "release_sign" }) |name| {
         const exe = b.addExecutable(.{
             .name = name,
             .root_module = b.createModule(.{
                 .root_source_file = b.path(b.fmt("tools/{s}.zig", .{name})),
                 .target = target,
                 .optimize = optimize,
-                .imports = &.{.{ .name = "actuon_core", .module = core }},
+                .imports = &.{
+                    .{ .name = "actuon_core", .module = core },
+                    .{ .name = "release_sig", .module = release_sig },
+                },
             }),
         });
         tools.dependOn(&b.addInstallArtifact(exe, .{}).step);
@@ -73,6 +77,7 @@ pub fn build(b: *std.Build) void {
     mod.addAnonymousImport("font_heavy", .{ .root_source_file = b.path("assets/fonts/SUITE-ExtraBold.ttf") });
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    build_options.addOption([]const u8, "update_key", b.option([]const u8, "update-key", "Hex Ed25519 public key self-updates must be signed with; without it the game only opens the releases page") orelse "");
     mod.addOptions("build_options", build_options);
     const os = target.result.os.tag;
     const shaders = [_][]const u8{ "sprite.vert", "sprite.frag", "upscale.vert", "upscale.frag", "fsrcnnx_unpack.frag", "fsrcnnx_0.frag", "fsrcnnx_1.frag", "fsrcnnx_2.frag", "fsrcnnx_3.frag", "fsrcnnx_4.frag", "fsrcnnx_5.frag", "fsrcnnx_6.frag", "fsrcnnx_7.frag", "fsrcnnx_8.frag", "fsrcnnx_9.frag", "fsrcnnx_10.frag", "fsrcnnx_11.frag", "fsrcnnx_12.frag" };
