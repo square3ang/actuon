@@ -112,6 +112,7 @@ pub fn build(b: *std.Build) void {
         mod.addCSourceFile(.{ .file = b.path("src/input/hid_macos.c"), .flags = &.{} });
         mod.linkFramework("IOKit", .{});
         mod.linkFramework("CoreFoundation", .{});
+        mod.linkFramework("CoreServices", .{});
     }
     // zig does not search MSYS2's default folders; translate-c gets includes only, as -l fails on coff there.
     if (os == .windows) {

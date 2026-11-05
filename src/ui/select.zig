@@ -62,6 +62,8 @@ pub const State = struct {
     // A running scan may already have passed files added since it started.
     scan_again: bool = false,
     last_scan_ms: u64 = 0,
+    /// Only the scan thread touches it.
+    scan_watch: ?db_mod.Watch = null,
     download: ?*download.Job = null,
     download_buf: [64]u8 = undefined,
     download_seen: u64 = 0,
@@ -136,6 +138,7 @@ pub fn deinit(a: *App) void {
     dropBoard(a);
     if (s.replay_arena) |*r| r.deinit();
     if (s.scan_thread) |t| c.SDL_WaitThread(t, null);
+    if (s.scan_watch) |*w| w.deinit();
     if (s.table_thread) |t| c.SDL_WaitThread(t, null);
     if (s.jacket_job) |j| j.destroy();
     if (s.jacket) |t| a.g.destroyTexture(t);
@@ -155,7 +158,8 @@ fn scanThread(ud: ?*anyopaque) callconv(.c) c_int {
     defer a.sel.scan_done.store(true, .release);
     const d = db_mod.openMain(a.gpa) catch return 1;
     defer d.close();
-    a.sel.stats = db_mod.scan(a.gpa, a.io, d, a.cfg.roots, &a.sel.scan_progress) catch |e| {
+    if (a.sel.scan_watch == null) a.sel.scan_watch = .init(a.gpa);
+    a.sel.stats = db_mod.scan(a.gpa, a.io, d, a.cfg.roots, &a.sel.scan_progress, &a.sel.scan_watch.?) catch |e| {
         std.log.err("scan failed: {t}", .{e});
         return 1;
     };
@@ -246,7 +250,7 @@ fn orderBy(sort: u8) []const u8 {
         2 => " ORDER BY s.max_bpm, s.title",
         3 => " ORDER BY s.length_ms, s.title",
         4 => " ORDER BY CAST(s.level AS INTEGER), s.title",
-        5 => " ORDER BY COALESCE(c.clear,0) DESC, s.title",
+        5 => " ORDER BY " ++ db_mod.lamp ++ " DESC, s.title",
         6 => " ORDER BY COALESCE(c.ex,0) DESC, s.title",
         // Charts never played have no miss count: they go last.
         7 => " ORDER BY COALESCE(c.min_bp,-1)<0, c.min_bp, s.title",
@@ -969,7 +973,8 @@ fn drawChartInfo(a: *App, wheel_x: f32, dock_y: f32) void {
                 _ = g.text(result.clear_names[song.clear], lx + 18 * u, iy + 18 * u, g.scaled(16), if (song.clear == 0) gfx.dim else lamp);
                 if (song.miss >= 0 and song.played > 0) g.fmt(lx + 18 * u, iy + 40 * u, g.scaled(12), gfx.dim, "BP {d}   PLAYS {d}", .{ song.miss, song.played });
                 g.digits(lx + lw * 0.74, iy + 14 * u, g.scaled(48), 5, song.ex, gfx.white);
-                if (song.clear > 0) g.textRight(result.rankOf(song.ex, song.notes), lx + lw - 10 * u, iy + 14 * u, g.scaled(48), gfx.cyan);
+                // An assist lamp alone has no score to rank.
+                if (song.ex > 0) g.textRight(result.rankOf(song.ex, song.notes), lx + lw - 10 * u, iy + 14 * u, g.scaled(48), gfx.cyan);
                 if (s.board) |b| {
                     var place: [64]u8 = undefined;
                     _ = g.text(b.placeText(&place), lx + 18 * u, iy + sh - 20 * u, g.scaled(12), gfx.sky);

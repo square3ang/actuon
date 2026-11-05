@@ -409,11 +409,12 @@ pub const App = struct {
         if (a.preview_pending and a.load_thread == null and a.session == null) a.launchPreview();
     }
 
-    fn bestEx(a: *App, sha: []const u8, ln_mode: core.options.LnMode) u32 {
+    fn bestEx(a: *App, sha: []const u8, asked: core.options.LnMode, played: core.options.LnMode) u32 {
+        const mode = db_mod.scoreMode(a.db, sha, @backingInt(asked), @backingInt(played)) catch return 0;
         const st = a.db.prepare("SELECT ex FROM score WHERE sha256=?1 AND mode=?2") catch return 0;
         defer st.deinit();
         st.bindText(1, sha);
-        st.bindInt(2, @backingInt(ln_mode));
+        st.bindInt(2, mode);
         return if (st.step() catch false) @intCast(st.int(0)) else 0;
     }
 
@@ -580,7 +581,7 @@ pub const App = struct {
             defer arena.deinit();
             a.view.scratch_right = skin_mod.scratchRight(skin_mod.loadConf(arena.allocator(), a.io, "", skin_mod.playType(s.chart.mode)));
         }
-        a.view.best_ex = a.bestEx(&s.chart.sha256, s.params.rec.ln_mode);
+        a.view.best_ex = a.bestEx(&s.chart.sha256, a.load_params.rec.ln_mode, s.params.rec.ln_mode);
         const pace_target = play.paceTarget(a.cfg.pace_target, s.params.practice != null);
         a.view.target_ex = play.targetEx(pace_target, a.view.best_ex, s.chart.total_notes);
         a.view.target_label = play.pace_targets[@min(pace_target, play.pace_targets.len - 1)].label;

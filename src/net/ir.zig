@@ -974,7 +974,9 @@ test "only scores the server cannot match become claims" {
     const claimed: [64]u8 = @splat('c');
     const upper: [64]u8 = @splat('A');
     const empty: [64]u8 = @splat('d');
+    const assisted: [64]u8 = @splat('e');
     for ([_]db_mod.ScoreIn{
+        .{ .sha256 = &assisted, .clear = 0, .assist = 3, .ex = 0, .counts = @splat(0), .max_combo = 0, .miss = std.math.maxInt(i32), .date = 7 },
         .{ .sha256 = "too short", .clear = 5, .ex = 50, .counts = @splat(0), .max_combo = 9, .miss = 3, .date = 7 },
         .{ .sha256 = &upper, .clear = 5, .ex = 50, .counts = @splat(0), .max_combo = 9, .miss = 3, .date = 7 },
         .{ .sha256 = &imported, .clear = 5, .ex = 50, .counts = @splat(0), .max_combo = 9, .miss = 3, .date = 7 },

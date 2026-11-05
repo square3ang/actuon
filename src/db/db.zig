@@ -2,6 +2,7 @@ const std = @import("std");
 const c = @import("c");
 const core = @import("actuon_core");
 const fs = @import("../platform/fs.zig");
+pub const Watch = @import("watch.zig").Watch;
 
 pub const Error = error{ Sqlite, OutOfMemory };
 
@@ -110,7 +111,7 @@ pub const schema =
     \\  sha256 TEXT NOT NULL, mode INTEGER NOT NULL DEFAULT 0, clear INTEGER DEFAULT 0, ex INTEGER DEFAULT 0,
     \\  pg INTEGER DEFAULT 0, gr INTEGER DEFAULT 0, gd INTEGER DEFAULT 0, bd INTEGER DEFAULT 0, pr INTEGER DEFAULT 0, ms INTEGER DEFAULT 0,
     \\  max_combo INTEGER DEFAULT 0, min_bp INTEGER DEFAULT 2147483647, playcount INTEGER DEFAULT 0, clearcount INTEGER DEFAULT 0,
-    \\  date INTEGER DEFAULT 0, source TEXT DEFAULT '', PRIMARY KEY(sha256, mode));
+    \\  date INTEGER DEFAULT 0, source TEXT DEFAULT '', assist INTEGER DEFAULT 0, PRIMARY KEY(sha256, mode));
     \\CREATE TABLE IF NOT EXISTS replay(id INTEGER PRIMARY KEY, sha256 TEXT, date INTEGER, ex INTEGER, clear INTEGER, data BLOB, ln_mode INTEGER NOT NULL DEFAULT 0);
     \\CREATE INDEX IF NOT EXISTS replay_sha ON replay(sha256);
     \\CREATE TABLE IF NOT EXISTS dir(path TEXT PRIMARY KEY, mtime INTEGER);
@@ -161,6 +162,7 @@ fn migrateLnModes(d: Db) !void {
 pub fn initSchema(d: Db) !void {
     try d.exec(schema);
     try migrateLnModes(d);
+    if (!try hasColumn(d, "score", "assist")) try d.exec("ALTER TABLE score ADD COLUMN assist INTEGER DEFAULT 0");
     try labelReplayModes(d);
     try dropUnusedColumns(d);
 }
@@ -252,9 +254,16 @@ fn scanWorker(ud: ?*anyopaque) callconv(.c) c_int {
     }
 }
 
-// shortcut: a #RANDOM chart is judged on the scan's branch and filed by the played one, as in endlessdream, so a CN or HCN play on another branch may not show in the list; file by chart if players report it.
-fn hasOpenLn(chart: *const core.types.Chart) bool {
+/// The scan parses one #RANDOM branch, and LN in another counts too: a CN play there must not land in the LN row.
+fn mayOpenLn(chart: *const core.types.Chart, bytes: []const u8) bool {
     for (chart.notes) |n| if (n.ln_open) return true;
+    if (!chart.has_random) return false;
+    // Erring towards open only keeps more plays apart by LN mode.
+    var lines = std.mem.tokenizeAny(u8, bytes, "\r\n");
+    while (lines.next()) |l| {
+        if (std.ascii.startsWithIgnoreCase(l, "#LNOBJ")) return true;
+        if (l.len > 6 and l[0] == '#' and std.ascii.isDigit(l[1]) and std.ascii.isDigit(l[2]) and std.ascii.isDigit(l[3]) and (l[4] == '5' or l[4] == '6')) return true;
+    }
     return false;
 }
 
@@ -308,7 +317,7 @@ fn insertBatch(gpa: std.mem.Allocator, io: std.Io, d: Db, ins: anytype, jobs: []
         ins.bindText(20, chart.preview);
         ins.bindInt(21, job.mtime);
         ins.bindInt(22, @intCast(job.size));
-        ins.bindInt(23, @intFromBool(hasOpenLn(chart)));
+        ins.bindInt(23, @intFromBool(mayOpenLn(chart, job.bytes)));
         _ = try ins.step();
         ins.reset();
         stats.parsed += 1;
@@ -316,11 +325,17 @@ fn insertBatch(gpa: std.mem.Allocator, io: std.Io, d: Db, ins: anytype, jobs: []
     try d.exec("COMMIT");
 }
 
-/// shortcut: only changed mtime or size re-parses, but every chart is stat'ed on each pass, move to OS file notifications if huge libraries feel slow.
-pub fn scan(gpa: std.mem.Allocator, io: std.Io, d: Db, roots: []const []const u8, progress: ?*std.atomic.Value(u32)) !ScanStats {
+const Walk = struct { dir: []const u8, deep: bool };
+
+pub fn scan(gpa: std.mem.Allocator, io: std.Io, d: Db, roots: []const []const u8, progress: ?*std.atomic.Value(u32), watch: ?*Watch) !ScanStats {
     var stats: ScanStats = .{};
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
+    const aa = arena.allocator();
+    // The watch has handed over its changes, and a scan that stops short would lose them.
+    errdefer if (watch) |w| {
+        w.lost = true;
+    };
 
     const known = try d.prepare("SELECT mtime, size FROM song WHERE path=?1 UNION ALL SELECT mtime, size FROM unparsed WHERE path=?1 LIMIT 1");
     defer known.deinit();
@@ -332,38 +347,82 @@ pub fn scan(gpa: std.mem.Allocator, io: std.Io, d: Db, roots: []const []const u8
 
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     var batch: std.ArrayList(ScanJob) = .empty;
-    var stack: std.ArrayList([]const u8) = .empty;
+    var stack: std.ArrayList(Walk) = .empty;
     var unread: std.ArrayList([]const u8) = .empty;
+    // Charts not seen lose their rows: every one under a tree, and those directly in a flat folder.
+    var trees: std.ArrayList([]const u8) = .empty;
+    var flat: std.ArrayList([]const u8) = .empty;
     // Real paths of listed folders: links like `a -> .` would otherwise branch until ELOOP.
     var visited: std.StringHashMapUnmanaged(void) = .empty;
-    const outer = try outerRoots(arena.allocator(), roots);
-    for (outer) |r| try stack.append(arena.allocator(), try arena.allocator().dupe(u8, r));
-    while (stack.pop()) |dir| {
-        const real = fs.realPath(arena.allocator(), io, dir) catch dir;
-        if ((try visited.getOrPut(arena.allocator(), real)).found_existing) continue;
+    const outer = try outerRoots(aa, roots);
+    if (if (watch) |w| try w.changed(aa, outer) else null) |dirs| {
+        // Before any walk: a folder now under the same name, or moved into another watched one, must be walked afresh.
+        for (dirs.keys(), dirs.values()) |dir, gone| {
+            if (!gone) {
+                try stack.append(aa, .{ .dir = dir, .deep = false });
+            } else if (watch.?.watched(dir)) {
+                watch.?.drop(dir);
+                try trees.append(aa, dir);
+            }
+        }
+    } else for (outer) |r| {
+        try stack.append(aa, .{ .dir = r, .deep = true });
+        try trees.append(aa, r);
+    }
+    while (stack.pop()) |job| {
+        const dir = job.dir;
+        if (job.deep) {
+            const real = fs.realPath(aa, io, dir) catch dir;
+            if ((try visited.getOrPut(aa, real)).found_existing) continue;
+            if (watch) |w| {
+                if (w.has(real)) continue;
+                try w.add(dir, real);
+            }
+        }
         var it = std.heap.ArenaAllocator.init(gpa);
         defer it.deinit();
         const a = it.allocator();
         const entries = fs.listChecked(a, io, dir) catch |e| {
-            std.log.warn("cannot read {s}: {t}", .{ dir, e });
-            try unread.append(arena.allocator(), dir);
+            // A changed folder that is gone shows as missing from its parent's listing.
+            if (job.deep or e != error.FileNotFound) std.log.warn("cannot read {s}: {t}", .{ dir, e });
+            if (job.deep) try unread.append(aa, dir);
             continue;
         };
+        if (!job.deep) {
+            const w = watch.?;
+            try flat.append(aa, dir);
+            for (try w.children(aa, dir)) |child| {
+                const name = std.fs.path.basename(child);
+                for (entries) |e| {
+                    if (e.is_dir and std.mem.eql(u8, e.name, name)) break;
+                } else {
+                    w.drop(child);
+                    try trees.append(aa, child);
+                }
+            }
+        }
         for (entries) |e| {
-            const full = try std.fs.path.join(arena.allocator(), &.{ dir, e.name });
+            const full = try std.fs.path.join(aa, &.{ dir, e.name });
             if (e.is_dir) {
-                if (e.name.len > 0 and e.name[0] != '.') try stack.append(arena.allocator(), full);
+                if (e.name.len == 0 or e.name[0] == '.') continue;
+                if (job.deep) {
+                    try stack.append(aa, .{ .dir = full, .deep = true });
+                } else if (!watch.?.watched(full)) {
+                    try stack.append(aa, .{ .dir = full, .deep = true });
+                    try trees.append(aa, full);
+                }
                 continue;
             }
             if (!isChart(e.name)) continue;
-            try seen.put(arena.allocator(), full, {});
+            // A changed folder may also be walked from its parent's listing.
+            if ((try seen.getOrPut(aa, full)).found_existing) continue;
             const st = fs.stat(io, full) orelse continue;
             known.bindText(1, full);
             const hit = try known.step();
             const same = hit and known.int(0) == st.mtime and known.int(1) == @as(i64, @intCast(st.size));
             known.reset();
             if (same) continue;
-            try batch.append(arena.allocator(), .{ .path = full, .folder = dir, .mtime = st.mtime, .size = st.size });
+            try batch.append(aa, .{ .path = full, .folder = dir, .mtime = st.mtime, .size = st.size });
             if (batch.items.len == scan_batch) {
                 try insertBatch(gpa, io, d, ins, batch.items, &stats, progress);
                 batch.clearRetainingCapacity();
@@ -373,33 +432,44 @@ pub fn scan(gpa: std.mem.Allocator, io: std.Io, d: Db, roots: []const []const u8
     try insertBatch(gpa, io, d, ins, batch.items, &stats, progress);
     try d.exec("BEGIN IMMEDIATE");
     errdefer d.exec("ROLLBACK") catch {};
-    // A folder that could not be read keeps its rows, so an unplugged library does not vanish.
-    for (outer) |r| {
-        const sel = try d.prepare("SELECT path, 0 FROM song WHERE path LIKE ?1 ESCAPE '\\' UNION ALL SELECT path, 1 FROM unparsed WHERE path LIKE ?1 ESCAPE '\\'");
-        defer sel.deinit();
-        const del = try d.prepare("DELETE FROM song WHERE path=?1");
-        defer del.deinit();
-        const forget = try d.prepare("DELETE FROM unparsed WHERE path=?1");
-        defer forget.deinit();
-        const pat = try likePrefix(arena.allocator(), r);
-        sel.bindText(1, pat);
-        while (try sel.step()) {
-            const path = sel.text(0);
-            if (!isUnder(path, r) or seen.contains(path)) continue;
-            for (unread.items) |dir| {
-                if (isUnder(path, dir)) break;
-            } else {
-                const chart = sel.int(1) == 0;
-                const st = if (chart) del else forget;
-                st.bindText(1, path);
-                _ = try st.step();
-                st.reset();
-                if (chart) stats.removed += 1;
-            }
-        }
+    // A tree inside another adds nothing, and deleting a pack reports every folder in it.
+    for (trees.items) |dir| {
+        for (trees.items) |outer_tree| {
+            if (isUnder(dir, outer_tree)) break;
+        } else try dropUnseen(d, aa, dir, false, &seen, unread.items, &stats);
     }
+    for (flat.items) |dir| try dropUnseen(d, aa, dir, true, &seen, unread.items, &stats);
     try d.exec("COMMIT");
     return stats;
+}
+
+/// A folder that could not be read keeps its rows, so an unplugged library does not vanish.
+fn dropUnseen(d: Db, a: std.mem.Allocator, dir: []const u8, direct: bool, seen: *const std.StringHashMapUnmanaged(void), unread: []const []const u8, stats: *ScanStats) !void {
+    const unparsed = " UNION ALL SELECT path, 1 FROM unparsed WHERE path LIKE ?1 ESCAPE '\\'";
+    // By folder, which is indexed, where it can: a LIKE reads the whole table.
+    const sel = try d.prepare(if (direct) "SELECT path, 0 FROM song WHERE folder=?2" ++ unparsed else "SELECT path, 0 FROM song WHERE path LIKE ?1 ESCAPE '\\'" ++ unparsed);
+    defer sel.deinit();
+    const del = try d.prepare("DELETE FROM song WHERE path=?1");
+    defer del.deinit();
+    const forget = try d.prepare("DELETE FROM unparsed WHERE path=?1");
+    defer forget.deinit();
+    sel.bindText(1, try likePrefix(a, dir));
+    if (direct) sel.bindText(2, dir);
+    while (try sel.step()) {
+        const path = sel.text(0);
+        if (!isUnder(path, dir) or seen.contains(path)) continue;
+        if (direct and !isDirectlyIn(path, dir)) continue;
+        for (unread) |u| {
+            if (isUnder(path, u)) break;
+        } else {
+            const chart = sel.int(1) == 0;
+            const st = if (chart) del else forget;
+            st.bindText(1, path);
+            _ = try st.step();
+            st.reset();
+            if (chart) stats.removed += 1;
+        }
+    }
 }
 
 /// Else a folder added inside another root would be scanned and listed twice.
@@ -422,6 +492,15 @@ pub fn holds(dir: []const u8, path: []const u8) bool {
 pub fn isUnder(path: []const u8, dir: []const u8) bool {
     if (dir.len == 0 or path.len <= dir.len or !std.mem.startsWith(u8, path, dir)) return false;
     return std.fs.path.isSep(dir[dir.len - 1]) or std.fs.path.isSep(path[dir.len]);
+}
+
+/// Right inside `dir`, not deeper; a root may end in a separator, so dirname would not match it.
+pub fn isDirectlyIn(path: []const u8, dir: []const u8) bool {
+    if (!isUnder(path, dir)) return false;
+    var rest = path[dir.len..];
+    while (rest.len > 0 and std.fs.path.isSep(rest[0])) rest = rest[1..];
+    for (rest) |ch| if (std.fs.path.isSep(ch)) return false;
+    return true;
 }
 
 pub fn likePrefix(a: std.mem.Allocator, prefix: []const u8) ![]u8 {
@@ -468,9 +547,12 @@ pub const Song = struct {
     }
 };
 
+/// The lamp shown for score row `c`: an assist lamp counts here, never in `clear`, which IR sync claims from.
+pub const lamp = "MAX(COALESCE(c.clear,0),COALESCE(c.assist,0))";
+
 pub const song_select =
     \\SELECT s.path,s.folder,s.sha256,s.md5,s.title,s.subtitle,s.artist,s.genre,s.level,s.difficulty,s.mode,s.notes,s.min_bpm,s.max_bpm,s.length_ms,s.has_ln,s.stagefile,s.banner,s.preview,
-    \\ COALESCE(c.clear,0),COALESCE(c.ex,0),COALESCE(c.min_bp,-1),COALESCE(c.playcount,0),
+++ "\n " ++ lamp ++ ",COALESCE(c.ex,0),COALESCE(NULLIF(c.min_bp,2147483647),-1),COALESCE(c.playcount,0),\n" ++
     \\ (SELECT COALESCE(b.symbol,'')||t.level FROM table_song t JOIN bms_table b ON b.url=t.url
     \\  WHERE (t.md5=s.md5 AND t.md5<>'') OR (t.sha256=s.sha256 AND t.sha256<>'') ORDER BY b.name LIMIT 1),
     \\ COALESCE(s.has_open_ln,0),
@@ -560,13 +642,27 @@ pub const ScoreIn = struct {
     cleared: u32 = 0,
     date: i64,
     source: []const u8 = "",
+    /// The lamp of an assisted play: shown in the list, never in `clear`, which IR sync claims from.
+    assist: u8 = 0,
 };
+
+/// The list reads the asked mode's row for a chart any #RANDOM branch may leave open, so a play there is filed as asked.
+/// Elsewhere it is filed as played, which keeps a CN or HCN judged play out of the LN row the IR claims from.
+pub fn scoreMode(d: Db, sha256: []const u8, asked: u8, played: u8) !u8 {
+    const st = try d.prepare("SELECT CASE WHEN EXISTS(SELECT 1 FROM song WHERE sha256=?1 AND has_open_ln) THEN ?2 ELSE ?3 END");
+    defer st.deinit();
+    st.bindText(1, sha256);
+    st.bindInt(2, asked);
+    st.bindInt(3, played);
+    _ = try st.step();
+    return @intCast(st.int(0));
+}
 
 /// As beatoraja's ScoreData.update. shortcut: a row remembers one source, so alternating two imports adds counts twice, keep counts per source if that is reported.
 pub fn recordScore(d: Db, s: ScoreIn) !void {
     const st = try d.prepare(
-        \\INSERT INTO score(sha256,clear,ex,pg,gr,gd,bd,pr,ms,max_combo,min_bp,playcount,clearcount,date,source,mode)
-        \\VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+        \\INSERT INTO score(sha256,clear,ex,pg,gr,gd,bd,pr,ms,max_combo,min_bp,playcount,clearcount,date,source,mode,assist)
+        \\VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
         \\ON CONFLICT(sha256,mode) DO UPDATE SET
         \\ clear=MAX(clear,excluded.clear),
         \\ pg=CASE WHEN excluded.ex>ex THEN excluded.pg ELSE pg END,
@@ -581,7 +677,8 @@ pub fn recordScore(d: Db, s: ScoreIn) !void {
         \\ playcount=CASE WHEN excluded.source='' OR source<>excluded.source THEN playcount+excluded.playcount ELSE MAX(playcount,excluded.playcount) END,
         \\ clearcount=CASE WHEN excluded.source='' OR source<>excluded.source THEN clearcount+excluded.clearcount ELSE MAX(clearcount,excluded.clearcount) END,
         \\ source=CASE WHEN excluded.source='' THEN source ELSE excluded.source END,
-        \\ date=MAX(date,excluded.date)
+        \\ date=MAX(date,excluded.date),
+        \\ assist=MAX(assist,excluded.assist)
     );
     defer st.deinit();
     st.bindText(1, s.sha256);
@@ -595,6 +692,7 @@ pub fn recordScore(d: Db, s: ScoreIn) !void {
     st.bindInt(14, s.date);
     st.bindText(15, s.source);
     st.bindInt(16, s.mode);
+    st.bindInt(17, s.assist);
     _ = try st.step();
 }
 
@@ -738,13 +836,13 @@ test "scan parses in parallel, stores every chart and skips them next time" {
     defer d.close();
     try initSchema(d);
     const roots = [_][]const u8{"tests/charts"};
-    const first = try scan(gpa, std.testing.io, d, &roots, null);
+    const first = try scan(gpa, std.testing.io, d, &roots, null, null);
     try std.testing.expect(first.parsed > 0);
     const count = try d.prepare("SELECT COUNT(*) FROM song");
     defer count.deinit();
     try std.testing.expect(try count.step());
     try std.testing.expectEqual(@as(i64, first.parsed), count.int(0));
-    try std.testing.expectEqual(@as(u32, 0), (try scan(gpa, std.testing.io, d, &roots, null)).parsed);
+    try std.testing.expectEqual(@as(u32, 0), (try scan(gpa, std.testing.io, d, &roots, null, null)).parsed);
 }
 
 test "a root inside another, or added twice, is scanned once" {
@@ -769,7 +867,7 @@ test "a scan drops gone charts only in folders it could read" {
     try initSchema(d);
     try d.exec("INSERT INTO song(path,folder,sha256,md5,mtime,size) VALUES('" ++ root ++ "/bms/gone.bms','','a','a',0,0),('" ++ root ++ "/bms2/kept.bms','','b','b',0,0),('" ++ root ++ "/file/kept.bms','','c','c',0,0)");
     const roots = [_][]const u8{ root ++ "/bms", root ++ "/file" };
-    try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, std.testing.io, d, &roots, null)).removed);
+    try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, std.testing.io, d, &roots, null, null)).removed);
     const st = try d.prepare("SELECT COUNT(*) FROM song WHERE path LIKE '%kept.bms'");
     defer st.deinit();
     try std.testing.expect(try st.step());
@@ -809,12 +907,12 @@ test "a chart that fails to parse is read once, then again only when it changes,
     const d = try Db.open(":memory:", gpa, false);
     defer d.close();
     try initSchema(d);
-    try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, std.testing.io, d, &.{root}, null)).failed);
-    try std.testing.expectEqual(@as(u32, 0), (try scan(gpa, std.testing.io, d, &.{root}, null)).failed);
+    try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, std.testing.io, d, &.{root}, null, null)).failed);
+    try std.testing.expectEqual(@as(u32, 0), (try scan(gpa, std.testing.io, d, &.{root}, null, null)).failed);
     try fs.write(std.testing.io, root ++ "/broken.bmson", "{\"");
-    try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, std.testing.io, d, &.{root}, null)).failed);
+    try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, std.testing.io, d, &.{root}, null, null)).failed);
     fs.remove(std.testing.io, root ++ "/broken.bmson");
-    _ = try scan(gpa, std.testing.io, d, &.{root}, null);
+    _ = try scan(gpa, std.testing.io, d, &.{root}, null, null);
     const st = try d.prepare("SELECT COUNT(*) FROM unparsed");
     defer st.deinit();
     try std.testing.expect(try st.step());
@@ -835,7 +933,7 @@ test "a scan through links back to the root ends and stores each chart once" {
     const d = try Db.open(":memory:", gpa, false);
     defer d.close();
     try initSchema(d);
-    try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, std.testing.io, d, &.{root}, null)).parsed);
+    try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, std.testing.io, d, &.{root}, null, null)).parsed);
     const st = try d.prepare("SELECT COUNT(*) FROM song");
     defer st.deinit();
     try std.testing.expect(try st.step());
@@ -1037,8 +1135,127 @@ test "a scan leaves the database free for other writers between batches" {
     defer d.close();
     try initSchema(d);
     const roots = [_][]const u8{"tests/charts"};
-    _ = try scan(gpa, std.testing.io, d, &roots, null);
+    _ = try scan(gpa, std.testing.io, d, &roots, null, null);
     const other = try Db.open(path, gpa, false);
     defer other.close();
     try recordScore(other, .{ .sha256 = "a", .clear = 1, .ex = 1, .counts = @splat(0), .max_combo = 1, .miss = 0, .date = 1 });
+}
+
+test "LN on any #RANDOM branch files plays as asked, and a CN judged play never lands in the LN row" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const root = "actuon_test_random_ln";
+    fs.removeTree(io, root);
+    defer fs.removeTree(io, root);
+    try fs.mkdirs(io, root);
+    const head = "#BPM 120\n#WAV01 a.wav\n#00111:01\n#RANDOM 2\n#IF 1\n#00112:01\n#ENDIF\n#IF 2\n";
+    try fs.write(io, root ++ "/ln.bms", head ++ "#TITLE ln\n#00151:0101\n#ENDIF\n#ENDRANDOM\n");
+    try fs.write(io, root ++ "/plain.bms", head ++ "#TITLE plain\n#00113:01\n#ENDIF\n#ENDRANDOM\n");
+    const d = try Db.open(":memory:", gpa, false);
+    defer d.close();
+    try initSchema(d);
+    _ = try scan(gpa, io, d, &.{root}, null, null);
+    const q = try d.prepare("SELECT group_concat(title||has_open_ln) FROM (SELECT * FROM song ORDER BY title)");
+    defer q.deinit();
+    try std.testing.expect(try q.step());
+    try std.testing.expectEqualStrings("ln1,plain0", q.text(0));
+    const sha = try d.prepare("SELECT sha256 FROM song ORDER BY title");
+    defer sha.deinit();
+    try std.testing.expect(try sha.step());
+    // CN asked on a branch with no open LN is judged as LN, yet the list reads the CN row.
+    try std.testing.expectEqual(@as(u8, 1), try scoreMode(d, sha.text(0), 1, 0));
+    try std.testing.expect(try sha.step());
+    try std.testing.expectEqual(@as(u8, 0), try scoreMode(d, sha.text(0), 1, 0));
+    // A chart scanned before this rule, or never scanned, keeps a CN judged play off the IR.
+    try std.testing.expectEqual(@as(u8, 1), try scoreMode(d, sha.text(0), 1, 1));
+    try std.testing.expectEqual(@as(u8, 2), try scoreMode(d, "unscanned", 0, 2));
+}
+
+test "an assist lamp shows in the list, apart from the lamp IR sync claims" {
+    const d = try Db.open(":memory:", std.testing.allocator, false);
+    defer d.close();
+    try initSchema(d);
+    try d.exec("INSERT INTO song(path,folder,sha256,md5) VALUES('p','f','a','')");
+    const st = try d.prepare(song_select);
+    defer st.deinit();
+    try recordScore(d, .{ .sha256 = "a", .clear = 0, .assist = 3, .ex = 0, .counts = @splat(0), .max_combo = 0, .miss = std.math.maxInt(i32), .date = 1 });
+    try std.testing.expect(try st.step());
+    try std.testing.expectEqual(@as(i64, 3), st.int(19));
+    try std.testing.expectEqual(@as(i64, -1), st.int(21)); // no BP from a lamp alone
+    st.reset();
+    try recordScore(d, .{ .sha256 = "a", .clear = 1, .ex = 5, .counts = @splat(0), .max_combo = 0, .miss = 9, .date = 2 });
+    try std.testing.expect(try st.step());
+    try std.testing.expectEqual(@as(i64, 3), st.int(19));
+    try std.testing.expectEqual(@as(i64, 9), st.int(21));
+    const claimed = try d.prepare("SELECT clear FROM score");
+    defer claimed.deinit();
+    try std.testing.expect(try claimed.step());
+    try std.testing.expectEqual(@as(i64, 1), claimed.int(0));
+}
+
+test "a watched rescan lists only changed folders, drops removed ones and falls back when events are lost" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const root = "actuon_test_watch";
+    fs.removeTree(io, root);
+    defer fs.removeTree(io, root);
+    try fs.mkdirs(io, root ++ "/old");
+    try fs.mkdirs(io, root ++ "/gone/deep");
+    const chart = try fs.readAlloc(gpa, io, "tests/charts/five_key.bms", 1 << 20);
+    defer gpa.free(chart);
+    try fs.write(io, root ++ "/old/a.bms", chart);
+    try fs.write(io, root ++ "/gone/deep/b.bms", chart);
+    const d = try Db.open(":memory:", gpa, false);
+    defer d.close();
+    try initSchema(d);
+    var w: Watch = .init(gpa);
+    defer w.deinit();
+    // A root as typed may end in a separator.
+    const roots = [_][]const u8{root ++ "/"};
+    try std.testing.expectEqual(@as(u32, 2), (try scan(gpa, io, d, &roots, null, &w)).parsed);
+    // A stat pass would read every chart again now.
+    try d.exec("UPDATE song SET mtime=1");
+    try std.testing.expectEqual(ScanStats{}, try scan(gpa, io, d, &roots, null, &w));
+    try fs.mkdirs(io, root ++ "/new");
+    try fs.write(io, root ++ "/new/c.bms", chart);
+    fs.removeTree(io, root ++ "/gone");
+    try std.testing.expectEqual(ScanStats{ .parsed = 1, .removed = 1 }, try scan(gpa, io, d, &roots, null, &w));
+    try fs.write(io, root ++ "/old/d.bms", chart);
+    try std.testing.expectEqual(ScanStats{ .parsed = 2 }, try scan(gpa, io, d, &roots, null, &w));
+    try d.exec("UPDATE song SET mtime=1");
+    w.lost = true;
+    try std.testing.expectEqual(ScanStats{ .parsed = 3 }, try scan(gpa, io, d, &roots, null, &w));
+}
+
+test "a watched folder made again under its name, or moved to another watched one, stays watched" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const root = "actuon_test_watch_again";
+    fs.removeTree(io, root);
+    defer fs.removeTree(io, root);
+    try fs.mkdirs(io, root ++ "/a/pack/sub");
+    try fs.mkdirs(io, root ++ "/b");
+    const chart = try fs.readAlloc(gpa, io, "tests/charts/five_key.bms", 1 << 20);
+    defer gpa.free(chart);
+    try fs.write(io, root ++ "/a/pack/sub/1.bms", chart);
+    const d = try Db.open(":memory:", gpa, false);
+    defer d.close();
+    try initSchema(d);
+    var w: Watch = .init(gpa);
+    defer w.deinit();
+    const roots = [_][]const u8{root};
+    try std.testing.expectEqual(ScanStats{ .parsed = 1 }, try scan(gpa, io, d, &roots, null, &w));
+    // As re-extracting an archive does.
+    fs.removeTree(io, root ++ "/a/pack");
+    try fs.mkdirs(io, root ++ "/a/pack");
+    try fs.write(io, root ++ "/a/pack/2.bms", chart);
+    try std.testing.expectEqual(ScanStats{ .parsed = 1, .removed = 1 }, try scan(gpa, io, d, &roots, null, &w));
+    try fs.write(io, root ++ "/a/pack/3.bms", chart);
+    try std.testing.expectEqual(ScanStats{ .parsed = 1 }, try scan(gpa, io, d, &roots, null, &w));
+    try fs.rename(root ++ "/a/pack", root ++ "/b/pack");
+    try std.testing.expectEqual(ScanStats{ .parsed = 2, .removed = 2 }, try scan(gpa, io, d, &roots, null, &w));
+    try fs.write(io, root ++ "/b/pack/4.bms", chart);
+    try std.testing.expectEqual(ScanStats{ .parsed = 1 }, try scan(gpa, io, d, &roots, null, &w));
 }
