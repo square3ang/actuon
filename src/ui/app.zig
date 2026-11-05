@@ -619,23 +619,24 @@ pub const App = struct {
         const al = tmp.allocator();
         a.loadSkinSfx(al);
         const load_ctx = a.skin_state.loadCtx();
-        skin_mod.setLuaCtx(&load_ctx);
-        defer skin_mod.setLuaCtx(null);
-        skin_mod.lua_mod.audio_quiet = true;
-        defer skin_mod.lua_mod.audio_quiet = false;
-        a.play_skin = a.loadSlot(al, skin_mod.playSlot(mode), mode);
-        a.decide_skin = a.loadSlot(al, .decide, mode);
-        a.result_skin = a.loadSlot(al, .result, mode);
+        const env = a.luaEnv(&load_ctx, true);
+        a.play_skin = a.loadSlot(al, skin_mod.playSlot(mode), mode, env);
+        a.decide_skin = a.loadSlot(al, .decide, mode, env);
+        a.result_skin = a.loadSlot(al, .result, mode, env);
     }
 
-    fn loadSlot(a: *App, al: std.mem.Allocator, slot: config.SkinSlot, mode: core.types.Mode) ?*skin_mod.model.Skin {
+    fn luaEnv(a: *App, load_ctx: *const skin_mod.model.Ctx, audio_quiet: bool) skin_mod.LuaEnv {
+        return .{ .ctx = load_ctx, .audio = .{ .ud = a, .f = App.skinAudio }, .audio_quiet = audio_quiet };
+    }
+
+    fn loadSlot(a: *App, al: std.mem.Allocator, slot: config.SkinSlot, mode: core.types.Mode, env: skin_mod.LuaEnv) ?*skin_mod.model.Skin {
         const root = a.cfg.skinFor(slot);
         if (root.len == 0) return null;
         const p = skin_mod.find(al, a.io, root, skin_mod.slotType(slot)) orelse {
             std.log.warn("no skin of the needed type under {s}", .{root});
             return null;
         };
-        return skin_mod.load(a.gpa, a.io, &a.g, p, mode, noOption, skin_mod.loadConf(al, a.io, root, skin_mod.slotType(slot))) catch |e| {
+        return skin_mod.load(a.gpa, a.io, &a.g, p, mode, noOption, skin_mod.loadConf(al, a.io, root, skin_mod.slotType(slot)), env) catch |e| {
             std.log.err("skin {s}: {t}", .{ p, e });
             return null;
         };
@@ -653,11 +654,7 @@ pub const App = struct {
         a.loadSkinSfx(al);
         a.select_state = .{};
         const load_ctx = a.select_state.loadCtx();
-        skin_mod.setLuaCtx(&load_ctx);
-        defer skin_mod.setLuaCtx(null);
-        skin_mod.lua_mod.audio_quiet = true;
-        defer skin_mod.lua_mod.audio_quiet = false;
-        a.select_skin = a.loadSlot(al, .select, .beat7);
+        a.select_skin = a.loadSlot(al, .select, .beat7, a.luaEnv(&load_ctx, true));
     }
 
     fn dropSelectSkin(a: *App) void {
@@ -676,9 +673,7 @@ pub const App = struct {
         const al = tmp.allocator();
         const p = skin_mod.find(al, a.io, root, skin_mod.type_result) orelse return;
         const load_ctx = a.skin_state.loadCtx();
-        skin_mod.setLuaCtx(&load_ctx);
-        defer skin_mod.setLuaCtx(null);
-        const fresh = skin_mod.load(a.gpa, a.io, &a.g, p, a.skin_mode, noOption, skin_mod.loadConf(al, a.io, root, skin_mod.type_result)) catch return;
+        const fresh = skin_mod.load(a.gpa, a.io, &a.g, p, a.skin_mode, noOption, skin_mod.loadConf(al, a.io, root, skin_mod.type_result), a.luaEnv(&load_ctx, false)) catch return;
         if (a.result_skin) |old| skin_mod.destroy(a.gpa, old);
         a.result_skin = fresh;
     }
@@ -1207,7 +1202,6 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, opts: Options) !void {
     defer app.freeMenuSounds();
     // Voices read the buffers freed above until the writer stops; destroy closes again harmlessly.
     defer engine.close();
-    skin_mod.lua_mod.audio_hook = .{ .ud = app, .f = App.skinAudio };
     // Textures stay cached, so a play's skins come up without the wait.
     app.reloadSkins(.beat7);
     app.dropSkins();

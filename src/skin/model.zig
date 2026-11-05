@@ -184,9 +184,9 @@ pub const Ctx = struct {
     /// Lift and hidden in skin pixels.
     lift_px: f32 = 0,
     hidden_px: f32 = 0,
-    lua_call_bool: ?*const fn (skin: *Skin, r: i32) bool = null,
-    lua_call_num: ?*const fn (skin: *Skin, r: i32) f64 = null,
-    lua_call_str: ?*const fn (skin: *Skin, r: i32, buf: []u8) []const u8 = null,
+    lua_call_bool: ?*const fn (ctx: *const Ctx, skin: *Skin, r: i32) bool = null,
+    lua_call_num: ?*const fn (ctx: *const Ctx, skin: *Skin, r: i32) f64 = null,
+    lua_call_str: ?*const fn (ctx: *const Ctx, skin: *Skin, r: i32, buf: []u8) []const u8 = null,
 };
 
 /// Slider position 0..1 from its resting place for a point, null off the track, as beatoraja's SkinSlider.
@@ -399,7 +399,7 @@ pub const Renderer = struct {
     }
 
     fn drawNumber(r: *const Renderer, o: *const Object, k: Key) void {
-        const v = if (o.lua_value != 0 and r.ctx.lua_call_num != null) @as(?i64, @intFromFloat(r.ctx.lua_call_num.?(r.s, o.lua_value))) else r.ctx.num(r.ctx.ud, o.ref);
+        const v = if (o.lua_value != 0 and r.ctx.lua_call_num != null) @as(?i64, @intFromFloat(r.ctx.lua_call_num.?(r.ctx, r.s, o.lua_value))) else r.ctx.num(r.ctx.ud, o.ref);
         // beatoraja's value for "nothing to show", such as an empty ranking row.
         if (v == std.math.minInt(i32)) return;
         r.drawValue(o, k, v orelse return);
@@ -462,7 +462,7 @@ pub const Renderer = struct {
     fn drawText(r: *const Renderer, o: *const Object, k: Key) void {
         var buf: [512]u8 = undefined;
         const s = if (o.lua_value != 0 and r.ctx.lua_call_str != null)
-            r.ctx.lua_call_str.?(r.s, o.lua_value, &buf)
+            r.ctx.lua_call_str.?(r.ctx, r.s, o.lua_value, &buf)
         else if (o.constant.len > 0) o.constant else r.ctx.str(r.ctx.ud, o.ref);
         if (s.len == 0 or k.a <= 0) return;
         const col: gfx.Color = .{ .r = @intFromFloat(std.math.clamp(k.r, 0, 255)), .g = @intFromFloat(std.math.clamp(k.g, 0, 255)), .b = @intFromFloat(std.math.clamp(k.b, 0, 255)), .a = @intFromFloat(std.math.clamp(k.a, 0, 255)) };
@@ -569,9 +569,9 @@ pub const Renderer = struct {
 
     pub fn visible(r: *const Renderer, o: *const Object) ?Key {
         for (o.ops) |op| if (!opOk(r.s, r.ctx, op)) return null;
-        if (o.lua_draw != 0 and r.ctx.lua_call_bool != null and !r.ctx.lua_call_bool.?(r.s, o.lua_draw)) return null;
+        if (o.lua_draw != 0 and r.ctx.lua_call_bool != null and !r.ctx.lua_call_bool.?(r.ctx, r.s, o.lua_draw)) return null;
         const st = if (o.lua_timer != 0 and r.ctx.lua_call_num != null) blk: {
-            const v = r.ctx.lua_call_num.?(r.s, o.lua_timer);
+            const v = r.ctx.lua_call_num.?(r.ctx, r.s, o.lua_timer);
             break :blk if (v < 0) @as(i64, -1) else @as(i64, @intFromFloat(v / 1000));
         } else timerStart(r.ctx, o.timer);
         if (st < 0) return null;
