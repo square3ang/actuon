@@ -545,27 +545,56 @@ fn validSha(s: []const u8) bool {
     return true;
 }
 
-const Best = struct { ex: u32, clear: u32 };
+/// The server keeps each field's best on its own, as beatoraja's IR does, so a score beating any one of them is worth sending.
+const Best = struct {
+    ex: u32,
+    clear: u32,
+    max_combo: u32,
+    miss: u32,
+
+    fn of(s: MyScore) Best {
+        return .{ .ex = s.ex, .clear = s.clear, .max_combo = s.max_combo, .miss = s.miss };
+    }
+
+    fn beats(n: Best, b: Best) bool {
+        return n.ex > b.ex or n.clear > b.clear or n.max_combo > b.max_combo or n.miss < b.miss;
+    }
+
+    fn merge(b: Best, n: Best) Best {
+        return .{ .ex = @max(b.ex, n.ex), .clear = @max(b.clear, n.clear), .max_combo = @max(b.max_combo, n.max_combo), .miss = @min(b.miss, n.miss) };
+    }
+};
+
+fn raise(a: std.mem.Allocator, best: *std.StringHashMapUnmanaged(Best), sha: []const u8, n: Best) !bool {
+    const got = try best.getOrPut(a, sha);
+    if (!got.found_existing) {
+        got.value_ptr.* = n;
+        return true;
+    }
+    if (!n.beats(got.value_ptr.*)) return false;
+    got.value_ptr.* = got.value_ptr.merge(n);
+    return true;
+}
+
 const Pending = struct { id: i64, sha: []const u8, path: []const u8 };
 
-/// Best first, so one upload covers its chart. shortcut: a replay that only improves combo or BP is not sent, compare those too if players ask for it.
+/// Best first, so one upload covers its chart.
 fn pendingReplays(a: std.mem.Allocator, d: db_mod.Db, mine: []const MyScore) ![]Pending {
     var best: std.StringHashMapUnmanaged(Best) = .empty;
     // A claim does not count: a replay that only matches it still turns it into a verified score.
-    for (mine) |s| if (s.verified) try best.put(a, s.sha256, .{ .ex = s.ex, .clear = s.clear });
+    for (mine) |s| {
+        if (s.verified) _ = try raise(a, &best, s.sha256, .of(s));
+    }
     const st = try d.prepare(
-        \\SELECT r.id,r.sha256,r.ex,r.clear,COALESCE((SELECT path FROM song s WHERE s.sha256=r.sha256 LIMIT 1),'')
+        \\SELECT r.id,r.sha256,r.ex,r.clear,COALESCE((SELECT path FROM song s WHERE s.sha256=r.sha256 LIMIT 1),''),r.max_combo,r.miss
         \\FROM replay r WHERE r.ln_mode=0 ORDER BY r.sha256, r.ex DESC, r.clear DESC
     );
     defer st.deinit();
     var out: std.ArrayList(Pending) = .empty;
     while (try st.step()) {
-        const ex: u32 = @intCast(st.int(2));
-        const clear: u32 = @intCast(st.int(3));
         const sha = try a.dupe(u8, st.text(1));
-        const got = try best.getOrPut(a, sha);
-        if (got.found_existing and ex <= got.value_ptr.ex and clear <= got.value_ptr.clear) continue;
-        got.value_ptr.* = if (got.found_existing) .{ .ex = @max(ex, got.value_ptr.ex), .clear = @max(clear, got.value_ptr.clear) } else .{ .ex = ex, .clear = clear };
+        const n: Best = .{ .ex = @intCast(st.int(2)), .clear = @intCast(st.int(3)), .max_combo = @intCast(st.int(5)), .miss = @intCast(st.int(6)) };
+        if (!try raise(a, &best, sha, n)) continue;
         try out.append(a, .{ .id = st.int(0), .sha = sha, .path = try a.dupe(u8, st.text(4)) });
     }
     return out.items;
@@ -574,8 +603,10 @@ fn pendingReplays(a: std.mem.Allocator, d: db_mod.Db, mine: []const MyScore) ![]
 fn pendingClaims(a: std.mem.Allocator, d: db_mod.Db, mine: []const MyScore) ![]MyScore {
     var best: std.StringHashMapUnmanaged(Best) = .empty;
     for (mine) |s| {
-        const got = try best.getOrPutValue(a, s.sha256, .{ .ex = 0, .clear = 0 });
-        got.value_ptr.* = .{ .ex = @max(s.ex, got.value_ptr.ex), .clear = @max(s.clear, got.value_ptr.clear) };
+        var b: Best = .of(s);
+        // The ranking hides a claim behind a verified score, so only a new EX or lamp is worth a slot of the claim limit there.
+        if (s.verified) b = .{ .ex = s.ex, .clear = s.clear, .max_combo = std.math.maxInt(u32), .miss = 0 };
+        _ = try raise(a, &best, s.sha256, b);
     }
     const st = try d.prepare("SELECT sha256,ex,clear,min_bp,max_combo,date FROM score WHERE mode=0 AND (ex>0 OR clear>0)");
     defer st.deinit();
@@ -583,10 +614,9 @@ fn pendingClaims(a: std.mem.Allocator, d: db_mod.Db, mine: []const MyScore) ![]M
     while (try st.step()) {
         // One the server refuses would take the rest of its batch down with it.
         if (!validSha(st.text(0))) continue;
-        const ex: u32 = @intCast(st.int(1));
-        const clear: u32 = @intCast(st.int(2));
-        if (best.get(st.text(0))) |b| if (ex <= b.ex and clear <= b.clear) continue;
-        try out.append(a, .{ .sha256 = try a.dupe(u8, st.text(0)), .ex = ex, .clear = clear, .miss = @intCast(st.int(3)), .max_combo = @intCast(st.int(4)), .date = st.int(5), .verified = false });
+        const s: MyScore = .{ .sha256 = try a.dupe(u8, st.text(0)), .ex = @intCast(st.int(1)), .clear = @intCast(st.int(2)), .miss = @intCast(st.int(3)), .max_combo = @intCast(st.int(4)), .date = st.int(5), .verified = false };
+        if (best.get(s.sha256)) |b| if (!Best.of(s).beats(b)) continue;
+        try out.append(a, s);
     }
     return out.items;
 }
@@ -983,14 +1013,42 @@ test "only scores the server cannot match become claims" {
         .{ .sha256 = &empty, .clear = 0, .ex = 0, .counts = @splat(0), .max_combo = 0, .miss = 0, .date = 7 },
     }) |s| try db_mod.recordScore(d, s);
     const mine = [_]MyScore{
-        .{ .sha256 = &matched, .ex = 100, .clear = 4, .miss = 0, .max_combo = 0, .date = 0 },
-        .{ .sha256 = &claimed, .ex = 80, .clear = 4, .miss = 0, .max_combo = 0, .date = 0, .verified = false },
+        .{ .sha256 = &matched, .ex = 100, .clear = 4, .miss = 3, .max_combo = 9, .date = 0 },
+        .{ .sha256 = &claimed, .ex = 80, .clear = 4, .miss = 3, .max_combo = 9, .date = 0, .verified = false },
     };
     const p = try pendingClaims(arena.allocator(), d, &mine);
     try std.testing.expectEqual(@as(usize, 1), p.len);
     try std.testing.expectEqualStrings(&imported, p[0].sha256);
     try std.testing.expectEqual(@as(u32, 50), p[0].ex);
     try std.testing.expectEqual(@as(u32, 3), p[0].miss);
+}
+
+test "a score that only improves combo or BP is sent" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const d = try db_mod.Db.open(":memory:", a, false);
+    defer d.close();
+    try db_mod.initSchema(d);
+    const sha: [64]u8 = @splat('a');
+    try d.exec("INSERT INTO replay(id,sha256,ex,clear,max_combo,miss) VALUES" ++
+        "(1,'" ++ sha ++ "',90,4,60,9),(2,'" ++ sha ++ "',80,4,55,9),(3,'" ++ sha ++ "',70,4,10,3),(4,'" ++ sha ++ "',60,4,10,4)");
+    const claimed: [64]u8 = @splat('b');
+    try db_mod.recordScore(d, .{ .sha256 = &sha, .clear = 4, .ex = 90, .counts = @splat(0), .max_combo = 9, .miss = 2, .date = 7 });
+    try db_mod.recordScore(d, .{ .sha256 = &claimed, .clear = 4, .ex = 90, .counts = @splat(0), .max_combo = 9, .miss = 2, .date = 7 });
+    const mine = [_]MyScore{
+        .{ .sha256 = &sha, .ex = 100, .clear = 4, .miss = 5, .max_combo = 50, .date = 0 },
+        .{ .sha256 = &claimed, .ex = 100, .clear = 4, .miss = 5, .max_combo = 50, .date = 0, .verified = false },
+    };
+    const p = try pendingReplays(arena.allocator(), d, &mine);
+    try std.testing.expectEqual(@as(usize, 2), p.len);
+    try std.testing.expectEqual(@as(i64, 1), p[0].id); // more combo
+    try std.testing.expectEqual(@as(i64, 3), p[1].id); // fewer BP
+    // A verified score hides any claim, so only the claimed chart's fewer BP goes up.
+    const claims = try pendingClaims(arena.allocator(), d, &mine);
+    try std.testing.expectEqual(@as(usize, 1), claims.len);
+    try std.testing.expectEqualStrings(&claimed, claims[0].sha256);
+    try std.testing.expectEqual(@as(u32, 2), claims[0].miss);
 }
 
 test "a claim does not stop a replay from being sent" {

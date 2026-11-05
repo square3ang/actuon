@@ -234,6 +234,69 @@ try:
     assert len(host_play.ask({**claim, "ex": 0})["players"]) == 1, "a closed connection leaves the room"
     host_play.close()
 
+    def varint(b, i):
+        v = shift = 0
+        while True:
+            v |= (b[i] & 0x7F) << shift
+            i += 1
+            if b[i - 1] < 0x80:
+                return v, i
+            shift += 7
+    def put(v):
+        out = b""
+        while v >= 0x80:
+            out += bytes([v & 0x7F | 0x80])
+            v >>= 7
+        return out + bytes([v])
+    def head(rep):
+        _, i = varint(rep, 74)  # seed
+        n, i = varint(rep, i)
+        for _ in range(n):
+            _, i = varint(rep, i)
+        return rep[:i]
+    def events(rep):
+        count, i = varint(rep, len(head(rep)))
+        evs, t = [], 0
+        for _ in range(count):
+            z, i = varint(rep, i)
+            t += (z >> 1) ^ -(z & 1)
+            evs.append((t, rep[i]))
+            i += 1
+        return evs
+    def rebuild(rep, evs, gauge=None):
+        out, t = bytearray(head(rep) + put(len(evs))), 0
+        for when, key in evs:
+            out += put(((when - t) << 1) ^ ((when - t) >> 63)) + bytes([key])
+            t = when
+        if gauge is not None:
+            out[69] = gauge
+        return bytes(out)
+    long_path = os.path.join(work, "long.bms")
+    with open(long_path, "w") as f:
+        f.write("#BPM 120\n#WAV01 a.wav\n" + "".join(f"#00{m}11:{'01' * 16}\n" for m in range(1, 5)))
+    long_out = subprocess.run([mkreplay, long_path, long_path + ".actr"], capture_output=True, text=True, check=True).stderr.split()
+    long_sha, long_notes, long_chart = long_out[0], int(long_out[1]), open(long_path, "rb").read()
+    long_replay = open(long_path + ".actr", "rb").read()
+    perfect = events(long_replay)
+    merger = call("POST", "/register", {"name": "merger", "password": "correct horse"})[1]["token"]
+    # Drop the middle note: the best EX, but a broken combo and one BP.
+    mid = len(perfect) // 4 * 2
+    status, broken = score(long_sha, merger, rebuild(long_replay, perfect[:mid] + perfect[mid + 2:]), long_chart)
+    assert status == 200 and broken["miss"] == 1 and broken["max_combo"] < long_notes, broken
+    # Every note late: less EX, but a full combo and no BP.
+    status, late = score(long_sha, merger, rebuild(long_replay, [(t + 50_000, k) for t, k in perfect]), long_chart)
+    assert status == 200 and late["ex"] < broken["ex"] and late["max_combo"] == long_notes and late["miss"] == 0, late
+    got = call("GET", "/me/scores", None, merger)[1]["scores"]
+    assert [(s["ex"], s["max_combo"], s["miss"]) for s in got] == [(broken["ex"], long_notes, 0)], "each field keeps its own best"
+    # A HARD gauge that empties stops judging, and the notes it never reached are BP too.
+    status, failed = score(long_sha, merger, rebuild(long_replay, [], gauge=3), long_chart)
+    assert status == 200 and failed["clear"] == 1 and failed["miss"] == long_notes, failed
+    other = "e" * 64
+    assert call("POST", "/me/claims", {"scores": [{"sha256": other, "clear": 4, "ex": 90, "max_combo": 5, "miss": 9, "date": 1}]}, merger)[0] == 200
+    assert call("POST", "/me/claims", {"scores": [{"sha256": other, "clear": 1, "ex": 10, "max_combo": 50, "miss": 2, "date": 1}]}, merger)[0] == 200
+    got = [(s["clear"], s["ex"], s["max_combo"], s["miss"]) for s in call("GET", "/me/scores", None, merger)[1]["scores"] if s["sha256"] == other]
+    assert got == [(4, 90, 50, 2)], "a claim keeps each field's best too"
+
     hoarder = call("POST", "/register", {"name": "hoarder", "password": "correct horse"})[1]["token"]
     def claims(start):
         return {"scores": [{"sha256": f"{i:064x}", "clear": 0, "ex": 0, "max_combo": 0, "miss": 0, "date": 1} for i in range(start, start + 7000)]}
