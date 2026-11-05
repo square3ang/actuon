@@ -100,7 +100,8 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, a, "--from-ms")) {
             opts.start_us = 1000 * try std.fmt.parseInt(i64, next(args, &i) orelse return error.MissingValue, 10);
         } else if (std.mem.startsWith(u8, a, "-")) {
-            return printOut(io, "{s}", .{usage});
+            std.debug.print("{s}", .{usage});
+            return error.UnknownFlag;
         } else opts.play_path = a;
     }
     try app.main(gpa, io, opts);
@@ -145,7 +146,8 @@ fn irAccount(gpa: std.mem.Allocator, io: std.Io, cmd: []const u8, url: []const u
     loaded.cfg.ir_url = url;
     loaded.cfg.ir_token = token;
     try config.save(gpa, io, loaded.file, loaded.cfg);
-    try printOut(io, "logged in as {s}; token saved\n", .{name});
+    // The token is saved, so a closed stdout must not make a script think the login failed.
+    printOut(io, "logged in as {s}; token saved\n", .{name}) catch {};
 }
 
 fn irRival(gpa: std.mem.Allocator, io: std.Io, name: []const u8) !void {
@@ -157,6 +159,10 @@ fn irRival(gpa: std.mem.Allocator, io: std.Io, name: []const u8) !void {
     const cfg = config.load(a, io).cfg;
     const auth = try std.fmt.allocPrint(a, "Bearer {s}", .{cfg.ir_token});
     const r = try http.request(a, io, .PUT, try std.fmt.allocPrint(a, "{s}/rivals/{f}", .{ cfg.ir_url, std.fmt.alt(std.Uri.Component{ .raw = name }, .formatEscaped) }), "", &.{.{ .name = "Authorization", .value = auth }});
+    if (r.status / 100 != 2) {
+        std.debug.print("server said {d}: {s}\n", .{ r.status, r.body });
+        return error.Refused;
+    }
     try printOut(io, "{d}: {s}\n", .{ r.status, r.body });
 }
 

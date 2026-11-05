@@ -45,7 +45,7 @@ pub const App = struct {
     /// Shared with main, so what menus allocate here is freed with what main allocated.
     arena: *std.heap.ArenaAllocator,
     cfg: config.Config,
-    cfg_file: config.File = .read,
+    cfg_file: config.File,
     g: gfx.Gfx,
     engine: *engine_mod.Engine,
     sfx_data: [std.enums.values(menu_sound.Sfx).len][]const f32 = @splat(&.{}),
