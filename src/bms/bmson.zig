@@ -116,6 +116,38 @@ fn micro(t: f64) i64 {
 
 const Placed = struct { y: i64, lane: u8, note: types.Note };
 
+/// Real charts, keysounds included, hold a few ten thousand.
+const max_notes = 1 << 18;
+
+// Every placed y on a lane, an LN start carrying its end; nothing else lands inside an LN, so only the y just below can hold another.
+const Taken = struct {
+    tree: Tree = .{},
+
+    const Mark = struct { y: i64, end: i64 };
+    const Tree = std.Treap(Mark, struct {
+        fn f(l: Mark, r: Mark) std.math.Order {
+            return std.math.order(l.y, r.y);
+        }
+    }.f);
+
+    fn around(t: *Taken, y: i64) struct { below: ?*Tree.Node, above: ?*Tree.Node } {
+        const e = t.tree.getEntryFor(.{ .y = y, .end = y });
+        if (e.node) |n| return .{ .below = n.prev(), .above = n.next() };
+        const p = e.context.inserted_under orelse return .{ .below = null, .above = null };
+        return if (p.key.y < y) .{ .below = p, .above = p.next() } else .{ .below = p.prev(), .above = p };
+    }
+
+    fn holds(t: *Taken, y: i64) bool {
+        const below = t.around(y).below orelse return false;
+        return y <= below.key.end;
+    }
+
+    fn add(t: *Taken, a: std.mem.Allocator, y: i64, end: i64) !void {
+        var e = t.tree.getEntryFor(.{ .y = y, .end = end });
+        e.set(try a.create(Tree.Node));
+    }
+};
+
 pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
     var chart: Chart = .{ .arena = std.heap.ArenaAllocator.init(gpa) };
     errdefer chart.arena.deinit();
@@ -123,6 +155,12 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
     hash.fill(&chart, data);
     const root = try std.json.parseFromSliceLeaky(JRoot, a, data, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
     const info = root.info;
+    var note_count: usize = 0;
+    for (root.sound_channels) |sc| note_count += sc.notes.len;
+    for ([_][]const JMineCh{ root.key_channels, root.mine_channels }) |chs| for (chs) |ch| {
+        note_count += ch.notes.len;
+    };
+    if (note_count > max_notes) return error.TooBig;
 
     chart.title = info.title;
     chart.subtitle = if (info.chart_name.len > 0)
@@ -241,32 +279,8 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
     var wavs: std.ArrayList([]const u8) = .empty;
     var bg: std.ArrayList(types.BgSound) = .empty;
     var hidden: std.ArrayList(types.Hidden) = .empty;
-    const Lnr = struct {
-        start: i64,
-        end: i64,
-        // spans on a lane never overlap (a new LN is refused when it would), so only the last one starting before y can hold y
-        fn holds(list: []const @This(), y: i64) bool {
-            const i = std.sort.partitionPoint(@This(), list, y, startsBefore);
-            return i > 0 and y <= list[i - 1].end;
-        }
-        fn startsBefore(y: i64, sp: @This()) bool {
-            return sp.start < y;
-        }
-    };
-    var spans: [types.max_lanes]std.ArrayList(Lnr) = @splat(.empty);
+    var taken: [types.max_lanes]Taken = @splat(.{});
     var placed: std.ArrayList(Placed) = .empty;
-    var taken: [types.max_lanes]std.ArrayList(i64) = @splat(.empty);
-    const take = struct {
-        /// shortcut: inserts stay O(n) under this cap (real charts hold a few thousand a lane), move to a balanced tree if a real chart needs more.
-        const max_notes = 1 << 15;
-        fn f(alloc: std.mem.Allocator, list: *std.ArrayList(i64), y: i64) !void {
-            if (list.items.len >= max_notes) return error.TooBig;
-            try list.insert(alloc, std.sort.partitionPoint(i64, list.items, y, below), y);
-        }
-        fn below(y: i64, v: i64) bool {
-            return v <= y;
-        }
-    };
     // first note at (lane, y) wins, as with TimeLine.setNote guards
     var occupied: std.AutoHashMapUnmanaged(u128, void) = .empty;
     const occKey = struct {
@@ -281,13 +295,11 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
         try wavs.append(a, sc.name);
         std.mem.sort(JNote, sc.notes, {}, ByY.note);
         var start_time: i64 = 0;
-        for (sc.notes, 0..) |n, i| {
+        var later: usize = 0;
+        for (sc.notes) |n| {
             _ = std.math.add(i64, n.y, n.l) catch continue;
-            var next: ?JNote = null;
-            for (sc.notes[i + 1 ..]) |m| if (m.y > n.y) {
-                next = m;
-                break;
-            };
+            while (later < sc.notes.len and sc.notes[later].y <= n.y) later += 1;
+            const next: ?JNote = if (later < sc.notes.len) sc.notes[later] else null;
             if (!n.c) start_time = 0;
             const tl = try tls.get(n.y);
             var dur: i64 = 0;
@@ -303,14 +315,13 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
                 if (n.up) {
                     try ups.put(a, occKey(lane, n.y), .{ .wav = id, .start = start_time, .dur = dur });
                 } else {
-                    if (Lnr.holds(spans[lane].items, n.y)) {
+                    if (taken[lane].holds(n.y)) {
                         try bg.append(a, .{ .time_us = tl.micro, .wav = id, .wav_start_us = start_time, .wav_dur_us = dur });
                     } else if (n.l > 0) {
                         const end = try tls.get(n.y + n.l);
                         if (!occupied.contains(occKey(lane, n.y))) {
-                            const ys = taken[lane].items;
-                            const after = std.sort.partitionPoint(i64, ys, n.y, take.below);
-                            if (after < ys.len and ys[after] <= n.y + n.l) {
+                            const above = taken[lane].around(n.y).above;
+                            if (above != null and above.?.key.y <= n.y + n.l) {
                                 try bg.append(a, .{ .time_us = tl.micro, .wav = id, .wav_start_us = start_time, .wav_dur_us = dur });
                             } else {
                                 const ty: types.LnType = switch (n.t) {
@@ -324,9 +335,8 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
                                 try occupied.put(a, occKey(lane, n.y + n.l), {});
                                 try placed.append(a, .{ .y = n.y, .lane = lane, .note = .{ .time_us = tl.micro, .y = 0, .wav = id, .lane = lane, .kind = .ln_start, .ln_type = ty, .ln_open = ln_open, .wav_start_us = start_time, .wav_dur_us = dur } });
                                 try placed.append(a, .{ .y = n.y + n.l, .lane = lane, .note = .{ .time_us = end.micro, .y = 0, .wav = -2, .lane = lane, .kind = .ln_end, .ln_type = ty, .ln_open = ln_open } });
-                                try take.f(a, &taken[lane], n.y);
-                                try take.f(a, &taken[lane], n.y + n.l);
-                                try spans[lane].insert(a, std.sort.partitionPoint(Lnr, spans[lane].items, n.y, Lnr.startsBefore), .{ .start = n.y, .end = n.y + n.l });
+                                try taken[lane].add(a, n.y, n.y + n.l);
+                                try taken[lane].add(a, n.y + n.l, n.y + n.l);
                                 chart.has_ln = true;
                             }
                         }
@@ -334,7 +344,7 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
                         try bg.append(a, .{ .time_us = tl.micro, .wav = id, .wav_start_us = start_time, .wav_dur_us = dur });
                     } else {
                         try occupied.put(a, occKey(lane, n.y), {});
-                        try take.f(a, &taken[lane], n.y);
+                        try taken[lane].add(a, n.y, n.y);
                         try placed.append(a, .{ .y = n.y, .lane = lane, .note = .{ .time_us = tl.micro, .y = 0, .wav = id, .lane = lane, .kind = .normal, .wav_start_us = start_time, .wav_dur_us = dur } });
                     }
                 }
@@ -358,7 +368,7 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
             if (key < 0) continue;
             const lane: u8 = @intCast(key);
             const tl = try tls.get(n.y);
-            if (!Lnr.holds(spans[lane].items, n.y) and !occupied.contains(occKey(lane, n.y))) {
+            if (!taken[lane].holds(n.y) and !occupied.contains(occKey(lane, n.y))) {
                 try occupied.put(a, occKey(lane, n.y), {});
                 try placed.append(a, .{ .y = n.y, .lane = lane, .note = .{ .time_us = tl.micro, .y = 0, .wav = id, .lane = lane, .kind = .mine, .damage = @floatCast(n.damage) } });
                 chart.has_mine = true;
@@ -489,16 +499,41 @@ test "numbers past what timing can hold are refused or skipped" {
     try std.testing.expectEqual(@as(f64, 120), c.max_bpm);
 }
 
-test "a lane with more notes than a chart could play is refused" {
+test "a crowded lane parses, and more notes than a chart could play are refused" {
     const gpa = std.testing.allocator;
     var src: std.ArrayList(u8) = .empty;
     defer src.deinit(gpa);
+    try src.appendSlice(gpa, "{\"info\":{\"init_bpm\":120,\"resolution\":240},\"sound_channels\":[");
+    // One channel per note with y descending: each lands below every note already on the lane.
+    const lane_notes = 40_000;
+    for (0..lane_notes) |i| try src.print(gpa, "{{\"name\":\"a\",\"notes\":[{{\"x\":1,\"y\":{d}}}]}},", .{(lane_notes - i) * 10});
+    try src.appendSlice(gpa, "{\"name\":\"a\",\"notes\":[{\"x\":1,\"y\":5,\"l\":10},{\"x\":1,\"y\":12}]}]}");
+    var c = try parse(gpa, src.items);
+    defer c.deinit();
+    // The LN at 5 would cover the note at 10, so it sounds as background; the note at 12 is free.
+    try std.testing.expectEqual(@as(u32, lane_notes + 1), c.total_notes);
+    try std.testing.expect(!c.has_ln);
+
+    src.clearRetainingCapacity();
     try src.appendSlice(gpa, "{\"info\":{\"init_bpm\":120,\"resolution\":240},\"sound_channels\":[{\"name\":\"a\",\"notes\":[");
-    // Descending y: the order that would shift the whole list on every note.
-    var y: usize = (1 << 15) + 1;
-    while (y > 0) : (y -= 1) try src.print(gpa, "{{\"x\":1,\"y\":{d}}},", .{y * 10});
-    try src.appendSlice(gpa, "{\"x\":1,\"y\":0}]}]}");
+    for (0..max_notes) |_| try src.appendSlice(gpa, "{},");
+    try src.appendSlice(gpa, "{}]}]}");
     try std.testing.expectError(error.TooBig, parse(gpa, src.items));
+}
+
+test "a note inside a placed LN sounds as background, one just past it is placed" {
+    var c = try parse(std.testing.allocator,
+        \\{"info":{"init_bpm":120,"resolution":240},"sound_channels":[
+        \\ {"name":"a","notes":[{"x":1,"y":0,"l":100}]},
+        \\ {"name":"b","notes":[{"x":1,"y":50},{"x":1,"y":100},{"x":1,"y":101,"l":20}]},
+        \\ {"name":"c","notes":[{"x":1,"y":110}]}],
+        \\ "mine_channels":[{"name":"m","notes":[{"x":1,"y":60},{"x":1,"y":130}]}]}
+    );
+    defer c.deinit();
+    // LN 0-100 and LN 101-121 hold 50, 100 (its end) and 110; the mine at 130 is past both.
+    try std.testing.expectEqual(@as(usize, 5), c.notes.len);
+    try std.testing.expectEqual(@as(usize, 3), c.bg.len);
+    try std.testing.expectEqual(types.NoteKind.mine, c.notes[4].kind);
 }
 
 test "keysound offsets past i64 saturate instead of overflowing" {
