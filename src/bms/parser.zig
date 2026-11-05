@@ -84,32 +84,28 @@ const Held = struct {
 
 const Tree = std.Treap(f64, std.math.order);
 
-fn nodeBelow(tree: *Tree, section: f64) ?*Tree.Node {
-    const entry = tree.getEntryFor(section);
+// `order` must be the one the treap was built with, as std.Treap keeps its own private.
+pub fn nodeBelow(comptime order: anytype, tree: anytype, key: anytype) ?*@TypeOf(tree.*).Node {
+    const entry = tree.getEntryFor(key);
     if (entry.node) |node| return node.prev();
     const parent = entry.context.inserted_under orelse return null;
-    return if (parent.key < section) parent else parent.prev();
+    return if (order(parent.key, key) == .lt) parent else parent.prev();
 }
 
 fn nodeAtOrBelow(tree: *Tree, section: f64) ?*Tree.Node {
-    return tree.getEntryFor(section).node orelse nodeBelow(tree, section);
+    return tree.getEntryFor(section).node orelse nodeBelow(std.math.order, tree, section);
 }
 
 const Timelines = struct {
-    gpa: std.mem.Allocator,
+    arena: *std.heap.ArenaAllocator,
     // Lines of one measure may give their points in any order, so points go in a tree, not a shifted list.
     tree: Tree = .{},
     len: usize = 0,
     // Most points hold a note on one lane or none, so each lane keeps a tree of only the points that do.
     lanes: [types.max_lanes]Tree = @splat(.{}),
-    // Counts every Held made, as the arena keeps the ones a lane let go.
-    helds: usize = 0,
-    /// Real charts stay under 192k points and a note or two on each, about 30 MiB; past this one is hostile.
-    max_bytes: usize = 256 << 20,
 
-    fn bytes(self: *const Timelines) usize {
-        return self.len * @sizeOf(Tl) + self.helds * @sizeOf(Held);
-    }
+    /// Real charts stay under 192k points and a note or two on each, about 30 MiB; past this one is hostile.
+    const max_bytes = 96 << 20;
 
     fn add(self: *Timelines, tl: *Tl) void {
         var entry = self.tree.getEntryFor(tl.section);
@@ -123,7 +119,7 @@ const Timelines = struct {
     }
 
     fn heldBelow(self: *Timelines, tl: *Tl, lane: usize) ?*Held {
-        return Held.of(nodeBelow(&self.lanes[lane], tl.section) orelse return null);
+        return Held.of(nodeBelow(std.math.order, &self.lanes[lane], tl.section) orelse return null);
     }
 
     fn setSlot(self: *Timelines, tl: *Tl, lane: usize, s: Slot) !void {
@@ -133,21 +129,20 @@ const Timelines = struct {
             return;
         }
         if (s == .none) return;
-        if (self.bytes() >= self.max_bytes) return error.TooBig;
-        const held = try self.gpa.create(Held);
+        const held = try self.arena.allocator().create(Held);
         held.* = .{ .tl = tl, .slot = s };
         entry.set(&held.node);
-        self.helds += 1;
     }
 
     fn get(self: *Timelines, section: f64) !*Tl {
+        // Every note, LN, span and sound starts by getting its point, so this one check bounds all the arena holds.
+        if (self.arena.queryCapacity() >= max_bytes) return error.TooBig;
         if (self.tree.getEntryFor(section).node) |node| return Tl.of(node);
-        if (self.bytes() >= self.max_bytes) return error.TooBig;
         // The point at section 0 comes first, so a new point always has one below it.
-        const lower = Tl.of(nodeBelow(&self.tree, section).?);
+        const lower = Tl.of(nodeBelow(std.math.order, &self.tree, section).?);
         const stop_part: f64 = @floatFromInt(lower.stop);
         const time = lower.time + stop_part + (240000.0 * 1000.0 * (section - lower.section)) / lower.bpm;
-        const tl = try self.gpa.create(Tl);
+        const tl = try self.arena.allocator().create(Tl);
         tl.* = .{
             .section = section,
             .time = time,
@@ -612,7 +607,7 @@ fn build(d: *Decoder, maxsec: usize) !void {
 
     const base_tl = try a.create(Tl);
     base_tl.* = .{ .section = 0, .time = 0, .micro = 0, .bpm = chart.bpm };
-    var tls: Timelines = .{ .gpa = a };
+    var tls: Timelines = .{ .arena = &chart.arena };
     tls.add(base_tl);
 
     const cassign: *const [18]i8 = switch (d.mode) {
@@ -1157,22 +1152,20 @@ test "the later of two BPM changes at one position wins" {
     try std.testing.expectEqual(@as(i64, 6_000_000), c.notes[0].time_us);
 }
 
-test "timelines and notes past the memory cap are an error" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var base: Tl = .{ .section = 0, .time = 0, .micro = 0, .bpm = 120 };
-    var tls: Timelines = .{ .gpa = a, .max_bytes = 2 * @sizeOf(Tl) };
-    tls.add(&base);
-    const half = try tls.get(0.5);
-    _ = try tls.get(0.5);
-    try std.testing.expectError(error.TooBig, tls.get(0.25));
-    tls.max_bytes += @sizeOf(Held);
-    try tls.setSlot(half, 0, .{ .normal = 1 });
-    try tls.setSlot(half, 0, .{ .normal = 2 });
-    try std.testing.expectError(error.TooBig, tls.setSlot(half, 1, .{ .normal = 1 }));
-    try tls.setSlot(half, 0, .none);
-    try std.testing.expectError(error.TooBig, tls.setSlot(half, 0, .{ .normal = 1 }));
+test "a chart that would fill the memory cap is refused" {
+    const gpa = std.testing.allocator;
+    var points: std.ArrayList(u8) = .empty;
+    defer points.deinit(gpa);
+    try points.appendSlice(gpa, "#BPM 120\n#WAV01 a.wav\n#00101:");
+    try points.appendNTimes(gpa, '1', 2 * Timelines.max_bytes / 64);
+    try std.testing.expectError(error.TooBig, parse(gpa, points.items, .{}));
+
+    // Each line reuses the same two points and slots but still makes an LN and its span.
+    var lns: std.ArrayList(u8) = .empty;
+    defer lns.deinit(gpa);
+    try lns.appendSlice(gpa, "#BPM 120\n#LNOBJ ZZ\n#WAV01 a.wav\n");
+    for (0..Timelines.max_bytes / 64) |_| try lns.appendSlice(gpa, "#00111:01ZZ\n");
+    try std.testing.expectError(error.TooBig, parse(gpa, lns.items, .{}));
 }
 
 test "lnobj and channel 5x LN" {

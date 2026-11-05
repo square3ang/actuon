@@ -3,6 +3,7 @@ const std = @import("std");
 const types = @import("../core/types.zig");
 const hash = @import("hash.zig");
 const validBpm = @import("parser.zig").validBpm;
+const nodeBelow = @import("parser.zig").nodeBelow;
 const Chart = types.Chart;
 const Mode = types.Mode;
 
@@ -124,22 +125,19 @@ const Taken = struct {
     tree: Tree = .{},
 
     const Mark = struct { y: i64, end: i64 };
-    const Tree = std.Treap(Mark, struct {
-        fn f(l: Mark, r: Mark) std.math.Order {
-            return std.math.order(l.y, r.y);
-        }
-    }.f);
+    const Tree = std.Treap(Mark, byY);
 
-    fn around(t: *Taken, y: i64) struct { below: ?*Tree.Node, above: ?*Tree.Node } {
-        const e = t.tree.getEntryFor(.{ .y = y, .end = y });
-        if (e.node) |n| return .{ .below = n.prev(), .above = n.next() };
-        const p = e.context.inserted_under orelse return .{ .below = null, .above = null };
-        return if (p.key.y < y) .{ .below = p, .above = p.next() } else .{ .below = p.prev(), .above = p };
+    fn byY(l: Mark, r: Mark) std.math.Order {
+        return std.math.order(l.y, r.y);
+    }
+
+    fn below(t: *Taken, y: i64) ?*Tree.Node {
+        return nodeBelow(byY, &t.tree, Mark{ .y = y, .end = y });
     }
 
     fn holds(t: *Taken, y: i64) bool {
-        const below = t.around(y).below orelse return false;
-        return y <= below.key.end;
+        const node = t.below(y) orelse return false;
+        return y <= node.key.end;
     }
 
     fn add(t: *Taken, a: std.mem.Allocator, y: i64, end: i64) !void {
@@ -320,7 +318,8 @@ pub fn parse(gpa: std.mem.Allocator, data: []const u8) !Chart {
                     } else if (n.l > 0) {
                         const end = try tls.get(n.y + n.l);
                         if (!occupied.contains(occKey(lane, n.y))) {
-                            const above = taken[lane].around(n.y).above;
+                            // Nothing sits at n.y itself, as every y in taken is also in occupied.
+                            const above = if (taken[lane].below(n.y)) |b| b.next() else taken[lane].tree.getMin();
                             if (above != null and above.?.key.y <= n.y + n.l) {
                                 try bg.append(a, .{ .time_us = tl.micro, .wav = id, .wav_start_us = start_time, .wav_dur_us = dur });
                             } else {
