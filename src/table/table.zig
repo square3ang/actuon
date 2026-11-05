@@ -247,15 +247,15 @@ fn refAllowed(table_url: []const u8, ref_url: []const u8) bool {
     return !isPrivateHost(host);
 }
 
-pub fn fetch(gpa: std.mem.Allocator, d: Db, url: []const u8) !FetchResult {
-    const page = try http.get(gpa, url);
+pub fn fetch(gpa: std.mem.Allocator, io: std.Io, d: Db, url: []const u8) !FetchResult {
+    const page = try http.get(gpa, io, url);
     defer gpa.free(page);
     var head_url: []u8 = undefined;
     // Some entries point straight at the header JSON.
     if (findMeta(page)) |m| head_url = try http.join(gpa, url, m) else head_url = try gpa.dupe(u8, url);
     defer gpa.free(head_url);
     if (!refAllowed(url, head_url)) return error.BadTable;
-    const head_bytes = if (std.mem.eql(u8, head_url, url)) try gpa.dupe(u8, page) else try http.get(gpa, head_url);
+    const head_bytes = if (std.mem.eql(u8, head_url, url)) try gpa.dupe(u8, page) else try http.get(gpa, io, head_url);
     defer gpa.free(head_bytes);
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -263,7 +263,7 @@ pub fn fetch(gpa: std.mem.Allocator, d: Db, url: []const u8) !FetchResult {
     if (head != .object) return error.BadTable;
     const data_url = try http.join(arena.allocator(), head_url, str(head.object.get("data_url")));
     if (!refAllowed(url, data_url)) return error.BadTable;
-    const data_bytes = try http.get(gpa, data_url);
+    const data_bytes = try http.get(gpa, io, data_url);
     defer gpa.free(data_bytes);
     return store(gpa, d, url, head_bytes, data_bytes);
 }

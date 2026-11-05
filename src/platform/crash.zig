@@ -82,13 +82,13 @@ test "a native exception names its code and its offset into the game" {
     try std.testing.expectEqualStrings("exception 0xc0000005 at actuon.exe+0xbe46a", describeException(&buf, 0xc0000005, 0x1400be46a, 0x140000000));
 }
 
-pub fn takePrevious(a: std.mem.Allocator) bool {
+pub fn takePrevious(a: std.mem.Allocator, io: std.Io) bool {
     if (path_len == 0) return false;
     const p = path_buf[0..path_len];
-    const bytes = fs.readAlloc(a, p, 1 << 20) catch return false;
+    const bytes = fs.readAlloc(a, io, p, 1 << 20) catch return false;
     const dir = std.fs.path.dirname(p) orelse return false;
     const last = std.fmt.allocPrint(a, "{s}/crash-last.txt", .{dir}) catch return false;
-    fs.write(last, bytes) catch return false;
-    fs.remove(p);
+    fs.write(io, last, bytes) catch return false;
+    fs.remove(io, p);
     return true;
 }

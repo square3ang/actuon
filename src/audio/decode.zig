@@ -214,15 +214,14 @@ fn resample(gpa: std.mem.Allocator, samples: []const f32, ch: u32, rate: u32, ou
 
 test "a sound longer than any song is refused while reading, not after" {
     const fs = @import("../platform/fs.zig");
-    fs.io = std.testing.io;
     const gpa = std.testing.allocator;
     // 1 s of tone at 8 kHz decodes; 30.5 min of silence fits in 9 KB and does not.
-    const tone = try fs.readAlloc(gpa, "tests/audio/short_tone.flac", 1 << 20);
+    const tone = try fs.readAlloc(gpa, std.testing.io, "tests/audio/short_tone.flac", 1 << 20);
     defer gpa.free(tone);
     const s = try decode(gpa, tone, "short_tone.flac", 48000);
     defer gpa.free(s.data);
     try std.testing.expectEqual(@as(usize, 48000), s.frames());
-    const long = try fs.readAlloc(gpa, "tests/audio/long_silence.flac", 1 << 20);
+    const long = try fs.readAlloc(gpa, std.testing.io, "tests/audio/long_silence.flac", 1 << 20);
     defer gpa.free(long);
     try std.testing.expectError(error.UndecodableAudio, decodeRaw(gpa, long, "long_silence.flac"));
 }

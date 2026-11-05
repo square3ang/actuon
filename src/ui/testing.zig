@@ -22,8 +22,7 @@ const library =
 
 pub fn open() !*App {
     const gpa = std.testing.allocator;
-    fs.io = std.testing.io;
-    try fs.mkdirs(fs.test_data_dir);
+    try fs.mkdirs(std.testing.io, fs.test_data_dir);
     const arena = try gpa.create(std.heap.ArenaAllocator);
     arena.* = .init(gpa);
     const db = try db_mod.Db.open(":memory:", gpa, false);
@@ -32,6 +31,7 @@ pub fn open() !*App {
     const a = try gpa.create(App);
     a.* = .{
         .gpa = gpa,
+        .io = std.testing.io,
         .arena = arena,
         .cfg = .{ .tables = &.{} },
         .g = undefined,

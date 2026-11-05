@@ -52,36 +52,36 @@ pub fn parseRelease(a: std.mem.Allocator, json: []const u8, current: []const u8,
     return release;
 }
 
-fn fetchVerified(gpa: std.mem.Allocator, url: []const u8, sha256: [32]u8, path: []const u8, progress: *http.Progress) !void {
-    errdefer fs.remove(path);
-    try http.download(gpa, url, path, progress);
-    if (!std.mem.eql(u8, &(try fs.sha256(path)), &sha256)) return error.ChecksumMismatch;
+fn fetchVerified(gpa: std.mem.Allocator, io: std.Io, url: []const u8, sha256: [32]u8, path: []const u8, progress: *http.Progress) !void {
+    errdefer fs.remove(io, path);
+    try http.download(gpa, io, url, path, progress);
+    if (!std.mem.eql(u8, &(try fs.sha256(io, path)), &sha256)) return error.ChecksumMismatch;
 }
 
 /// The rename is atomic, so a failure at any point leaves the old AppImage whole.
-fn replaceFile(gpa: std.mem.Allocator, url: []const u8, sha256: [32]u8, target: []const u8, progress: *http.Progress) !void {
+fn replaceFile(gpa: std.mem.Allocator, io: std.Io, url: []const u8, sha256: [32]u8, target: []const u8, progress: *http.Progress) !void {
     const tmp = try std.fmt.allocPrint(gpa, "{s}.update", .{target});
     defer gpa.free(tmp);
-    errdefer fs.remove(tmp);
-    try fetchVerified(gpa, url, sha256, tmp, progress);
-    try fs.setExecutable(tmp);
+    errdefer fs.remove(io, tmp);
+    try fetchVerified(gpa, io, url, sha256, tmp, progress);
+    try fs.setExecutable(io, tmp);
     try fs.rename(tmp, target);
 }
 
-fn replaceFolder(a: std.mem.Allocator, url: []const u8, sha256: [32]u8, dir: []const u8, progress: *http.Progress) !void {
+fn replaceFolder(a: std.mem.Allocator, io: std.Io, url: []const u8, sha256: [32]u8, dir: []const u8, progress: *http.Progress) !void {
     const archive = try std.fs.path.join(a, &.{ dir, staged_name ++ ".zip" });
     const staged = try std.fs.path.join(a, &.{ dir, staged_name });
-    defer fs.remove(archive);
-    defer fs.removeTree(staged);
-    fs.removeTree(staged);
-    try fetchVerified(a, url, sha256, archive, progress);
-    _ = try download.extract(a, archive, staged);
-    try swapFiles(a, try std.fs.path.join(a, &.{ staged, windows_folder }), dir);
+    defer fs.remove(io, archive);
+    defer fs.removeTree(io, staged);
+    fs.removeTree(io, staged);
+    try fetchVerified(a, io, url, sha256, archive, progress);
+    _ = try download.extract(a, io, archive, staged);
+    try swapFiles(a, io, try std.fs.path.join(a, &.{ staged, windows_folder }), dir);
 }
 
 /// Windows can rename a running exe but not overwrite it. shortcut: a power cut mid-swap leaves old and new files mixed, reinstall by hand; add a journal if that is ever reported.
-fn swapFiles(a: std.mem.Allocator, from: []const u8, to: []const u8) !void {
-    const entries = try fs.list(a, from);
+fn swapFiles(a: std.mem.Allocator, io: std.Io, from: []const u8, to: []const u8) !void {
+    const entries = try fs.list(a, io, from);
     var has_exe = false;
     for (entries) |e| {
         if (e.is_dir) return error.BadPackage;
@@ -89,9 +89,9 @@ fn swapFiles(a: std.mem.Allocator, from: []const u8, to: []const u8) !void {
     }
     if (!has_exe) return error.BadPackage;
     for (entries, 0..) |e, i| {
-        swapIn(a, from, to, e.name) catch |err| {
+        swapIn(a, io, from, to, e.name) catch |err| {
             var intact = true;
-            for (entries[0..i]) |back| swapBack(a, from, to, back.name) catch {
+            for (entries[0..i]) |back| swapBack(a, io, from, to, back.name) catch {
                 intact = false;
             };
             return if (intact) err else error.UpdateLeftBroken;
@@ -99,11 +99,11 @@ fn swapFiles(a: std.mem.Allocator, from: []const u8, to: []const u8) !void {
     }
 }
 
-fn swapIn(a: std.mem.Allocator, from: []const u8, to: []const u8, name: []const u8) !void {
+fn swapIn(a: std.mem.Allocator, io: std.Io, from: []const u8, to: []const u8, name: []const u8) !void {
     const source = try std.fs.path.join(a, &.{ from, name });
     const dest = try std.fs.path.join(a, &.{ to, name });
     const old = try std.fmt.allocPrint(a, "{s}" ++ old_suffix, .{dest});
-    const had_old = fs.exists(dest);
+    const had_old = fs.exists(io, dest);
     if (had_old) try fs.rename(dest, old);
     fs.rename(source, dest) catch |err| {
         if (had_old) fs.rename(old, dest) catch return error.UpdateLeftBroken;
@@ -111,25 +111,25 @@ fn swapIn(a: std.mem.Allocator, from: []const u8, to: []const u8, name: []const 
     };
 }
 
-fn swapBack(a: std.mem.Allocator, from: []const u8, to: []const u8, name: []const u8) !void {
+fn swapBack(a: std.mem.Allocator, io: std.Io, from: []const u8, to: []const u8, name: []const u8) !void {
     const dest = try std.fs.path.join(a, &.{ to, name });
     const old = try std.fmt.allocPrint(a, "{s}" ++ old_suffix, .{dest});
     try fs.rename(dest, try std.fs.path.join(a, &.{ from, name }));
-    if (fs.exists(old)) try fs.rename(old, dest);
+    if (fs.exists(io, old)) try fs.rename(old, dest);
 }
 
 /// The files in use by the last update have been released by now.
-fn removeLeftovers(a: std.mem.Allocator, dir: []const u8) !void {
-    for (try fs.list(a, dir)) |e| {
-        if (std.mem.endsWith(u8, e.name, old_suffix)) fs.remove(try std.fs.path.join(a, &.{ dir, e.name }));
+fn removeLeftovers(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
+    for (try fs.list(a, io, dir)) |e| {
+        if (std.mem.endsWith(u8, e.name, old_suffix)) fs.remove(io, try std.fs.path.join(a, &.{ dir, e.name }));
     }
-    fs.removeTree(try std.fs.path.join(a, &.{ dir, staged_name }));
+    fs.removeTree(io, try std.fs.path.join(a, &.{ dir, staged_name }));
 }
 
 const Target = union(enum) { appimage: []const u8, folder: []const u8 };
 
 /// shortcut: dev builds, Flatpak and macOS (signed bundle untested) get the releases page; add macOS once a signed build exists.
-fn findTarget(a: std.mem.Allocator) !?Target {
+fn findTarget(a: std.mem.Allocator, io: std.Io) !?Target {
     switch (builtin.os.tag) {
         .linux => {
             if (builtin.cpu.arch != .x86_64) return null;
@@ -140,7 +140,7 @@ fn findTarget(a: std.mem.Allocator) !?Target {
             const base = c.SDL_GetBasePath() orelse return null;
             const dir = try a.dupe(u8, std.mem.span(base));
             // Only a package has LICENSE beside the exe, which spares zig-out/bin.
-            if (!fs.exists(try std.fs.path.join(a, &.{ dir, "LICENSE" }))) return null;
+            if (!fs.exists(io, try std.fs.path.join(a, &.{ dir, "LICENSE" }))) return null;
             return .{ .folder = dir };
         },
         else => return null,
@@ -152,6 +152,7 @@ pub const Phase = enum(u8) { checking, current, available, installing, installed
 /// Owned by the UI. The thread writes the fields, then publishes them through `phase`.
 pub const Job = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     arena: std.heap.ArenaAllocator,
     phase: std.atomic.Value(Phase) = .init(.checking),
     err: anyerror = error.Unknown,
@@ -206,9 +207,9 @@ pub const Job = struct {
     }
 };
 
-pub fn start(gpa: std.mem.Allocator) ?*Job {
+pub fn start(gpa: std.mem.Allocator, io: std.Io) ?*Job {
     const j = gpa.create(Job) catch return null;
-    j.* = .{ .gpa = gpa, .arena = .init(gpa) };
+    j.* = .{ .gpa = gpa, .io = io, .arena = .init(gpa) };
     j.check();
     return j;
 }
@@ -223,13 +224,13 @@ fn runCheck(j: *Job) !void {
     _ = j.arena.reset(.retain_capacity);
     const a = j.arena.allocator();
     j.release = null;
-    j.target = try findTarget(a);
+    j.target = try findTarget(a, j.io);
     const asset: ?[]const u8 = if (j.target) |t| switch (t) {
         .appimage => appimage_asset,
         .folder => windows_asset,
     } else null;
-    if (j.target) |t| if (t == .folder) try removeLeftovers(a, t.folder);
-    const json = try http.get(j.gpa, latest_api);
+    if (j.target) |t| if (t == .folder) try removeLeftovers(a, j.io, t.folder);
+    const json = try http.get(j.gpa, j.io, latest_api);
     defer j.gpa.free(json);
     j.release = try parseRelease(a, json, current_version, asset);
     j.phase.store(if (j.release != null) .available else .current, .release);
@@ -248,8 +249,8 @@ fn installThread(ud: ?*anyopaque) callconv(.c) c_int {
 fn runInstall(j: *Job) !void {
     const release = j.release.?;
     switch (j.target.?) {
-        .appimage => |path| try replaceFile(j.gpa, release.url.?, release.sha256, path, &j.progress),
-        .folder => |dir| try replaceFolder(j.arena.allocator(), release.url.?, release.sha256, dir, &j.progress),
+        .appimage => |path| try replaceFile(j.gpa, j.io, release.url.?, release.sha256, path, &j.progress),
+        .folder => |dir| try replaceFolder(j.arena.allocator(), j.io, release.url.?, release.sha256, dir, &j.progress),
     }
 }
 
@@ -319,16 +320,16 @@ const TestServer = struct {
     url_buf: [64]u8 = undefined,
 
     fn serve(s: *std.Io.net.Server, body: []const u8) void {
-        const stream = s.accept(fs.io) catch return;
-        defer stream.close(fs.io);
+        const stream = s.accept(std.testing.io) catch return;
+        defer stream.close(std.testing.io);
         var in_buf: [1024]u8 = undefined;
-        var reader = stream.reader(fs.io, &in_buf);
+        var reader = stream.reader(std.testing.io, &in_buf);
         while (true) {
             const line = reader.interface.takeDelimiterInclusive('\n') catch return;
             if (line.len == 2) break;
         }
         var out_buf: [1 << 12]u8 = undefined;
-        var writer = stream.writer(fs.io, &out_buf);
+        var writer = stream.writer(std.testing.io, &out_buf);
         writer.interface.print("HTTP/1.1 200 OK\r\ncontent-length: {d}\r\nconnection: close\r\n\r\n", .{body.len}) catch return;
         writer.interface.writeAll(body) catch return;
         writer.interface.flush() catch return;
@@ -336,14 +337,14 @@ const TestServer = struct {
 
     fn start(t: *TestServer, body: []const u8) ![]const u8 {
         const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
-        t.server = try address.listen(fs.io, .{ .reuse_address = true });
+        t.server = try address.listen(std.testing.io, .{ .reuse_address = true });
         t.thread = try std.Thread.spawn(.{}, serve, .{ &t.server, body });
         return std.fmt.bufPrint(&t.url_buf, "http://127.0.0.1:{d}/", .{t.server.socket.address.getPort()});
     }
 
     fn stop(t: *TestServer) void {
         t.thread.join();
-        t.server.deinit(fs.io);
+        t.server.deinit(std.testing.io);
     }
 };
 
@@ -364,27 +365,27 @@ test "a download that fails its checksum never replaces the game" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const target = try tmpPath(a, &tmp, "actuon.AppImage");
-    try fs.write(target, "old");
+    try fs.write(std.testing.io, target, "old");
 
     var bad: TestServer = .{ .server = undefined, .thread = undefined };
     const bad_url = try bad.start("tampered");
     var progress: http.Progress = .{};
-    const refused = replaceFile(a, bad_url, sumOf("new"), target, &progress);
+    const refused = replaceFile(a, std.testing.io, bad_url, sumOf("new"), target, &progress);
     bad.stop();
     try std.testing.expectError(error.ChecksumMismatch, refused);
-    try std.testing.expectEqualStrings("old", try fs.readAlloc(a, target, 16));
-    try std.testing.expect(!fs.exists(try tmpPath(a, &tmp, "actuon.AppImage.update")));
+    try std.testing.expectEqualStrings("old", try fs.readAlloc(a, std.testing.io, target, 16));
+    try std.testing.expect(!fs.exists(std.testing.io, try tmpPath(a, &tmp, "actuon.AppImage.update")));
 
     var good: TestServer = .{ .server = undefined, .thread = undefined };
     const good_url = try good.start("new");
-    const applied = replaceFile(a, good_url, sumOf("new"), target, &progress);
+    const applied = replaceFile(a, std.testing.io, good_url, sumOf("new"), target, &progress);
     good.stop();
     try applied;
-    try std.testing.expectEqualStrings("new", try fs.readAlloc(a, target, 16));
+    try std.testing.expectEqualStrings("new", try fs.readAlloc(a, std.testing.io, target, 16));
     if (builtin.os.tag != .windows) {
-        const file = try tmp.dir.openFile(fs.io, "actuon.AppImage", .{});
-        defer file.close(fs.io);
-        try std.testing.expect((try file.stat(fs.io)).permissions.toMode() & 0o111 != 0);
+        const file = try tmp.dir.openFile(std.testing.io, "actuon.AppImage", .{});
+        defer file.close(std.testing.io);
+        try std.testing.expect((try file.stat(std.testing.io)).permissions.toMode() & 0o111 != 0);
     }
 }
 
@@ -408,9 +409,9 @@ fn writeZip(a: std.mem.Allocator, path: []const u8, names: []const []const u8) !
 
 fn zipBytes(a: std.mem.Allocator, tmp: *const std.testing.TmpDir, names: []const []const u8) ![]u8 {
     const path = try tmpPath(a, tmp, "fixture.zip");
-    defer fs.remove(path);
+    defer fs.remove(std.testing.io, path);
     try writeZip(a, path, names);
-    return fs.readAlloc(a, path, 1 << 20);
+    return fs.readAlloc(a, std.testing.io, path, 1 << 20);
 }
 
 test "a verified package replaces the folder, and the next launch clears what it kept" {
@@ -420,28 +421,28 @@ test "a verified package replaces the folder, and the next launch clears what it
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const dir = try tmpPath(a, &tmp, "game");
-    try fs.mkdirs(dir);
+    try fs.mkdirs(std.testing.io, dir);
     const exe = try std.fs.path.join(a, &.{ dir, windows_exe });
     const save = try std.fs.path.join(a, &.{ dir, "mine.txt" });
-    try fs.write(exe, "old");
-    try fs.write(save, "mine");
+    try fs.write(std.testing.io, exe, "old");
+    try fs.write(std.testing.io, save, "mine");
     const zip = try zipBytes(a, &tmp, &.{ windows_folder ++ "/" ++ windows_exe, windows_folder ++ "/new.dll" });
 
     var server: TestServer = .{ .server = undefined, .thread = undefined };
     const url = try server.start(zip);
     var progress: http.Progress = .{};
-    const applied = replaceFolder(a, url, sumOf(zip), dir, &progress);
+    const applied = replaceFolder(a, std.testing.io, url, sumOf(zip), dir, &progress);
     server.stop();
     try applied;
-    try std.testing.expectEqualStrings("new", try fs.readAlloc(a, exe, 16));
-    try std.testing.expectEqualStrings("new", try fs.readAlloc(a, try std.fs.path.join(a, &.{ dir, "new.dll" }), 16));
+    try std.testing.expectEqualStrings("new", try fs.readAlloc(a, std.testing.io, exe, 16));
+    try std.testing.expectEqualStrings("new", try fs.readAlloc(a, std.testing.io, try std.fs.path.join(a, &.{ dir, "new.dll" }), 16));
     const old = try std.fmt.allocPrint(a, "{s}" ++ old_suffix, .{exe});
-    try std.testing.expectEqualStrings("old", try fs.readAlloc(a, old, 16));
-    try std.testing.expect(!fs.exists(try std.fs.path.join(a, &.{ dir, staged_name })));
+    try std.testing.expectEqualStrings("old", try fs.readAlloc(a, std.testing.io, old, 16));
+    try std.testing.expect(!fs.exists(std.testing.io, try std.fs.path.join(a, &.{ dir, staged_name })));
 
-    try removeLeftovers(a, dir);
-    try std.testing.expect(!fs.exists(old));
-    try std.testing.expectEqualStrings("mine", try fs.readAlloc(a, save, 16));
+    try removeLeftovers(a, std.testing.io, dir);
+    try std.testing.expect(!fs.exists(std.testing.io, old));
+    try std.testing.expectEqualStrings("mine", try fs.readAlloc(a, std.testing.io, save, 16));
 }
 
 test "a package with the wrong checksum or without the game changes nothing" {
@@ -451,9 +452,9 @@ test "a package with the wrong checksum or without the game changes nothing" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const dir = try tmpPath(a, &tmp, "game");
-    try fs.mkdirs(dir);
+    try fs.mkdirs(std.testing.io, dir);
     const exe = try std.fs.path.join(a, &.{ dir, windows_exe });
-    try fs.write(exe, "old");
+    try fs.write(std.testing.io, exe, "old");
     var progress: http.Progress = .{};
     const no_game = try zipBytes(a, &tmp, &.{windows_folder ++ "/evil.dll"});
     const cases = [_]struct { zip: []const u8, sum: [32]u8, want: anyerror }{
@@ -463,11 +464,11 @@ test "a package with the wrong checksum or without the game changes nothing" {
     for (cases) |k| {
         var server: TestServer = .{ .server = undefined, .thread = undefined };
         const url = try server.start(k.zip);
-        const r = replaceFolder(a, url, k.sum, dir, &progress);
+        const r = replaceFolder(a, std.testing.io, url, k.sum, dir, &progress);
         server.stop();
         try std.testing.expectError(k.want, r);
-        try std.testing.expectEqualStrings("old", try fs.readAlloc(a, exe, 16));
-        try std.testing.expect(!fs.exists(try std.fs.path.join(a, &.{ dir, "evil.dll" })));
+        try std.testing.expectEqualStrings("old", try fs.readAlloc(a, std.testing.io, exe, 16));
+        try std.testing.expect(!fs.exists(std.testing.io, try std.fs.path.join(a, &.{ dir, "evil.dll" })));
     }
 }
 
@@ -479,18 +480,18 @@ test "a swap that fails partway puts every file back" {
     defer tmp.cleanup();
     const from = try tmpPath(a, &tmp, "from");
     const to = try tmpPath(a, &tmp, "to");
-    try fs.mkdirs(from);
-    try fs.mkdirs(to);
+    try fs.mkdirs(std.testing.io, from);
+    try fs.mkdirs(std.testing.io, to);
     const names = [_][]const u8{ windows_exe, "a.dll", "b.dll" };
     for (names) |n| {
-        try fs.write(try std.fs.path.join(a, &.{ from, n }), "new");
-        try fs.write(try std.fs.path.join(a, &.{ to, n }), "old");
+        try fs.write(std.testing.io, try std.fs.path.join(a, &.{ from, n }), "new");
+        try fs.write(std.testing.io, try std.fs.path.join(a, &.{ to, n }), "old");
     }
     // A full folder cannot be renamed over, so keeping b.dll's old copy fails wherever the listing puts it.
     const blocker = try std.fs.path.join(a, &.{ to, "b.dll" ++ old_suffix });
-    try fs.mkdirs(blocker);
-    try fs.write(try std.fs.path.join(a, &.{ blocker, "x" }), "");
+    try fs.mkdirs(std.testing.io, blocker);
+    try fs.write(std.testing.io, try std.fs.path.join(a, &.{ blocker, "x" }), "");
 
-    try std.testing.expect(std.meta.isError(swapFiles(a, from, to)));
-    for (names) |n| try std.testing.expectEqualStrings("old", try fs.readAlloc(a, try std.fs.path.join(a, &.{ to, n }), 16));
+    try std.testing.expect(std.meta.isError(swapFiles(a, std.testing.io, from, to)));
+    for (names) |n| try std.testing.expectEqualStrings("old", try fs.readAlloc(a, std.testing.io, try std.fs.path.join(a, &.{ to, n }), 16));
 }

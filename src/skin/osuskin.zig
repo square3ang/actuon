@@ -17,10 +17,10 @@ pub fn isIni(path: []const u8) bool {
     return std.ascii.eqlIgnoreCase(std.fs.path.basename(path), "skin.ini");
 }
 
-pub fn hasMania(a: std.mem.Allocator, path: []const u8) bool {
-    const text = fs.readAlloc(a, path, 1 << 22) catch return false;
+pub fn hasMania(a: std.mem.Allocator, io: std.Io, path: []const u8) bool {
+    const text = fs.readAlloc(a, io, path, 1 << 22) catch return false;
     if (std.ascii.findIgnoreCase(text, "[Mania]") != null) return true;
-    return findImage(a, std.fs.path.dirname(path) orelse ".", "mania-note1", true) != null;
+    return findImage(a, io, std.fs.path.dirname(path) orelse ".", "mania-note1", true) != null;
 }
 
 const Pair = struct { key: []const u8, value: []const u8 };
@@ -111,7 +111,7 @@ fn modern(general: []const u8) bool {
 const Found = struct { path: []const u8, scale: f32 };
 
 /// Lazer's lookup order: frame 0 of an animation first, the @2x file before the plain one.
-fn findImage(a: std.mem.Allocator, dir: []const u8, name_in: []const u8, animated: bool) ?Found {
+fn findImage(a: std.mem.Allocator, io: std.Io, dir: []const u8, name_in: []const u8, animated: bool) ?Found {
     const name = a.dupe(u8, name_in) catch return null;
     std.mem.replaceScalar(u8, name, '\\', '/');
     if (fs.climbs(name) or std.fs.path.isAbsolute(name)) return null;
@@ -120,16 +120,16 @@ fn findImage(a: std.mem.Allocator, dir: []const u8, name_in: []const u8, animate
         for ([_]f32{ 2, 1 }) |scale| {
             for ([_][]const u8{ ".png", ".jpg" }) |ext| {
                 const rel = std.fmt.allocPrint(a, "{s}{s}{s}{s}", .{ name, frame, if (scale == 2) "@2x" else "", ext }) catch return null;
-                if (lr2.walk(a, dir, rel)) |path| return .{ .path = path, .scale = scale };
+                if (lr2.walk(a, io, dir, rel)) |path| return .{ .path = path, .scale = scale };
             }
         }
     }
     return null;
 }
 
-fn pixelSize(path: []const u8) ?[2]f32 {
+fn pixelSize(io: std.Io, path: []const u8) ?[2]f32 {
     const gpa = std.heap.page_allocator;
-    const bytes = fs.readAlloc(gpa, path, 1 << 28) catch return null;
+    const bytes = fs.readAlloc(gpa, io, path, 1 << 28) catch return null;
     defer gpa.free(bytes);
     var w: c_int = 0;
     var h: c_int = 0;
@@ -153,14 +153,15 @@ const white: [4]f32 = @splat(255);
 
 const Build = struct {
     a: std.mem.Allocator,
+    io: std.Io,
     dir: []const u8,
     mania: []const u8,
     paths: std.ArrayList(?[]const u8) = .empty,
     objects: std.ArrayList(m.Object) = .empty,
 
     fn file(b: *Build, name: []const u8, animated: bool) !?Image {
-        const f = findImage(b.a, b.dir, name, animated) orelse return null;
-        const size = pixelSize(f.path) orelse return null;
+        const f = findImage(b.a, b.io, b.dir, name, animated) orelse return null;
+        const size = pixelSize(b.io, f.path) orelse return null;
         try b.paths.append(b.a, f.path);
         return .{ .tex = @intCast(b.paths.items.len - 1), .w = size[0] / f.scale, .h = size[1] / f.scale };
     }
@@ -539,14 +540,14 @@ fn build(b: *Build, skin: *m.Skin, general: []const u8, fonts: []const u8, mode:
 }
 
 /// A key count the ini has no section for takes every default, as in lazer.
-pub fn load(skin: *m.Skin, path: []const u8, mode: core.types.Mode, conf: jsonskin.Conf) ![]const ?[]const u8 {
+pub fn load(skin: *m.Skin, io: std.Io, path: []const u8, mode: core.types.Mode, conf: jsonskin.Conf) ![]const ?[]const u8 {
     const a = skin.arena.allocator();
-    const text = try fs.readAlloc(a, path, 1 << 22);
+    const text = try fs.readAlloc(a, io, path, 1 << 22);
     const body = if (std.mem.startsWith(u8, text, "\xef\xbb\xbf")) text[3..] else text;
     skin.w = stage_w;
     skin.h = stage_h;
     skin.plain_loading = true;
-    var b: Build = .{ .a = a, .dir = std.fs.path.dirname(path) orelse ".", .mania = section(body, "Mania", mode.keys()) };
+    var b: Build = .{ .a = a, .io = io, .dir = std.fs.path.dirname(path) orelse ".", .mania = section(body, "Mania", mode.keys()) };
     try build(&b, skin, section(body, "General", null), section(body, "Fonts", null), mode, conf);
     skin.objects = b.objects.items;
     return b.paths.items;
@@ -587,17 +588,17 @@ test "a 7+1 chart takes the 8 key section, scratch first, @2x and frame 0 prefer
     defer tmp.cleanup();
     const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     const path = try std.fs.path.join(a, &.{ dir, "skin.ini" });
-    try fs.write(path, "[Mania]\nKeys: 7\nColumnStart: 1\n[Mania]\nKeys: 8\nColumnStart: 100\nColumnWidth: 40,20\nHitPosition: 400\n");
+    try fs.write(std.testing.io, path, "[Mania]\nKeys: 7\nColumnStart: 1\n[Mania]\nKeys: 8\nColumnStart: 100\nColumnWidth: 40,20\nHitPosition: 400\n");
     const png = testPng(40, 10);
-    try fs.write(try std.fs.path.join(a, &.{ dir, "mania-note1.png" }), &png);
-    try fs.write(try std.fs.path.join(a, &.{ dir, "mania-note1@2x.png" }), &png);
-    try fs.write(try std.fs.path.join(a, &.{ dir, "mania-note2-0.png" }), &png);
-    try fs.write(try std.fs.path.join(a, &.{ dir, "mania-hit0.png" }), &png);
-    try std.testing.expect(hasMania(a, path));
+    try fs.write(std.testing.io, try std.fs.path.join(a, &.{ dir, "mania-note1.png" }), &png);
+    try fs.write(std.testing.io, try std.fs.path.join(a, &.{ dir, "mania-note1@2x.png" }), &png);
+    try fs.write(std.testing.io, try std.fs.path.join(a, &.{ dir, "mania-note2-0.png" }), &png);
+    try fs.write(std.testing.io, try std.fs.path.join(a, &.{ dir, "mania-hit0.png" }), &png);
+    try std.testing.expect(hasMania(a, std.testing.io, path));
 
     var skin: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
     defer skin.arena.deinit();
-    const paths = try load(&skin, path, .beat7, .{});
+    const paths = try load(&skin, std.testing.io, path, .beat7, .{});
     const scratch = skin.notes.lane[7].?;
     try std.testing.expectEqual(@as(f32, 100), scratch[0]);
     try std.testing.expectEqual(@as(f32, 40), scratch[2]);
@@ -629,14 +630,14 @@ test "an ini for other modes only is not a mania skin" {
     defer tmp.cleanup();
     const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     const path = try std.fs.path.join(a, &.{ dir, "skin.ini" });
-    try fs.write(path, "[General]\nName: x\n");
-    try std.testing.expect(!hasMania(a, path));
+    try fs.write(std.testing.io, path, "[General]\nName: x\n");
+    try std.testing.expect(!hasMania(a, std.testing.io, path));
 }
 
 test "an image name cannot climb out of the skin" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    try std.testing.expect(findImage(arena.allocator(), ".", "..\\secret", false) == null);
+    try std.testing.expect(findImage(arena.allocator(), std.testing.io, ".", "..\\secret", false) == null);
 }
 
 test "the BGA options read back from a saved pick" {

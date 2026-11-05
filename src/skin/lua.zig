@@ -220,6 +220,7 @@ fn registerMainState(l: *c.lua_State) void {
 /// A global is safe: skins load on one thread at a time.
 var path_files: []const J = &.{};
 var path_arena: ?std.mem.Allocator = null;
+var path_io: std.Io = undefined;
 
 /// Absolute, since skins pass the path to dofile.
 fn getPath(l: ?*c.lua_State) callconv(.c) c_int {
@@ -234,7 +235,7 @@ fn getPath(l: ?*c.lua_State) callconv(.c) c_int {
         c.lua_concat(l, 3);
         return 1;
     };
-    const rel = jsonskin.resolveWild(a, dir, path_files, p[0..n]) catch p[0..n];
+    const rel = jsonskin.resolveWild(a, path_io, dir, path_files, p[0..n]) catch p[0..n];
     const out = std.fmt.allocPrint(a, "{s}/{s}", .{ dir, rel }) catch return 0;
     _ = c.lua_pushlstring(l, out.ptr, out.len);
     return 1;
@@ -493,18 +494,19 @@ fn pushConfig(l: *c.lua_State, head: J, dir: []const u8, conf: jsonskin.Conf) vo
     if (c.luaL_loadstring(l, zero_offsets) == c.LUA_OK) _ = protectedCall(l, 0, 0, load_steps);
 }
 
-pub fn load(skin: *m.Skin, path: []const u8, resolver: *const fn (i32) bool, conf: jsonskin.Conf) ![]const ?[]const u8 {
+pub fn load(skin: *m.Skin, io: std.Io, path: []const u8, resolver: *const fn (i32) bool, conf: jsonskin.Conf) ![]const ?[]const u8 {
     const a = skin.arena.allocator();
     const dir = std.fs.path.dirname(path) orelse ".";
     const head = try header(a, path);
     const l = try newState(a, dir);
     skin.lua = l;
     path_arena = a;
+    path_io = io;
     defer path_arena = null;
     path_files = if (head == .object) if (head.object.get("filepath")) |f| (if (f == .array) f.array.items else &.{}) else &.{} else &.{};
     try jsonskin.applyConf(a, head, conf);
     pushConfig(l, head, dir, conf);
-    return jsonskin.fromJson(skin, try runFile(l, a, path), head, dir, resolver, conf);
+    return jsonskin.fromJson(skin, io, try runFile(l, a, path), head, dir, resolver, conf);
 }
 
 pub fn callBool(skin: *m.Skin, r: i32) bool {
@@ -568,9 +570,9 @@ test "file access stops at the skin folder" {
     defer tmp.cleanup();
     const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     const dir = try std.fs.path.join(a, &.{ root, "s" });
-    try fs.mkdirs(dir);
-    try fs.write(try std.fs.path.join(a, &.{ dir, "inside.lua" }), "return 7");
-    try fs.write(try std.fs.path.join(a, &.{ root, "outside.lua" }), "return 8");
+    try fs.mkdirs(std.testing.io, dir);
+    try fs.write(std.testing.io, try std.fs.path.join(a, &.{ dir, "inside.lua" }), "return 7");
+    try fs.write(std.testing.io, try std.fs.path.join(a, &.{ root, "outside.lua" }), "return 8");
     const l = try newState(a, dir);
     defer c.lua_close(l);
     _ = c.lua_pushlstring(l, dir.ptr, dir.len);

@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("c");
-const fs = @import("../platform/fs.zig");
 
 pub const Raw = struct { mono_ns: u64, code: u16, down: bool };
 
@@ -26,11 +25,13 @@ pub fn push(ev: Raw) void {
         q_head.store(h +% 1, .release);
     }
     _ = pushes.fetchAdd(1, .release);
-    if (builtin.os.tag == .windows) actuon_input_wake() else fs.io.futexWake(u32, &pushes.raw, 1);
+    if (builtin.os.tag == .windows) actuon_input_wake() else io.futexWake(u32, &pushes.raw, 1);
 }
 
 /// Counts pushes, for the futex the sim thread sleeps on.
 var pushes: std.atomic.Value(u32) = .init(0);
+/// C input callbacks push here and cannot carry an Io, so the queue keeps the one main set.
+pub var io: std.Io = undefined;
 
 pub fn wait(ns: u64) void {
     const seen = pushes.load(.acquire);
@@ -38,7 +39,7 @@ pub fn wait(ns: u64) void {
     // Windows futex timeouts round to the system timer, too coarse for the tick.
     if (builtin.os.tag == .windows) return actuon_input_wait(ns);
     const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromNanoseconds(ns), .clock = .awake } };
-    fs.io.futexWaitTimeout(u32, &pushes.raw, seen, timeout) catch {};
+    io.futexWaitTimeout(u32, &pushes.raw, seen, timeout) catch {};
 }
 
 pub fn pop() ?Raw {
@@ -339,7 +340,7 @@ const evdev = if (builtin.os.tag == .linux) struct {
 };
 
 test "sampling pushes one event per changed key" {
-    fs.io = std.testing.io;
+    io = std.testing.io;
     clear();
     var prev: KeyBits = @splat(0);
     var cur: KeyBits = @splat(0);
@@ -372,7 +373,7 @@ test "a keyboard plugged in later reuses an unplugged one's slot" {
 
 test "unplugging a device lets go of the keys it held" {
     if (builtin.os.tag != .linux) return;
-    fs.io = std.testing.io;
+    io = std.testing.io;
     clear();
     evdev.held[1].set(44);
     evdev.releaseHeld(1, 9);
@@ -392,7 +393,7 @@ fn pushLater(_: ?*anyopaque) callconv(.c) c_int {
 }
 
 test "a queued event cuts the sim's wait short" {
-    fs.io = std.testing.io;
+    io = std.testing.io;
     if (builtin.os.tag == .windows) actuon_input_wait_start();
     clear();
     const t = c.SDL_CreateThread(pushLater, "push-later", null).?;

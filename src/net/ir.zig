@@ -10,6 +10,7 @@ const db_mod = @import("../db/db.zig");
 
 pub const Upload = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     base: []u8,
     token: []u8,
     sha: []u8,
@@ -140,10 +141,10 @@ const Standing = struct {
     clears: []const i64 = &.{},
 };
 
-fn fetchStanding(a: std.mem.Allocator, base: []const u8, token: []const u8, sha: []const u8) !Standing {
+fn fetchStanding(a: std.mem.Allocator, io: std.Io, base: []const u8, token: []const u8, sha: []const u8) !Standing {
     // shortcut: the server's limit, so places past 1000 cannot be scrolled to; page if a chart ever gets there
     const url = try std.fmt.allocPrint(a, "{s}/scores/{s}?limit=1000", .{ base, sha });
-    const r = try http.request(a, .GET, url, null, try bearer(a, token));
+    const r = try http.request(a, io, .GET, url, null, try bearer(a, token));
     if (r.status != 200) return error.HttpStatus;
     return std.json.parseFromSliceLeaky(Standing, a, r.body, .{ .ignore_unknown_fields = true });
 }
@@ -193,7 +194,7 @@ pub fn submit(gpa: std.mem.Allocator, client: *std.http.Client, base: []const u8
     defer arena.deinit();
     const a = arena.allocator();
     const hs = try bearer(a, token);
-    const chart = fs.readAlloc(a, chart_path, 16 << 20) catch return error.NoChart;
+    const chart = fs.readAlloc(a, client.io, chart_path, 16 << 20) catch return error.NoChart;
     const upload = try std.mem.concat(a, u8, &.{ chart, replay });
     const format = @backingInt(core.Format.of(chart_path));
     const url = try std.fmt.allocPrint(a, "{s}/scores/{s}?format={d}&chart={d}{s}{s}", .{ base, sha, format, chart.len, if (room.len > 0) "&room=" else "", room });
@@ -210,14 +211,14 @@ fn uploadThread(ud: ?*anyopaque) callconv(.c) c_int {
     var arena = std.heap.ArenaAllocator.init(u.gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    var client = http.client(u.gpa);
+    var client = http.client(u.gpa, u.io);
     defer client.deinit();
     const code = submit(u.gpa, &client, u.base, u.token, u.sha, u.chart_path, u.replay, u.room, &u.board.prev_rank) catch |e| blk: {
         std.log.warn("IR upload: {t}", .{e});
         break :blk 0;
     };
     // Rankings are a bonus: without them the upload still counts.
-    if (fetchStanding(a, u.base, u.token, u.sha)) |after| fillBoard(u.board, after) else |e| std.log.warn("IR ranking: {t}", .{e});
+    if (fetchStanding(a, u.io, u.base, u.token, u.sha)) |after| fillBoard(u.board, after) else |e| std.log.warn("IR ranking: {t}", .{e});
     u.board.state.store(if (code == 200) Board.accepted else Board.failed, .release);
     u.board.release();
     const gpa = u.gpa;
@@ -253,14 +254,14 @@ pub fn waitForThreads() bool {
     return false;
 }
 
-const RankingFetch = struct { base: []u8, token: []u8, sha: []u8, board: *Board };
+const RankingFetch = struct { io: std.Io, base: []u8, token: []u8, sha: []u8, board: *Board };
 
 fn rankingThread(ud: ?*anyopaque) callconv(.c) c_int {
     const f: *RankingFetch = @ptrCast(@alignCast(ud));
     const gpa = f.board.gpa;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    if (fetchStanding(arena.allocator(), f.base, f.token, f.sha)) |s| {
+    if (fetchStanding(arena.allocator(), f.io, f.base, f.token, f.sha)) |s| {
         fillBoard(f.board, s);
         f.board.state.store(Board.accepted, .release);
     } else |e| {
@@ -277,11 +278,12 @@ fn rankingThread(ud: ?*anyopaque) callconv(.c) c_int {
 }
 
 /// The caller owns one reference, as with startUpload.
-pub fn startRanking(gpa: std.mem.Allocator, base: []const u8, token: []const u8, sha: []const u8) ?*Board {
+pub fn startRanking(gpa: std.mem.Allocator, io: std.Io, base: []const u8, token: []const u8, sha: []const u8) ?*Board {
     const board = gpa.create(Board) catch return null;
     board.* = .{ .gpa = gpa };
     const f = gpa.create(RankingFetch) catch return null;
     f.* = .{
+        .io = io,
         .base = gpa.dupe(u8, base) catch return null,
         .token = gpa.dupe(u8, token) catch return null,
         .sha = gpa.dupe(u8, sha) catch return null,
@@ -295,12 +297,13 @@ pub fn startRanking(gpa: std.mem.Allocator, base: []const u8, token: []const u8,
 }
 
 /// The caller owns one reference to the answer and gives it back with release.
-pub fn startUpload(gpa: std.mem.Allocator, base: []const u8, token: []const u8, sha: []const u8, chart_path: []const u8, replay: []const u8, room: []const u8) ?*Board {
+pub fn startUpload(gpa: std.mem.Allocator, io: std.Io, base: []const u8, token: []const u8, sha: []const u8, chart_path: []const u8, replay: []const u8, room: []const u8) ?*Board {
     const board = gpa.create(Board) catch return null;
     board.* = .{ .gpa = gpa };
     const u = gpa.create(Upload) catch return null;
     u.* = .{
         .gpa = gpa,
+        .io = io,
         .base = gpa.dupe(u8, base) catch return null,
         .token = gpa.dupe(u8, token) catch return null,
         .sha = gpa.dupe(u8, sha) catch return null,
@@ -319,6 +322,7 @@ pub fn startUpload(gpa: std.mem.Allocator, base: []const u8, token: []const u8, 
 /// Two owners: with no timeout, the UI may leave one hanging.
 pub const Query = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     url: []u8,
     token: []u8,
     body: ?[]u8,
@@ -373,7 +377,7 @@ fn run(q: *Query) !void {
     defer arena.deinit();
     const a = arena.allocator();
     const hs: []const std.http.Header = if (q.token.len > 0) try bearer(a, q.token) else &.{};
-    const r = try http.request(a, if (q.body != null) .POST else .GET, q.url, q.body, hs);
+    const r = try http.request(a, q.io, if (q.body != null) .POST else .GET, q.url, q.body, hs);
     if (r.status != 200) return error.HttpStatus;
     const v = try std.json.parseFromSliceLeaky(std.json.Value, a, r.body, .{});
     if (v != .object) return error.BadAnswer;
@@ -382,10 +386,11 @@ fn run(q: *Query) !void {
     for (list.array.items, 1..) |row, i| try q.lines.append(q.gpa, try formatRow(q.gpa, row, i));
 }
 
-pub fn startQuery(gpa: std.mem.Allocator, url: []const u8, token: []const u8, body: ?[]const u8) ?*Query {
+pub fn startQuery(gpa: std.mem.Allocator, io: std.Io, url: []const u8, token: []const u8, body: ?[]const u8) ?*Query {
     const q = gpa.create(Query) catch return null;
     q.* = .{
         .gpa = gpa,
+        .io = io,
         .url = gpa.dupe(u8, url) catch return null,
         .token = gpa.dupe(u8, token) catch return null,
         .body = if (body) |b| gpa.dupe(u8, b) catch return null else null,
@@ -400,8 +405,8 @@ pub fn startQuery(gpa: std.mem.Allocator, url: []const u8, token: []const u8, bo
 
 const MyScore = struct { sha256: []const u8, ex: u32, clear: u32, miss: u32, max_combo: u32, date: i64, verified: bool = true };
 
-fn fetchMine(a: std.mem.Allocator, base: []const u8, token: []const u8) ![]MyScore {
-    const r = try http.request(a, .GET, try std.fmt.allocPrint(a, "{s}/me/scores", .{base}), null, try bearer(a, token));
+fn fetchMine(a: std.mem.Allocator, io: std.Io, base: []const u8, token: []const u8) ![]MyScore {
+    const r = try http.request(a, io, .GET, try std.fmt.allocPrint(a, "{s}/me/scores", .{base}), null, try bearer(a, token));
     if (r.status != 200) return error.HttpStatus;
     const v = try std.json.parseFromSliceLeaky(struct { scores: []MyScore }, a, r.body, .{ .ignore_unknown_fields = true });
     return v.scores;
@@ -497,13 +502,14 @@ fn sendClaims(s: *Sync, a: std.mem.Allocator, claims: []const MyScore) !void {
     while (i < claims.len) : (i += claim_batch) {
         const part = claims[i..@min(i + claim_batch, claims.len)];
         const body = try std.json.Stringify.valueAlloc(a, .{ .scores = part }, .{});
-        const r = try http.request(a, .POST, url, body, hs);
+        const r = try http.request(a, s.io, .POST, url, body, hs);
         if (r.status == 200) s.claimed += @intCast(part.len) else s.failed += @intCast(part.len);
     }
 }
 
 pub const Sync = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     base: []u8,
     token: []u8,
     upload: bool,
@@ -557,7 +563,7 @@ fn pushReplays(w: *Push) !void {
     defer d.close();
     const load = try d.prepare("SELECT data FROM replay WHERE id=?1");
     defer load.deinit();
-    var client = http.client(w.s.gpa);
+    var client = http.client(w.s.gpa, w.s.io);
     defer client.deinit();
     while (true) {
         const i = w.next.fetchAdd(1, .monotonic);
@@ -596,17 +602,17 @@ fn pushAll(s: *Sync, d: db_mod.Db) !void {
     var arena = std.heap.ArenaAllocator.init(s.gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const pending = try pendingReplays(a, d, try fetchMine(a, s.base, s.token));
+    const pending = try pendingReplays(a, d, try fetchMine(a, s.io, s.base, s.token));
     s.total.store(@intCast(pending.len), .release);
     try pushAllReplays(s, pending);
     // Asked again because the replays above just changed the answer.
-    try sendClaims(s, a, try pendingClaims(a, d, try fetchMine(a, s.base, s.token)));
+    try sendClaims(s, a, try pendingClaims(a, d, try fetchMine(a, s.io, s.base, s.token)));
 }
 
 fn pullAll(s: *Sync, d: db_mod.Db) !void {
     var arena = std.heap.ArenaAllocator.init(s.gpa);
     defer arena.deinit();
-    s.accepted = try mergeMine(d, try fetchMine(arena.allocator(), s.base, s.token));
+    s.accepted = try mergeMine(d, try fetchMine(arena.allocator(), s.io, s.base, s.token));
 }
 
 fn syncThread(ud: ?*anyopaque) callconv(.c) c_int {
@@ -624,10 +630,11 @@ fn syncThread(ud: ?*anyopaque) callconv(.c) c_int {
     return 0;
 }
 
-pub fn startSync(gpa: std.mem.Allocator, base: []const u8, token: []const u8, upload: bool) ?*Sync {
+pub fn startSync(gpa: std.mem.Allocator, io: std.Io, base: []const u8, token: []const u8, upload: bool) ?*Sync {
     const s = gpa.create(Sync) catch return null;
     s.* = .{
         .gpa = gpa,
+        .io = io,
         .base = gpa.dupe(u8, base) catch return null,
         .token = gpa.dupe(u8, token) catch return null,
         .upload = upload,
@@ -642,10 +649,10 @@ pub fn startSync(gpa: std.mem.Allocator, base: []const u8, token: []const u8, up
 
 pub const AccountReply = struct { status: u16, body: []const u8, token: ?[]const u8 };
 
-pub fn requestToken(a: std.mem.Allocator, base: []const u8, name: []const u8, password: []const u8, register: bool) !AccountReply {
+pub fn requestToken(a: std.mem.Allocator, io: std.Io, base: []const u8, name: []const u8, password: []const u8, register: bool) !AccountReply {
     const body = try std.json.Stringify.valueAlloc(a, .{ .name = name, .password = password }, .{});
     const url = try std.fmt.allocPrint(a, "{s}/{s}", .{ base, if (register) "register" else "login" });
-    const r = try http.request(a, .POST, url, body, &.{});
+    const r = try http.request(a, io, .POST, url, body, &.{});
     if (r.status != 200) return .{ .status = r.status, .body = r.body, .token = null };
     const v = try std.json.parseFromSliceLeaky(struct { token: []const u8 }, a, r.body, .{ .ignore_unknown_fields = true });
     return .{ .status = r.status, .body = r.body, .token = v.token };
@@ -663,14 +670,15 @@ pub fn accountRefusal(status: u16, action: AccountAction) []const u8 {
     };
 }
 
-fn requestRename(a: std.mem.Allocator, base: []const u8, name: []const u8, token: []const u8) !u16 {
+fn requestRename(a: std.mem.Allocator, io: std.Io, base: []const u8, name: []const u8, token: []const u8) !u16 {
     const body = try std.json.Stringify.valueAlloc(a, .{ .name = name }, .{});
     const url = try std.fmt.allocPrint(a, "{s}/me/name", .{base});
-    return (try http.request(a, .POST, url, body, try bearer(a, token))).status;
+    return (try http.request(a, io, .POST, url, body, try bearer(a, token))).status;
 }
 
 pub const Account = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     base: []u8,
     name: []u8,
     /// The password, or for a rename the token.
@@ -708,18 +716,19 @@ fn accountThread(ud: ?*anyopaque) callconv(.c) c_int {
 
 fn runAccount(s: *Account, a: std.mem.Allocator) !void {
     if (s.action == .rename) {
-        s.status = try requestRename(a, s.base, s.name, s.secret);
+        s.status = try requestRename(a, s.io, s.base, s.name, s.secret);
         return;
     }
-    const r = try requestToken(a, s.base, s.name, s.secret, s.action == .register);
+    const r = try requestToken(a, s.io, s.base, s.name, s.secret, s.action == .register);
     s.status = r.status;
     if (r.token) |t| s.token = try s.gpa.dupe(u8, t);
 }
 
-pub fn startAccount(gpa: std.mem.Allocator, base: []const u8, name: []const u8, secret: []const u8, action: AccountAction) ?*Account {
+pub fn startAccount(gpa: std.mem.Allocator, io: std.Io, base: []const u8, name: []const u8, secret: []const u8, action: AccountAction) ?*Account {
     const s = gpa.create(Account) catch return null;
     s.* = .{
         .gpa = gpa,
+        .io = io,
         .base = gpa.dupe(u8, base) catch return null,
         .name = gpa.dupe(u8, name) catch return null,
         .secret = gpa.dupe(u8, secret) catch return null,
@@ -748,7 +757,7 @@ test "a board says where the player stands" {
 }
 
 test "a ranking that cannot be fetched fails instead of hanging" {
-    const b = startRanking(std.testing.allocator, "http://127.0.0.1:1", "t", "a").?;
+    const b = startRanking(std.testing.allocator, std.testing.io, "http://127.0.0.1:1", "t", "a").?;
     defer b.release();
     while (!b.ready()) c.SDL_Delay(5);
     try std.testing.expectEqual(@as(u8, Board.failed), b.state.load(.acquire));
@@ -784,16 +793,16 @@ test "sync uploads only what the server lacks, once per improvement" {
 test "workers send every replay once and try again on a busy server" {
     const a = std.testing.allocator;
     const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
-    var server = try address.listen(fs.io, .{ .reuse_address = true });
-    defer server.deinit(fs.io);
+    var server = try address.listen(std.testing.io, .{ .reuse_address = true });
+    defer server.deinit(std.testing.io);
     const total = 5;
     const Peer = struct {
         fn run(listener: *std.Io.net.Server, seen: *[total + 1][]const u8, names: *[total + 1][64]u8, sizes: *[total + 1]usize, charts: *[total + 1]usize) void {
             for (seen, names, sizes, charts, 0..) |*one, *name, *size, *chart, n| {
-                const stream = listener.accept(fs.io) catch return;
-                defer stream.close(fs.io);
+                const stream = listener.accept(std.testing.io) catch return;
+                defer stream.close(std.testing.io);
                 var in_buf: [1024]u8 = undefined;
-                var reader = stream.reader(fs.io, &in_buf);
+                var reader = stream.reader(std.testing.io, &in_buf);
                 const start = reader.interface.takeDelimiterInclusive('\n') catch return;
                 const at = std.mem.indexOf(u8, start, "/scores/") orelse return;
                 one.* = std.fmt.bufPrint(name, "{s}", .{start[at + 8 ..][0..1]}) catch return;
@@ -810,7 +819,7 @@ test "workers send every replay once and try again on a busy server" {
                 }
                 reader.interface.discardAll(size.*) catch return;
                 var out_buf: [128]u8 = undefined;
-                var writer = stream.writer(fs.io, &out_buf);
+                var writer = stream.writer(std.testing.io, &out_buf);
                 const status = if (n == 0) "503 Busy" else "200 OK";
                 writer.interface.print("HTTP/1.1 {s}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n", .{status}) catch return;
                 writer.interface.flush() catch return;
@@ -830,7 +839,7 @@ test "workers send every replay once and try again on a busy server" {
     defer d.exec("DELETE FROM replay") catch {};
     // Each upload is the chart, then the one-byte replay. Its size is read here: a Windows checkout adds CRs.
     const chart = "tests/charts/stop.bms";
-    const chart_bytes = try fs.readAlloc(a, chart, 1 << 20);
+    const chart_bytes = try fs.readAlloc(a, std.testing.io, chart, 1 << 20);
     defer a.free(chart_bytes);
     const chart_len = chart_bytes.len;
     const pending = [total]Pending{
@@ -839,7 +848,7 @@ test "workers send every replay once and try again on a busy server" {
     };
     var base_buf: [64]u8 = undefined;
     const base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{server.socket.address.getPort()});
-    var s: Sync = .{ .gpa = a, .base = base, .token = @constCast("t"), .upload = true };
+    var s: Sync = .{ .gpa = a, .io = std.testing.io, .base = base, .token = @constCast("t"), .upload = true };
     try pushAllReplays(&s, &pending);
     try std.testing.expectEqual(@as(u32, total), s.accepted);
     try std.testing.expectEqual(@as(u32, 0), s.failed);

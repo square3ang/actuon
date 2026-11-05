@@ -26,11 +26,11 @@ pub fn safeEntry(name: []const u8) bool {
 }
 
 /// Extracts regular files and folders only: links and devices are skipped, never followed.
-pub fn extract(a: std.mem.Allocator, archive_path: []const u8, dest: []const u8) !u32 {
-    return extractWithin(a, archive_path, dest, .{});
+pub fn extract(a: std.mem.Allocator, io: std.Io, archive_path: []const u8, dest: []const u8) !u32 {
+    return extractWithin(a, io, archive_path, dest, .{});
 }
 
-fn extractWithin(a: std.mem.Allocator, archive_path: []const u8, dest: []const u8, limits: Limits) !u32 {
+fn extractWithin(a: std.mem.Allocator, io: std.Io, archive_path: []const u8, dest: []const u8, limits: Limits) !u32 {
     const ar = c.archive_read_new() orelse return error.Archive;
     defer _ = c.archive_read_free(ar);
     _ = c.archive_read_support_filter_all(ar);
@@ -58,11 +58,11 @@ fn extractWithin(a: std.mem.Allocator, archive_path: []const u8, dest: []const u
         const clean = try a.dupe(u8, name);
         std.mem.replaceScalar(u8, clean, '\\', '/');
         const out_path = try std.fs.path.join(a, &.{ dest, clean });
-        if (std.fs.path.dirname(out_path)) |d| try fs.mkdirs(d);
-        const file = try std.Io.Dir.cwd().createFile(fs.io, out_path, .{});
-        defer file.close(fs.io);
+        if (std.fs.path.dirname(out_path)) |d| try fs.mkdirs(io, d);
+        const file = try std.Io.Dir.cwd().createFile(io, out_path, .{});
+        defer file.close(io);
         var out_buf: [1 << 16]u8 = undefined;
-        var w = file.writer(fs.io, &out_buf);
+        var w = file.writer(io, &out_buf);
         while (true) {
             const n = c.archive_read_data(ar, &buf, buf.len);
             if (n < 0) return error.Archive;
@@ -79,6 +79,7 @@ fn extractWithin(a: std.mem.Allocator, archive_path: []const u8, dest: []const u
 
 pub const Job = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     url: []u8,
     root: []u8,
     id: []u8,
@@ -124,27 +125,27 @@ fn run(j: *Job) !void {
     defer arena.deinit();
     const a = arena.allocator();
     const downloads = try std.fs.path.join(a, &.{ j.root, "downloads" });
-    try fs.mkdirs(downloads);
+    try fs.mkdirs(j.io, downloads);
     const dest = try std.fs.path.join(a, &.{ downloads, j.id });
     // Per job: an abandoned job's thread can wake later and remove its file while a retry downloads.
     const archive = try std.fmt.allocPrint(a, "{s}.{x}.part", .{ dest, @intFromPtr(j) });
-    defer fs.remove(archive);
-    try http.download(j.gpa, j.url, archive, &j.progress);
+    defer fs.remove(j.io, archive);
+    try http.download(j.gpa, j.io, j.url, archive, &j.progress);
     // Lookup services answer with JSON naming the archive. Anything too big to read here is the archive.
-    if (fs.readAlloc(a, archive, 1 << 20)) |head| {
+    if (fs.readAlloc(a, j.io, archive, 1 << 20)) |head| {
         if (head.len > 0 and head[0] == '{') {
             const real = (try packageUrl(a, head)) orelse return error.NoPackage;
-            try http.download(j.gpa, real, archive, &j.progress);
+            try http.download(j.gpa, j.io, real, archive, &j.progress);
         }
     } else |_| {}
     j.extracting.store(true, .release);
-    try unpack(a, archive, dest, .{});
+    try unpack(a, j.io, archive, dest, .{});
 }
 
-fn unpack(a: std.mem.Allocator, archive: []const u8, dest: []const u8, limits: Limits) !void {
-    const fresh = !fs.exists(dest);
-    errdefer if (fresh) fs.removeTree(dest);
-    if ((try extractWithin(a, archive, dest, limits)) == 0) return error.EmptyArchive;
+fn unpack(a: std.mem.Allocator, io: std.Io, archive: []const u8, dest: []const u8, limits: Limits) !void {
+    const fresh = !fs.exists(io, dest);
+    errdefer if (fresh) fs.removeTree(io, dest);
+    if ((try extractWithin(a, io, archive, dest, limits)) == 0) return error.EmptyArchive;
 }
 
 fn thread(ud: ?*anyopaque) callconv(.c) c_int {
@@ -159,11 +160,11 @@ fn thread(ud: ?*anyopaque) callconv(.c) c_int {
 }
 
 /// `id` names the folder, so it must be a chart hash, not free text.
-pub fn start(gpa: std.mem.Allocator, url: []const u8, root: []const u8, id: []const u8) ?*Job {
+pub fn start(gpa: std.mem.Allocator, io: std.Io, url: []const u8, root: []const u8, id: []const u8) ?*Job {
     for (id) |ch| if (!std.ascii.isAlphanumeric(ch)) return null;
     if (id.len == 0) return null;
     const j = gpa.create(Job) catch return null;
-    j.* = .{ .gpa = gpa, .url = gpa.dupe(u8, url) catch return null, .root = gpa.dupe(u8, root) catch return null, .id = gpa.dupe(u8, id) catch return null };
+    j.* = .{ .gpa = gpa, .io = io, .url = gpa.dupe(u8, url) catch return null, .root = gpa.dupe(u8, root) catch return null, .id = gpa.dupe(u8, id) catch return null };
     j.thread = c.SDL_CreateThread(thread, "download", j) orelse {
         j.destroy();
         return null;
@@ -200,8 +201,8 @@ test "extraction keeps non-ASCII names and everything after them" {
     _ = c.archive_write_free(w);
 
     const dest = try std.fmt.allocPrint(a, "{s}/out", .{root});
-    try std.testing.expectEqual(@as(u32, 3), try extract(a, archive, dest));
-    for (names) |name| try std.testing.expect(fs.exists(try std.fs.path.join(a, &.{ dest, name })));
+    try std.testing.expectEqual(@as(u32, 3), try extract(a, std.testing.io, archive, dest));
+    for (names) |name| try std.testing.expect(fs.exists(std.testing.io, try std.fs.path.join(a, &.{ dest, name })));
 }
 
 test "entry names cannot escape" {
@@ -247,14 +248,14 @@ test "url template" {
 
 test "extract keeps files and drops escapes and links" {
     const a = std.testing.allocator;
-    fs.io = std.testing.io;
+    const io = std.testing.io;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const al = arena.allocator();
     // A tar built by hand: one good file, one traversal, one symlink.
     const tar_path = "actuon_test.tar";
     const dest = "actuon_test_out";
-    defer fs.remove(tar_path);
+    defer fs.remove(io, tar_path);
     var tar: std.ArrayList(u8) = .empty;
     const add = struct {
         fn f(out: *std.ArrayList(u8), all: std.mem.Allocator, name: []const u8, kind: u8, body: []const u8) !void {
@@ -278,20 +279,20 @@ test "extract keeps files and drops escapes and links" {
     try add(&tar, al, "../evil.bms", '0', "bad");
     try add(&tar, al, "link", '2', "");
     try tar.appendNTimes(al, 0, 1024);
-    try fs.write(tar_path, tar.items);
+    try fs.write(io, tar_path, tar.items);
     const limited = dest ++ "_limits";
-    defer fs.removeTree(limited);
-    try std.testing.expectError(error.TooLarge, unpack(al, tar_path, limited, .{ .bytes = 4 }));
-    try std.testing.expect(!fs.exists(limited));
-    try std.testing.expectError(error.TooManyEntries, unpack(al, tar_path, limited, .{ .entries = 2 }));
-    try std.testing.expect(!fs.exists(limited));
-    try fs.mkdirs(limited ++ "/kept");
-    try std.testing.expectError(error.TooLarge, unpack(al, tar_path, limited, .{ .bytes = 4 }));
-    try std.testing.expect(fs.exists(limited ++ "/kept"));
-    const n = try extract(al, tar_path, dest);
+    defer fs.removeTree(io, limited);
+    try std.testing.expectError(error.TooLarge, unpack(al, io, tar_path, limited, .{ .bytes = 4 }));
+    try std.testing.expect(!fs.exists(io, limited));
+    try std.testing.expectError(error.TooManyEntries, unpack(al, io, tar_path, limited, .{ .entries = 2 }));
+    try std.testing.expect(!fs.exists(io, limited));
+    try fs.mkdirs(io, limited ++ "/kept");
+    try std.testing.expectError(error.TooLarge, unpack(al, io, tar_path, limited, .{ .bytes = 4 }));
+    try std.testing.expect(fs.exists(io, limited ++ "/kept"));
+    const n = try extract(al, io, tar_path, dest);
     try std.testing.expectEqual(@as(u32, 1), n);
-    try std.testing.expect(fs.exists(dest ++ "/song/good.bms"));
-    try std.testing.expect(!fs.exists("evil.bms"));
-    try std.testing.expect(!fs.exists(dest ++ "/link"));
-    try std.Io.Dir.cwd().deleteTree(fs.io, dest);
+    try std.testing.expect(fs.exists(io, dest ++ "/song/good.bms"));
+    try std.testing.expect(!fs.exists(io, "evil.bms"));
+    try std.testing.expect(!fs.exists(io, dest ++ "/link"));
+    try std.Io.Dir.cwd().deleteTree(io, dest);
 }

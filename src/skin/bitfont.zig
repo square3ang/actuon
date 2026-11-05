@@ -31,18 +31,18 @@ pub const BitmapFont = struct {
     glyphs: std.AutoHashMapUnmanaged(u32, Glyph) = .empty,
 };
 
-fn pagePath(a: std.mem.Allocator, dir: []const u8, name: []const u8) ?[]const u8 {
+fn pagePath(a: std.mem.Allocator, io: std.Io, dir: []const u8, name: []const u8) ?[]const u8 {
     const norm = a.dupe(u8, name) catch return null;
     std.mem.replaceScalar(u8, norm, '\\', '/');
     if (fs.climbs(norm) or std.fs.path.isAbsolute(norm)) return null;
-    return lr2csv.walk(a, dir, norm);
+    return lr2csv.walk(a, io, dir, norm);
 }
 
-fn setPage(a: std.mem.Allocator, pages: *std.ArrayList(?[]const u8), dir: []const u8, id: i64, name: []const u8) !void {
+fn setPage(a: std.mem.Allocator, io: std.Io, pages: *std.ArrayList(?[]const u8), dir: []const u8, id: i64, name: []const u8) !void {
     if (id < 0 or id >= max_pages) return;
     const i: usize = @intCast(id);
     while (pages.items.len <= i) try pages.append(a, null);
-    pages.items[i] = pagePath(a, dir, name);
+    pages.items[i] = pagePath(a, io, dir, name);
 }
 
 /// LR2 numbers a glyph by its Shift-JIS code with the gaps closed.
@@ -71,7 +71,7 @@ fn fieldInt(fields: []const []const u8, i: usize) i64 {
     return std.fmt.parseInt(i64, std.mem.trim(u8, fields[i], " "), 10) catch 0;
 }
 
-fn parseLr2(a: std.mem.Allocator, text: []const u8, dir: []const u8) !?*BitmapFont {
+fn parseLr2(a: std.mem.Allocator, io: std.Io, text: []const u8, dir: []const u8) !?*BitmapFont {
     const font = try a.create(BitmapFont);
     font.* = .{ .lr2 = true };
     var pages: std.ArrayList(?[]const u8) = .empty;
@@ -89,7 +89,7 @@ fn parseLr2(a: std.mem.Allocator, text: []const u8, dir: []const u8) !?*BitmapFo
         } else if (std.mem.eql(u8, f[0], "#M")) {
             font.margin = @floatFromInt(fieldInt(f, 1));
         } else if (std.mem.eql(u8, f[0], "#T") and f.len > 2) {
-            try setPage(a, &pages, dir, fieldInt(f, 1), f[2]);
+            try setPage(a, io, &pages, dir, fieldInt(f, 1), f[2]);
         } else if (std.mem.eql(u8, f[0], "#R") and f.len > 6) {
             const page = fieldInt(f, 2);
             if (page < 0 or page >= pages.items.len or pages.items[@intCast(page)] == null) continue;
@@ -132,7 +132,7 @@ fn bmInt(line: []const u8, key: []const u8) i64 {
 }
 
 // shortcut: kerning pairs are ignored, read them if a skin's text looks uneven.
-fn parseBm(a: std.mem.Allocator, text: []const u8, dir: []const u8) !?*BitmapFont {
+fn parseBm(a: std.mem.Allocator, io: std.Io, text: []const u8, dir: []const u8) !?*BitmapFont {
     const font = try a.create(BitmapFont);
     font.* = .{};
     var pages: std.ArrayList(?[]const u8) = .empty;
@@ -142,7 +142,7 @@ fn parseBm(a: std.mem.Allocator, text: []const u8, dir: []const u8) !?*BitmapFon
         if (std.mem.startsWith(u8, line, "info ")) {
             font.size = @floatFromInt(@abs(bmInt(line, "size")));
         } else if (std.mem.startsWith(u8, line, "page ")) {
-            try setPage(a, &pages, dir, bmInt(line, "id"), bmValue(line, "file") orelse continue);
+            try setPage(a, io, &pages, dir, bmInt(line, "id"), bmValue(line, "file") orelse continue);
         } else if (std.mem.startsWith(u8, line, "char ")) {
             const page = bmInt(line, "page");
             const id = bmInt(line, "id");
@@ -164,24 +164,24 @@ fn parseBm(a: std.mem.Allocator, text: []const u8, dir: []const u8) !?*BitmapFon
     return font;
 }
 
-pub fn load(a: std.mem.Allocator, path: []const u8) ?*BitmapFont {
+pub fn load(a: std.mem.Allocator, io: std.Io, path: []const u8) ?*BitmapFont {
     // Apart from `a`: the skin keeps what it parses, and a font's text would stay as long as the skin.
     var tmp = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer tmp.deinit();
-    const bytes = fs.readAlloc(tmp.allocator(), path, max_file) catch return null;
+    const bytes = fs.readAlloc(tmp.allocator(), io, path, max_file) catch return null;
     const dir = std.fs.path.dirname(path) orelse ".";
     if (std.ascii.endsWithIgnoreCase(path, ".lr2font")) {
         const text = if (std.unicode.utf8ValidateSlice(bytes)) bytes else core.encoding.toUtf8(tmp.allocator(), bytes, .sjis) catch return null;
-        return parseLr2(a, text, dir) catch null;
+        return parseLr2(a, io, text, dir) catch null;
     }
-    return parseBm(a, bytes, dir) catch null;
+    return parseBm(a, io, bytes, dir) catch null;
 }
 
 /// `loaded` counts every try: a failing one reads its file too.
-pub fn loadCapped(a: std.mem.Allocator, path: []const u8, loaded: *u32) ?*BitmapFont {
+pub fn loadCapped(a: std.mem.Allocator, io: std.Io, path: []const u8, loaded: *u32) ?*BitmapFont {
     if (loaded.* >= max_fonts) return null;
     loaded.* += 1;
-    return load(a, path);
+    return load(a, io, path);
 }
 
 pub fn measure(font: *const BitmapFont, s: []const u8, scale: f32) f32 {
@@ -199,12 +199,11 @@ test "an lr2font maps LR2 codes to characters and refuses pages outside its fold
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    fs.io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    try fs.write(try std.fs.path.join(a, &.{ dir, "a.png" }), "");
-    const font = (try parseLr2(a, "#S,24\r\n#M,2\r\n#T,0,a.png\r\n#T,1,../b.png\r\n#R,65,0,1,2,3,4\r\n#R,66,1,0,0,9,9\r\n#R,288,0,0,0,1,1\r\n", dir)).?;
+    try fs.write(std.testing.io, try std.fs.path.join(a, &.{ dir, "a.png" }), "");
+    const font = (try parseLr2(a, std.testing.io, "#S,24\r\n#M,2\r\n#T,0,a.png\r\n#T,1,../b.png\r\n#R,65,0,1,2,3,4\r\n#R,66,1,0,0,9,9\r\n#R,288,0,0,0,1,1\r\n", dir)).?;
     try std.testing.expectEqual(@as(f32, 24), font.size);
     const g = font.glyphs.get('A').?;
     try std.testing.expectEqual(@as(f32, 3), g.w);
@@ -218,32 +217,30 @@ test "a skin's fonts stop at the limit" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    fs.io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    try fs.write(try std.fs.path.join(a, &.{ dir, "a.png" }), "");
+    try fs.write(std.testing.io, try std.fs.path.join(a, &.{ dir, "a.png" }), "");
     const path = try std.fs.path.join(a, &.{ dir, "a.lr2font" });
-    try fs.write(path, "#S,24\n#T,0,a.png\n#R,65,0,1,2,3,4\n");
+    try fs.write(std.testing.io, path, "#S,24\n#T,0,a.png\n#R,65,0,1,2,3,4\n");
     var loaded: u32 = 0;
-    try std.testing.expect(loadCapped(a, path, &loaded) != null);
+    try std.testing.expect(loadCapped(a, std.testing.io, path, &loaded) != null);
     loaded = max_fonts;
-    try std.testing.expect(loadCapped(a, path, &loaded) == null);
+    try std.testing.expect(loadCapped(a, std.testing.io, path, &loaded) == null);
 }
 
 test "a font without a size is refused, and a BMFont reads its fields" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    fs.io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    try fs.write(try std.fs.path.join(a, &.{ dir, "page.png" }), "");
-    try std.testing.expect((try parseBm(a, "info size=9\npage id=0 file=\"gone.png\"\nchar id=65 page=0\n", dir)) == null);
-    try std.testing.expect((try parseLr2(a, "#T,0,a.png\n#R,65,0,1,2,3,4\n", ".")) == null);
-    try std.testing.expect((try parseBm(a, "not a font", ".")) == null);
-    const font = (try parseBm(a, "info face=\"a size=9\" size=-40 bold=0\r\npage id=0 file=\"page.png\"\r\nchar id=65 x=1 y=2 width=3 height=4 xoffset=-1 yoffset=5 xadvance=6 page=0\r\nchar id=66 page=9\r\n", dir)).?;
+    try fs.write(std.testing.io, try std.fs.path.join(a, &.{ dir, "page.png" }), "");
+    try std.testing.expect((try parseBm(a, std.testing.io, "info size=9\npage id=0 file=\"gone.png\"\nchar id=65 page=0\n", dir)) == null);
+    try std.testing.expect((try parseLr2(a, std.testing.io, "#T,0,a.png\n#R,65,0,1,2,3,4\n", ".")) == null);
+    try std.testing.expect((try parseBm(a, std.testing.io, "not a font", ".")) == null);
+    const font = (try parseBm(a, std.testing.io, "info face=\"a size=9\" size=-40 bold=0\r\npage id=0 file=\"page.png\"\r\nchar id=65 x=1 y=2 width=3 height=4 xoffset=-1 yoffset=5 xadvance=6 page=0\r\nchar id=66 page=9\r\n", dir)).?;
     try std.testing.expectEqual(@as(f32, 40), font.size);
     const g = font.glyphs.get('A').?;
     try std.testing.expectEqual(@as(f32, -1), g.x_offset);

@@ -28,12 +28,12 @@ pub fn open(a: *App, root_in: []const u8, want: i32, back: app_mod.Scene) void {
     var arena = std.heap.ArenaAllocator.init(a.gpa);
     const al = arena.allocator();
     const root = al.dupe(u8, root_in) catch return;
-    const rows = skin_mod.options(al, root, want) catch &.{};
+    const rows = skin_mod.options(al, a.io, root, want) catch &.{};
     if (rows.len == 0) {
         arena.deinit();
         return settings.say(a, "This skin has no settings.", .{});
     }
-    a.skinconf = .{ .arena = arena, .rows = rows, .conf = skin_mod.loadConf(al, root, want), .root = root, .want = want, .back = back };
+    a.skinconf = .{ .arena = arena, .rows = rows, .conf = skin_mod.loadConf(al, a.io, root, want), .root = root, .want = want, .back = back };
     a.scene = .skinconf;
 }
 
@@ -69,7 +69,7 @@ fn change(a: *App, row: usize, dir: i32) void {
         pickMap(s, o.kind).put(al, o.name, o.choices[next]) catch return;
     }
     a.sfx(.adjust);
-    skin_mod.saveConf(al, s.root, s.want, s.conf);
+    skin_mod.saveConf(al, a.io, s.root, s.want, s.conf);
     a.select_skin_loaded = false;
 }
 

@@ -1,5 +1,5 @@
 const std = @import("std");
-const fs = @import("platform/fs.zig");
+const input = @import("input/input.zig");
 const app = @import("ui/app.zig");
 const latency = @import("audio/latency.zig");
 const editor = @import("ui/editor.zig");
@@ -29,8 +29,9 @@ const usage =
 ;
 
 pub fn main(init: std.process.Init) !void {
-    fs.io = init.io;
-    readEnvironNow(init.io);
+    const io = init.io;
+    input.io = io;
+    readEnvironNow(io);
     crash.install();
     download.initLocale();
     const gpa = init.gpa;
@@ -46,32 +47,32 @@ pub fn main(init: std.process.Init) !void {
     }
     if (args.len == 3 and std.mem.eql(u8, args[1], "fetch-chart")) {
         const al = init.arena.allocator();
-        const cfg = config.load(al);
+        const cfg = config.load(al, io);
         if (cfg.roots.len == 0) return error.NoLibraryFolder;
         const url = try download.expand(al, cfg.download_url, args[2]);
-        const j = download.start(gpa, url, cfg.roots[0], args[2]) orelse return error.BadHash;
+        const j = download.start(gpa, io, url, cfg.roots[0], args[2]) orelse return error.BadHash;
         defer j.destroy();
         while (j.state.load(.acquire) == 0) c.SDL_Delay(50);
         if (j.state.load(.acquire) != 1) return error.DownloadFailed;
         return;
     }
-    if (args.len >= 3 and std.mem.eql(u8, args[1], "fetch-table")) return fetchTable(gpa, args[2]);
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "fetch-table")) return fetchTable(gpa, io, args[2]);
     if (args.len >= 4 and (std.mem.eql(u8, args[1], "ir-register") or std.mem.eql(u8, args[1], "ir-login"))) {
-        return irAccount(gpa, init.io, args[1], args[2], args[3]);
+        return irAccount(gpa, io, args[1], args[2], args[3]);
     }
-    if (args.len >= 3 and std.mem.eql(u8, args[1], "ir-rival")) return irRival(gpa, args[2]);
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "ir-rival")) return irRival(gpa, io, args[2]);
     var opts: app.Options = .{};
     if (editor.parseArgs(args)) |cmd| {
         if (!c.SDL_Init(c.SDL_INIT_EVENTS)) return error.SdlInit;
-        const running = editor.otherInstanceRunning(init.arena.allocator());
+        const running = editor.otherInstanceRunning(init.arena.allocator(), io);
         if (running) {
             defer c.SDL_Quit();
-            return editor.send(init.arena.allocator(), cmd);
+            return editor.send(init.arena.allocator(), io, cmd);
         }
         c.SDL_Quit();
         if (cmd.stop) return;
         opts.preview = cmd;
-        return app.main(gpa, opts);
+        return app.main(gpa, io, opts);
     }
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -103,7 +104,7 @@ pub fn main(init: std.process.Init) !void {
             return;
         } else opts.play_path = a;
     }
-    try app.main(gpa, opts);
+    try app.main(gpa, io, opts);
 }
 
 /// SDL unsetting XDG_ACTIVATION_TOKEN breaks std's lazy environ read, which then hangs in the stderr lock.
@@ -129,36 +130,36 @@ fn irAccount(gpa: std.mem.Allocator, io: std.Io, cmd: []const u8, url: []const u
     var rd = std.Io.File.stdin().reader(io, &buf);
     const line = rd.interface.takeDelimiterExclusive('\n') catch return error.NoPassword;
     const password = std.mem.trimEnd(u8, line, "\r");
-    const r = try ir.requestToken(a, url, name, password, std.mem.eql(u8, cmd, "ir-register"));
+    const r = try ir.requestToken(a, io, url, name, password, std.mem.eql(u8, cmd, "ir-register"));
     const token = r.token orelse {
         std.debug.print("server said {d}: {s}\n", .{ r.status, r.body });
         return error.Refused;
     };
-    var cfg = config.load(a);
+    var cfg = config.load(a, io);
     cfg.ir_url = url;
     cfg.ir_token = token;
-    try config.save(gpa, cfg);
+    try config.save(gpa, io, cfg);
     std.debug.print("logged in as {s}; token saved\n", .{name});
 }
 
-fn irRival(gpa: std.mem.Allocator, name: []const u8) !void {
+fn irRival(gpa: std.mem.Allocator, io: std.Io, name: []const u8) !void {
     if (!c.SDL_Init(c.SDL_INIT_EVENTS)) return error.SdlInit;
     defer c.SDL_Quit();
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const cfg = config.load(a);
+    const cfg = config.load(a, io);
     const auth = try std.fmt.allocPrint(a, "Bearer {s}", .{cfg.ir_token});
-    const r = try http.request(a, .PUT, try std.fmt.allocPrint(a, "{s}/rivals/{f}", .{ cfg.ir_url, std.fmt.alt(std.Uri.Component{ .raw = name }, .formatEscaped) }), "", &.{.{ .name = "Authorization", .value = auth }});
+    const r = try http.request(a, io, .PUT, try std.fmt.allocPrint(a, "{s}/rivals/{f}", .{ cfg.ir_url, std.fmt.alt(std.Uri.Component{ .raw = name }, .formatEscaped) }), "", &.{.{ .name = "Authorization", .value = auth }});
     std.debug.print("{d}: {s}\n", .{ r.status, r.body });
 }
 
-fn fetchTable(gpa: std.mem.Allocator, url: []const u8) !void {
+fn fetchTable(gpa: std.mem.Allocator, io: std.Io, url: []const u8) !void {
     if (!c.SDL_Init(c.SDL_INIT_EVENTS)) return error.SdlInit;
     defer c.SDL_Quit();
     const d = try db.openMain(gpa);
     defer d.close();
-    const r = try table.fetch(gpa, d, url);
+    const r = try table.fetch(gpa, io, d, url);
     std.debug.print("{d} songs, {d} courses\n", .{ r.songs, r.courses });
 }
 

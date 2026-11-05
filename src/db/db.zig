@@ -234,6 +234,7 @@ const ScanJob = struct {
 
 const ScanWork = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     jobs: []ScanJob,
     next: std.atomic.Value(usize) = .init(0),
     progress: ?*std.atomic.Value(u32),
@@ -245,7 +246,7 @@ fn scanWorker(ud: ?*anyopaque) callconv(.c) c_int {
         const i = w.next.fetchAdd(1, .monotonic);
         if (i >= w.jobs.len) return 0;
         const job = &w.jobs[i];
-        job.bytes = fs.readAlloc(w.gpa, job.path, 1 << 26) catch continue;
+        job.bytes = fs.readAlloc(w.gpa, w.io, job.path, 1 << 26) catch continue;
         job.chart = core.parse(w.gpa, .of(job.path), job.bytes, .{}) catch continue;
         if (w.progress) |p| _ = p.fetchAdd(1, .monotonic);
     }
@@ -258,8 +259,8 @@ fn hasOpenLn(chart: *const core.types.Chart) bool {
 }
 
 /// Parses on every core; the inserts stay on this thread, which owns the connection.
-fn insertBatch(gpa: std.mem.Allocator, d: Db, ins: anytype, jobs: []ScanJob, stats: *ScanStats, progress: ?*std.atomic.Value(u32)) !void {
-    var work: ScanWork = .{ .gpa = gpa, .jobs = jobs, .progress = progress };
+fn insertBatch(gpa: std.mem.Allocator, io: std.Io, d: Db, ins: anytype, jobs: []ScanJob, stats: *ScanStats, progress: ?*std.atomic.Value(u32)) !void {
+    var work: ScanWork = .{ .gpa = gpa, .io = io, .jobs = jobs, .progress = progress };
     var threads: [31]?*c.SDL_Thread = @splat(null);
     const extra: usize = @intCast(std.math.clamp(c.SDL_GetNumLogicalCPUCores() - 1, 0, threads.len));
     for (threads[0..@min(extra, jobs.len -| 1)]) |*t| t.* = c.SDL_CreateThread(scanWorker, "scan-parse", &work);
@@ -316,7 +317,7 @@ fn insertBatch(gpa: std.mem.Allocator, d: Db, ins: anytype, jobs: []ScanJob, sta
 }
 
 /// shortcut: only changed mtime or size re-parses, but every chart is stat'ed on each pass, move to OS file notifications if huge libraries feel slow.
-pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: ?*std.atomic.Value(u32)) !ScanStats {
+pub fn scan(gpa: std.mem.Allocator, io: std.Io, d: Db, roots: []const []const u8, progress: ?*std.atomic.Value(u32)) !ScanStats {
     var stats: ScanStats = .{};
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -338,12 +339,12 @@ pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: 
     const outer = try outerRoots(arena.allocator(), roots);
     for (outer) |r| try stack.append(arena.allocator(), try arena.allocator().dupe(u8, r));
     while (stack.pop()) |dir| {
-        const real = fs.realPath(arena.allocator(), dir) catch dir;
+        const real = fs.realPath(arena.allocator(), io, dir) catch dir;
         if ((try visited.getOrPut(arena.allocator(), real)).found_existing) continue;
         var it = std.heap.ArenaAllocator.init(gpa);
         defer it.deinit();
         const a = it.allocator();
-        const entries = fs.listChecked(a, dir) catch |e| {
+        const entries = fs.listChecked(a, io, dir) catch |e| {
             std.log.warn("cannot read {s}: {t}", .{ dir, e });
             try unread.append(arena.allocator(), dir);
             continue;
@@ -356,7 +357,7 @@ pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: 
             }
             if (!isChart(e.name)) continue;
             try seen.put(arena.allocator(), full, {});
-            const st = fs.stat(full) orelse continue;
+            const st = fs.stat(io, full) orelse continue;
             known.bindText(1, full);
             const hit = try known.step();
             const same = hit and known.int(0) == st.mtime and known.int(1) == @as(i64, @intCast(st.size));
@@ -364,12 +365,12 @@ pub fn scan(gpa: std.mem.Allocator, d: Db, roots: []const []const u8, progress: 
             if (same) continue;
             try batch.append(arena.allocator(), .{ .path = full, .folder = dir, .mtime = st.mtime, .size = st.size });
             if (batch.items.len == scan_batch) {
-                try insertBatch(gpa, d, ins, batch.items, &stats, progress);
+                try insertBatch(gpa, io, d, ins, batch.items, &stats, progress);
                 batch.clearRetainingCapacity();
             }
         }
     }
-    try insertBatch(gpa, d, ins, batch.items, &stats, progress);
+    try insertBatch(gpa, io, d, ins, batch.items, &stats, progress);
     try d.exec("BEGIN IMMEDIATE");
     errdefer d.exec("ROLLBACK") catch {};
     // A folder that could not be read keeps its rows, so an unplugged library does not vanish.
@@ -695,10 +696,9 @@ test "LR2 import maps clears through md5 and skips unknown charts" {
     defer d.close();
     try d.exec(schema);
     try d.exec("INSERT INTO song(path,folder,sha256,md5) VALUES('p','f','shaA','md5A')");
-    fs.io = std.testing.io;
     const lr2 = "actuon_test_lr2.db";
-    fs.remove(lr2);
-    defer fs.remove(lr2);
+    fs.remove(std.testing.io, lr2);
+    defer fs.remove(std.testing.io, lr2);
     const src = try Db.open(lr2, gpa, false);
     try src.exec("CREATE TABLE score(hash TEXT, clear INT, perfect INT, great INT, good INT, bad INT, poor INT, minbp INT, playcount INT, clearcount INT);" ++
         "INSERT INTO score VALUES('md5A',4,10,5,1,1,1,3,7,2),('nope',1,1,1,1,1,1,1,1,1)");
@@ -738,13 +738,13 @@ test "scan parses in parallel, stores every chart and skips them next time" {
     defer d.close();
     try initSchema(d);
     const roots = [_][]const u8{"tests/charts"};
-    const first = try scan(gpa, d, &roots, null);
+    const first = try scan(gpa, std.testing.io, d, &roots, null);
     try std.testing.expect(first.parsed > 0);
     const count = try d.prepare("SELECT COUNT(*) FROM song");
     defer count.deinit();
     try std.testing.expect(try count.step());
     try std.testing.expectEqual(@as(i64, first.parsed), count.int(0));
-    try std.testing.expectEqual(@as(u32, 0), (try scan(gpa, d, &roots, null)).parsed);
+    try std.testing.expectEqual(@as(u32, 0), (try scan(gpa, std.testing.io, d, &roots, null)).parsed);
 }
 
 test "a root inside another, or added twice, is scanned once" {
@@ -758,19 +758,18 @@ test "a root inside another, or added twice, is scanned once" {
 
 test "a scan drops gone charts only in folders it could read" {
     const gpa = std.testing.allocator;
-    fs.io = std.testing.io;
     const root = "actuon_test_roots";
-    fs.removeTree(root);
-    defer fs.removeTree(root);
-    try fs.mkdirs(root ++ "/bms");
-    try fs.mkdirs(root ++ "/bms2");
-    try fs.write(root ++ "/file", "not a folder");
+    fs.removeTree(std.testing.io, root);
+    defer fs.removeTree(std.testing.io, root);
+    try fs.mkdirs(std.testing.io, root ++ "/bms");
+    try fs.mkdirs(std.testing.io, root ++ "/bms2");
+    try fs.write(std.testing.io, root ++ "/file", "not a folder");
     const d = try Db.open(":memory:", gpa, false);
     defer d.close();
     try initSchema(d);
     try d.exec("INSERT INTO song(path,folder,sha256,md5,mtime,size) VALUES('" ++ root ++ "/bms/gone.bms','','a','a',0,0),('" ++ root ++ "/bms2/kept.bms','','b','b',0,0),('" ++ root ++ "/file/kept.bms','','c','c',0,0)");
     const roots = [_][]const u8{ root ++ "/bms", root ++ "/file" };
-    try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, d, &roots, null)).removed);
+    try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, std.testing.io, d, &roots, null)).removed);
     const st = try d.prepare("SELECT COUNT(*) FROM song WHERE path LIKE '%kept.bms'");
     defer st.deinit();
     try std.testing.expect(try st.step());
@@ -802,21 +801,20 @@ test "an old database drops the columns nothing reads and keeps its rows" {
 
 test "a chart that fails to parse is read once, then again only when it changes, and forgotten when gone" {
     const gpa = std.testing.allocator;
-    fs.io = std.testing.io;
     const root = "actuon_test_unparsed";
-    fs.removeTree(root);
-    defer fs.removeTree(root);
-    try fs.mkdirs(root);
-    try fs.write(root ++ "/broken.bmson", "{");
+    fs.removeTree(std.testing.io, root);
+    defer fs.removeTree(std.testing.io, root);
+    try fs.mkdirs(std.testing.io, root);
+    try fs.write(std.testing.io, root ++ "/broken.bmson", "{");
     const d = try Db.open(":memory:", gpa, false);
     defer d.close();
     try initSchema(d);
-    try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, d, &.{root}, null)).failed);
-    try std.testing.expectEqual(@as(u32, 0), (try scan(gpa, d, &.{root}, null)).failed);
-    try fs.write(root ++ "/broken.bmson", "{\"");
-    try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, d, &.{root}, null)).failed);
-    fs.remove(root ++ "/broken.bmson");
-    _ = try scan(gpa, d, &.{root}, null);
+    try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, std.testing.io, d, &.{root}, null)).failed);
+    try std.testing.expectEqual(@as(u32, 0), (try scan(gpa, std.testing.io, d, &.{root}, null)).failed);
+    try fs.write(std.testing.io, root ++ "/broken.bmson", "{\"");
+    try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, std.testing.io, d, &.{root}, null)).failed);
+    fs.remove(std.testing.io, root ++ "/broken.bmson");
+    _ = try scan(gpa, std.testing.io, d, &.{root}, null);
     const st = try d.prepare("SELECT COUNT(*) FROM unparsed");
     defer st.deinit();
     try std.testing.expect(try st.step());
@@ -825,20 +823,19 @@ test "a chart that fails to parse is read once, then again only when it changes,
 
 test "a scan through links back to the root ends and stores each chart once" {
     const gpa = std.testing.allocator;
-    fs.io = std.testing.io;
     const root = "actuon_test_loop";
-    fs.removeTree(root);
-    defer fs.removeTree(root);
-    try fs.mkdirs(root);
-    const chart = try fs.readAlloc(gpa, "tests/charts/five_key.bms", 1 << 20);
+    fs.removeTree(std.testing.io, root);
+    defer fs.removeTree(std.testing.io, root);
+    try fs.mkdirs(std.testing.io, root);
+    const chart = try fs.readAlloc(gpa, std.testing.io, "tests/charts/five_key.bms", 1 << 20);
     defer gpa.free(chart);
-    try fs.write(root ++ "/song.bms", chart);
+    try fs.write(std.testing.io, root ++ "/song.bms", chart);
     try std.Io.Dir.cwd().symLink(std.testing.io, ".", root ++ "/a", .{ .is_directory = true });
     try std.Io.Dir.cwd().symLink(std.testing.io, ".", root ++ "/b", .{ .is_directory = true });
     const d = try Db.open(":memory:", gpa, false);
     defer d.close();
     try initSchema(d);
-    try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, d, &.{root}, null)).parsed);
+    try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, std.testing.io, d, &.{root}, null)).parsed);
     const st = try d.prepare("SELECT COUNT(*) FROM song");
     defer st.deinit();
     try std.testing.expect(try st.step());
@@ -847,7 +844,6 @@ test "a scan through links back to the root ends and stores each chart once" {
 
 test "imports clamp negative and huge counts instead of trapping" {
     const gpa = std.testing.allocator;
-    fs.io = std.testing.io;
     const d = try Db.open(":memory:", gpa, false);
     defer d.close();
     try d.exec(schema);
@@ -860,12 +856,12 @@ test "imports clamp negative and huge counts instead of trapping" {
             "INSERT INTO score VALUES('md5L',4,-1,9999999999,0,0,0,-1,-1,-1)",
     };
     for (files, tables) |f, t| {
-        fs.remove(f);
+        fs.remove(std.testing.io, f);
         const src = try Db.open(f, gpa, false);
         try src.exec(t);
         src.close();
     }
-    defer for (files) |f| fs.remove(f);
+    defer for (files) |f| fs.remove(std.testing.io, f);
     _ = try importBeatoraja(gpa, d, files[0]);
     _ = try importLr2(gpa, d, files[1]);
     const max: i64 = std.math.maxInt(u32);
@@ -1030,19 +1026,18 @@ test "a play count past u32 still lists its chart" {
 
 test "a scan leaves the database free for other writers between batches" {
     const gpa = std.testing.allocator;
-    fs.io = std.testing.io;
     const path = "actuon_test_scan.db";
-    fs.remove(path);
+    fs.remove(std.testing.io, path);
     defer {
-        fs.remove(path);
-        fs.remove(path ++ "-wal");
-        fs.remove(path ++ "-shm");
+        fs.remove(std.testing.io, path);
+        fs.remove(std.testing.io, path ++ "-wal");
+        fs.remove(std.testing.io, path ++ "-shm");
     }
     const d = try Db.open(path, gpa, false);
     defer d.close();
     try initSchema(d);
     const roots = [_][]const u8{"tests/charts"};
-    _ = try scan(gpa, d, &roots, null);
+    _ = try scan(gpa, std.testing.io, d, &roots, null);
     const other = try Db.open(path, gpa, false);
     defer other.close();
     try recordScore(other, .{ .sha256 = "a", .clear = 1, .ex = 1, .counts = @splat(0), .max_combo = 1, .miss = 0, .date = 1 });

@@ -123,6 +123,7 @@ pub fn validCode(code: []const u8) bool {
 
 pub const Room = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     base: []u8,
     token: []u8,
     join_code: [code_len]u8,
@@ -138,11 +139,12 @@ pub const Room = struct {
     want_title: []u8 = &.{},
     quit: std.atomic.Value(bool) = .init(false),
 
-    fn open(gpa: std.mem.Allocator, base: []const u8, token: []const u8) !*Room {
+    fn open(gpa: std.mem.Allocator, io: std.Io, base: []const u8, token: []const u8) !*Room {
         const r = try gpa.create(Room);
         errdefer gpa.destroy(r);
         r.* = .{
             .gpa = gpa,
+            .io = io,
             .base = try gpa.dupe(u8, base),
             .token = try gpa.dupe(u8, token),
             .join_code = @splat(' '),
@@ -159,8 +161,8 @@ pub const Room = struct {
         c.SDL_DetachThread(t);
     }
 
-    pub fn create(gpa: std.mem.Allocator, base: []const u8, token: []const u8, sha: []const u8, title: []const u8) !*Room {
-        const r = try open(gpa, base, token);
+    pub fn create(gpa: std.mem.Allocator, io: std.Io, base: []const u8, token: []const u8, sha: []const u8, title: []const u8) !*Room {
+        const r = try open(gpa, io, base, token);
         r.creating = true;
         if (sha.len == 64) r.create_sha = sha[0..64].*;
         r.create_title = try gpa.dupe(u8, title);
@@ -168,9 +170,9 @@ pub const Room = struct {
         return r;
     }
 
-    pub fn join(gpa: std.mem.Allocator, base: []const u8, token: []const u8, code: []const u8) !*Room {
+    pub fn join(gpa: std.mem.Allocator, io: std.Io, base: []const u8, token: []const u8, code: []const u8) !*Room {
         if (!validCode(code)) return error.BadCode;
-        const r = try open(gpa, base, token);
+        const r = try open(gpa, io, base, token);
         _ = copyInto(&r.join_code, code);
         for (&r.join_code) |*ch| ch.* = std.ascii.toUpper(ch.*);
         try r.run();
@@ -298,7 +300,7 @@ pub const Room = struct {
     fn loop(r: *Room) void {
         var arena = std.heap.ArenaAllocator.init(r.gpa);
         defer arena.deinit();
-        var client = http.client(r.gpa);
+        var client = http.client(r.gpa, r.io);
         defer client.deinit();
         const al = arena.allocator();
         const auth = std.fmt.allocPrint(al, "Bearer {s}", .{r.token}) catch return r.setStatus(.failed);
@@ -334,7 +336,7 @@ test "a room code that could change the URL is refused" {
     try std.testing.expect(!validCode("ABC23"));
     try std.testing.expect(!validCode("A/../B"));
     try std.testing.expect(!validCode("AB&C=1"));
-    try std.testing.expectError(error.BadCode, Room.join(std.testing.allocator, "http://x", "t", "a b c"));
+    try std.testing.expectError(error.BadCode, Room.join(std.testing.allocator, std.testing.io, "http://x", "t", "a b c"));
 }
 
 test "an answer is cut to size and the start clock is set once a round" {

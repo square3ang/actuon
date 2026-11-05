@@ -53,7 +53,7 @@ fn createRoom(a: *App) void {
     v.message = "";
     // With nothing selected the room opens without a chart, and the host picks one inside it.
     const song = select.selectedSong(&a.sel);
-    v.room = room_mod.Room.create(room_gpa, a.cfg.ir_url, a.cfg.ir_token, if (song) |s| s.sha256 else "", if (song) |s| s.title else "") catch |e| blk: {
+    v.room = room_mod.Room.create(room_gpa, a.io, a.cfg.ir_url, a.cfg.ir_token, if (song) |s| s.sha256 else "", if (song) |s| s.title else "") catch |e| blk: {
         std.log.err("versus room: {t}", .{e});
         v.message = tr("Could not reach the room");
         break :blk null;
@@ -65,7 +65,7 @@ fn joinRoom(a: *App) void {
     a.stopText();
     v.joining = false;
     v.message = "";
-    v.room = room_mod.Room.join(room_gpa, a.cfg.ir_url, a.cfg.ir_token, a.text.items) catch |e| blk: {
+    v.room = room_mod.Room.join(room_gpa, a.io, a.cfg.ir_url, a.cfg.ir_token, a.text.items) catch |e| blk: {
         std.log.err("versus room: {t}", .{e});
         v.message = if (e == error.BadCode) tr("No room has that code") else tr("Could not reach the room");
         break :blk null;

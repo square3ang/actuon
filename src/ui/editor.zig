@@ -41,33 +41,33 @@ fn wallSeconds() i64 {
     return @divTrunc(t, std.time.ns_per_s);
 }
 
-pub fn otherInstanceRunning(a: std.mem.Allocator) bool {
+pub fn otherInstanceRunning(a: std.mem.Allocator, io: std.Io) bool {
     const p = path(a, "instance") catch return false;
-    const st = fs.stat(p) orelse return false;
+    const st = fs.stat(io, p) orelse return false;
     return wallSeconds() - st.mtime <= alive_window_s;
 }
 
-pub fn heartbeat(a: std.mem.Allocator) void {
+pub fn heartbeat(a: std.mem.Allocator, io: std.Io) void {
     const p = path(a, "instance") catch return;
-    fs.write(p, "") catch {};
+    fs.write(io, p, "") catch {};
 }
 
-pub fn clearHeartbeat(a: std.mem.Allocator) void {
+pub fn clearHeartbeat(a: std.mem.Allocator, io: std.Io) void {
     const p = path(a, "instance") catch return;
-    fs.remove(p);
+    fs.remove(io, p);
 }
 
-pub fn send(a: std.mem.Allocator, cmd: Command) !void {
+pub fn send(a: std.mem.Allocator, io: std.Io, cmd: Command) !void {
     const p = try path(a, "command.json");
     const text = try std.json.Stringify.valueAlloc(a, cmd, .{});
-    try fs.writeAtomic(a, p, text);
+    try fs.writeAtomic(a, io, p, text);
 }
 
 /// Strings live in `a`.
-pub fn receive(a: std.mem.Allocator) ?Command {
+pub fn receive(a: std.mem.Allocator, io: std.Io) ?Command {
     const p = path(a, "command.json") catch return null;
-    const bytes = fs.readAlloc(a, p, 1 << 16) catch return null;
-    fs.remove(p);
+    const bytes = fs.readAlloc(a, io, p, 1 << 16) catch return null;
+    fs.remove(io, p);
     return std.json.parseFromSliceLeaky(Command, a, bytes, .{ .allocate = .alloc_always }) catch null;
 }
 

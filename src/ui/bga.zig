@@ -320,7 +320,7 @@ pub const Bga = struct {
         return g.textureFromPixels(px, w, h, @intCast(w * 4));
     }
 
-    pub fn create(gpa: std.mem.Allocator, g: *gfx.Gfx, s: *Session) ?*Bga {
+    pub fn create(gpa: std.mem.Allocator, io: std.Io, g: *gfx.Gfx, s: *Session) ?*Bga {
         if (s.chart.bga.len == 0 or s.chart.bmps.len == 0) return null;
         const b = gpa.create(Bga) catch return null;
         const media = gpa.alloc(Media, s.chart.bmps.len) catch {
@@ -342,7 +342,7 @@ pub const Bga = struct {
         for (s.chart.bmps, 0..) |rel, i| {
             if (!used[i]) continue;
             _ = arena.reset(.retain_capacity);
-            const path = (fs.resolveAsset(a, dir, rel, exts) catch null) orelse continue;
+            const path = (fs.resolveAsset(a, io, dir, rel, exts) catch null) orelse continue;
             if (isVideo(path)) {
                 g.prepareUpscaler();
                 const v = Video.open(gpa, g, path) catch |e| {
@@ -351,7 +351,7 @@ pub const Bga = struct {
                 };
                 media[i] = .{ .video = v };
             } else {
-                const bytes = fs.readAlloc(a, path, 64 << 20) catch continue;
+                const bytes = fs.readAlloc(a, io, path, 64 << 20) catch continue;
                 if (loadImage(g, bytes)) |t| media[i] = .{ .image = t };
             }
         }

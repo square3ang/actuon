@@ -199,8 +199,8 @@ pub const Session = struct {
     /// shortcut: judging lags the clock by this, so later events count from arrival; raise it if SDL input on slow frames loses timing.
     const input_grace_us = 20_000;
 
-    pub fn parseFile(gpa: std.mem.Allocator, path: []const u8, selected: ?[]const i32, seed: u64) !Chart {
-        const data = try fs.readAlloc(gpa, path, 1 << 28);
+    pub fn parseFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8, selected: ?[]const i32, seed: u64) !Chart {
+        const data = try fs.readAlloc(gpa, io, path, 1 << 28);
         defer gpa.free(data);
         return parseBytes(gpa, path, data, selected, seed);
     }
@@ -212,6 +212,7 @@ pub const Session = struct {
 
     const LoadJob = struct {
         gpa: std.mem.Allocator,
+        io: std.Io,
         dir: []const u8,
         chart: *const Chart,
         samples: []decode.Sample,
@@ -231,9 +232,9 @@ pub const Session = struct {
             const i = job.next.fetchAdd(1, .monotonic);
             if (i >= job.chart.wavs.len) return 0;
             defer _ = job.progress.fetchAdd(1, .monotonic);
-            const p = fs.resolveAsset(arena.allocator(), job.dir, job.chart.wavs[i], audio_exts) catch null;
+            const p = fs.resolveAsset(arena.allocator(), job.io, job.dir, job.chart.wavs[i], audio_exts) catch null;
             if (p) |path| {
-                const bytes = fs.readAlloc(job.gpa, path, 1 << 29) catch {
+                const bytes = fs.readAlloc(job.gpa, job.io, path, 1 << 29) catch {
                     _ = job.failed.fetchAdd(1, .monotonic);
                     continue;
                 };
@@ -253,8 +254,8 @@ pub const Session = struct {
     }
 
     /// Blocking: runs on a loader thread.
-    pub fn create(gpa: std.mem.Allocator, engine: *engine_mod.Engine, cfg: *const config.Config, params: Params, progress: *std.atomic.Value(usize), total: *std.atomic.Value(usize), parsed: *Parsed) !*Session {
-        var chart = try parseFile(gpa, params.path, params.selected_random orelse if (params.replay) |r| r.bms_random else null, params.rec.seed);
+    pub fn create(gpa: std.mem.Allocator, io: std.Io, engine: *engine_mod.Engine, cfg: *const config.Config, params: Params, progress: *std.atomic.Value(usize), total: *std.atomic.Value(usize), parsed: *Parsed) !*Session {
+        var chart = try parseFile(gpa, io, params.path, params.selected_random orelse if (params.replay) |r| r.bms_random else null, params.rec.seed);
         errdefer chart.deinit();
         var played = params;
         if (!core.options.applyLnMode(&chart, params.rec.ln_mode)) played.rec.ln_mode = .ln;
@@ -282,7 +283,7 @@ pub const Session = struct {
 
         var next: std.atomic.Value(usize) = .init(0);
         var failed: std.atomic.Value(u32) = .init(0);
-        var job: LoadJob = .{ .gpa = gpa, .dir = dir, .chart = &chart, .samples = samples, .rate = decodeRate(engine.rate, params), .next = &next, .progress = progress, .failed = &failed };
+        var job: LoadJob = .{ .gpa = gpa, .io = io, .dir = dir, .chart = &chart, .samples = samples, .rate = decodeRate(engine.rate, params), .next = &next, .progress = progress, .failed = &failed };
         var threads: [31]?*c.SDL_Thread = @splat(null);
         const extra: usize = @intCast(std.math.clamp(c.SDL_GetNumLogicalCPUCores() - 1, 0, threads.len));
         for (threads[0..extra]) |*t| t.* = c.SDL_CreateThread(loadWorker, "load", &job);

@@ -1,6 +1,5 @@
 //! HTTP GET/POST over std.http; the only place the rest of the code touches the HTTP client.
 const std = @import("std");
-const fs = @import("fs.zig");
 
 pub const Response = struct { status: u16, body: []u8 };
 
@@ -9,14 +8,14 @@ const max_body: usize = 64 << 20;
 /// The largest package download.zig would unpack.
 const max_download: u64 = 8 << 30;
 
-pub fn request(gpa: std.mem.Allocator, method: std.http.Method, url: []const u8, payload: ?[]const u8, headers: []const std.http.Header) !Response {
-    var c = client(gpa);
+pub fn request(gpa: std.mem.Allocator, io: std.Io, method: std.http.Method, url: []const u8, payload: ?[]const u8, headers: []const std.http.Header) !Response {
+    var c = client(gpa, io);
     defer c.deinit();
     return send(&c, gpa, method, url, payload, headers);
 }
 
-pub fn client(gpa: std.mem.Allocator) std.http.Client {
-    return .{ .allocator = gpa, .io = fs.io };
+pub fn client(gpa: std.mem.Allocator, io: std.Io) std.http.Client {
+    return .{ .allocator = gpa, .io = io };
 }
 
 pub fn send(c: *std.http.Client, gpa: std.mem.Allocator, method: std.http.Method, url: []const u8, payload: ?[]const u8, headers: []const std.http.Header) !Response {
@@ -77,8 +76,8 @@ fn sendCapped(c: *std.http.Client, gpa: std.mem.Allocator, method: std.http.Meth
     return .{ .status = @backingInt(res.status), .body = try body.out.toOwnedSlice() };
 }
 
-pub fn get(gpa: std.mem.Allocator, url: []const u8) ![]u8 {
-    const r = try request(gpa, .GET, url, null, &.{});
+pub fn get(gpa: std.mem.Allocator, io: std.Io, url: []const u8) ![]u8 {
+    const r = try request(gpa, io, .GET, url, null, &.{});
     if (r.status >= 400) {
         gpa.free(r.body);
         return error.HttpStatus;
@@ -94,17 +93,17 @@ pub const Progress = struct {
     cancel: std.atomic.Value(bool) = .init(false),
 };
 
-pub fn download(gpa: std.mem.Allocator, url: []const u8, path: []const u8, progress: *Progress) !void {
-    return downloadCapped(gpa, url, path, progress, max_download);
+pub fn download(gpa: std.mem.Allocator, io: std.Io, url: []const u8, path: []const u8, progress: *Progress) !void {
+    return downloadCapped(gpa, io, url, path, progress, max_download);
 }
 
-fn downloadCapped(gpa: std.mem.Allocator, url: []const u8, path: []const u8, progress: *Progress, limit: u64) !void {
-    var c = client(gpa);
+fn downloadCapped(gpa: std.mem.Allocator, io: std.Io, url: []const u8, path: []const u8, progress: *Progress, limit: u64) !void {
+    var c = client(gpa, io);
     defer c.deinit();
-    const file = try std.Io.Dir.cwd().createFile(fs.io, path, .{});
-    defer file.close(fs.io);
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
     var buf: [1 << 16]u8 = undefined;
-    var w = file.writer(fs.io, &buf);
+    var w = file.writer(io, &buf);
     var req = try c.request(.GET, try std.Uri.parse(url), .{ .redirect_behavior = @fromBackingInt(@intCast(3)), .headers = .{ .accept_encoding = .omit } });
     defer req.deinit();
     try req.sendBodiless();
@@ -143,16 +142,16 @@ pub fn join(a: std.mem.Allocator, base: []const u8, ref: []const u8) ![]u8 {
 
 const TestPeer = struct {
     fn run(s: *std.Io.net.Server, body: []const u8) void {
-        const stream = s.accept(fs.io) catch return;
-        defer stream.close(fs.io);
+        const stream = s.accept(std.testing.io) catch return;
+        defer stream.close(std.testing.io);
         var in_buf: [1024]u8 = undefined;
-        var reader = stream.reader(fs.io, &in_buf);
+        var reader = stream.reader(std.testing.io, &in_buf);
         while (true) {
             const line = reader.interface.takeDelimiterInclusive('\n') catch return;
             if (line.len == 2) break;
         }
         var out_buf: [256]u8 = undefined;
-        var writer = stream.writer(fs.io, &out_buf);
+        var writer = stream.writer(std.testing.io, &out_buf);
         writer.interface.print("HTTP/1.1 200 OK\r\ncontent-length: {d}\r\nconnection: close\r\n\r\n", .{body.len}) catch return;
         writer.interface.writeAll(body) catch return;
         writer.interface.flush() catch return;
@@ -165,12 +164,12 @@ test "an answer past the limit is refused, and one at the limit is kept" {
     const body: [100]u8 = @splat('x');
     var url_buf: [64]u8 = undefined;
     for ([_]usize{ 99, 100 }) |limit| {
-        var server = try address.listen(fs.io, .{ .reuse_address = true });
-        defer server.deinit(fs.io);
+        var server = try address.listen(std.testing.io, .{ .reuse_address = true });
+        defer server.deinit(std.testing.io);
         const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{server.socket.address.getPort()});
         const thread = try std.Thread.spawn(.{}, TestPeer.run, .{ &server, &body });
         defer thread.join();
-        var c = client(a);
+        var c = client(a, std.testing.io);
         defer c.deinit();
         const got = sendCapped(&c, a, .GET, url, null, &.{}, limit);
         if (limit == 99) {
@@ -186,8 +185,8 @@ test "an answer past the limit is refused, and one at the limit is kept" {
 test "a download past the limit stops" {
     const a = std.testing.allocator;
     const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
-    var server = try address.listen(fs.io, .{ .reuse_address = true });
-    defer server.deinit(fs.io);
+    var server = try address.listen(std.testing.io, .{ .reuse_address = true });
+    defer server.deinit(std.testing.io);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [128]u8 = undefined;
@@ -198,28 +197,28 @@ test "a download past the limit stops" {
     const thread = try std.Thread.spawn(.{}, TestPeer.run, .{ &server, &body });
     defer thread.join();
     var progress: Progress = .{};
-    try std.testing.expectError(error.TooLarge, downloadCapped(a, url, path, &progress, 99));
+    try std.testing.expectError(error.TooLarge, downloadCapped(a, std.testing.io, url, path, &progress, 99));
 }
 
 test "a request sends its headers and does not follow a redirect with them" {
     const a = std.testing.allocator;
     const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
-    var server = try address.listen(fs.io, .{ .reuse_address = true });
-    defer server.deinit(fs.io);
+    var server = try address.listen(std.testing.io, .{ .reuse_address = true });
+    defer server.deinit(std.testing.io);
     const Peer = struct {
         fn run(s: *std.Io.net.Server, seen: *[1024]u8, len: *usize, accepted: *usize) void {
-            const stream = s.accept(fs.io) catch return;
-            defer stream.close(fs.io);
+            const stream = s.accept(std.testing.io) catch return;
+            defer stream.close(std.testing.io);
             accepted.* += 1;
             var in_buf: [1024]u8 = undefined;
-            var reader = stream.reader(fs.io, &in_buf);
+            var reader = stream.reader(std.testing.io, &in_buf);
             while (!std.mem.endsWith(u8, seen[0..len.*], "\r\n\r\n")) {
                 const line = reader.interface.takeDelimiterInclusive('\n') catch return;
                 @memcpy(seen[len.*..][0..line.len], line);
                 len.* += line.len;
             }
             var out_buf: [256]u8 = undefined;
-            var writer = stream.writer(fs.io, &out_buf);
+            var writer = stream.writer(std.testing.io, &out_buf);
             writer.interface.writeAll("HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:1/x\r\ncontent-length: 0\r\nconnection: close\r\n\r\n") catch return;
             writer.interface.flush() catch return;
         }
@@ -230,7 +229,7 @@ test "a request sends its headers and does not follow a redirect with them" {
     const thread = try std.Thread.spawn(.{}, Peer.run, .{ &server, &seen, &len, &accepted });
     var url_buf: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{server.socket.address.getPort()});
-    const r = try request(a, .GET, url, null, &.{.{ .name = "Authorization", .value = "Bearer t" }});
+    const r = try request(a, std.testing.io, .GET, url, null, &.{.{ .name = "Authorization", .value = "Bearer t" }});
     defer a.free(r.body);
     thread.join();
     try std.testing.expectEqual(@as(u16, 302), r.status);
@@ -241,16 +240,16 @@ test "a request sends its headers and does not follow a redirect with them" {
 test "one client sends two requests over one connection" {
     const a = std.testing.allocator;
     const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
-    var server = try address.listen(fs.io, .{ .reuse_address = true });
-    defer server.deinit(fs.io);
+    var server = try address.listen(std.testing.io, .{ .reuse_address = true });
+    defer server.deinit(std.testing.io);
     const Peer = struct {
         fn run(s: *std.Io.net.Server, answered: *usize) void {
-            const stream = s.accept(fs.io) catch return;
-            defer stream.close(fs.io);
+            const stream = s.accept(std.testing.io) catch return;
+            defer stream.close(std.testing.io);
             var in_buf: [1024]u8 = undefined;
-            var reader = stream.reader(fs.io, &in_buf);
+            var reader = stream.reader(std.testing.io, &in_buf);
             var out_buf: [256]u8 = undefined;
-            var writer = stream.writer(fs.io, &out_buf);
+            var writer = stream.writer(std.testing.io, &out_buf);
             while (answered.* < 2) {
                 while (true) {
                     const line = reader.interface.takeDelimiterInclusive('\n') catch return;
@@ -267,7 +266,7 @@ test "one client sends two requests over one connection" {
     defer thread.join();
     var url_buf: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{server.socket.address.getPort()});
-    var c = client(a);
+    var c = client(a, std.testing.io);
     defer c.deinit();
     for (0..2) |_| {
         const r = try send(&c, a, .GET, url, null, &.{});
@@ -299,7 +298,7 @@ pub const WebSocket = struct {
     /// `ws` must stay where it is until `close`: the request holds the connection.
     pub fn open(ws: *WebSocket, c: *std.http.Client, url: []const u8, auth: []const std.http.Header) !void {
         var raw: [16]u8 = undefined;
-        fs.io.random(&raw);
+        c.io.random(&raw);
         var key: [24]u8 = undefined;
         _ = std.base64.standard.Encoder.encode(&key, &raw);
         var headers: [4]std.http.Header = undefined;
@@ -328,7 +327,7 @@ pub const WebSocket = struct {
     pub fn send(ws: *WebSocket, text: []const u8) !void {
         const conn = ws.req.connection.?;
         var mask: [4]u8 = undefined;
-        fs.io.random(&mask);
+        ws.req.client.io.random(&mask);
         try writeFrame(conn.writer(), 0x1, text, mask);
         try conn.flush();
     }
@@ -341,7 +340,7 @@ pub const WebSocket = struct {
                 0x1, 0x2 => return f.payload,
                 0x9 => {
                     var mask: [4]u8 = undefined;
-                    fs.io.random(&mask);
+                    ws.req.client.io.random(&mask);
                     try writeFrame(conn.writer(), 0xA, f.payload, mask);
                     try conn.flush();
                 },
@@ -434,10 +433,10 @@ test "a client frame is masked, and a server frame too large, split or masked is
 
 const WebSocketPeer = struct {
     fn run(s: *std.Io.net.Server, ponged: *bool) void {
-        const stream = s.accept(fs.io) catch return;
-        defer stream.close(fs.io);
+        const stream = s.accept(std.testing.io) catch return;
+        defer stream.close(std.testing.io);
         var in_buf: [1024]u8 = undefined;
-        var reader = stream.reader(fs.io, &in_buf);
+        var reader = stream.reader(std.testing.io, &in_buf);
         var key_buf: [24]u8 = undefined;
         while (true) {
             const line = reader.interface.takeDelimiterInclusive('\n') catch return;
@@ -445,7 +444,7 @@ const WebSocketPeer = struct {
             if (std.ascii.startsWithIgnoreCase(line, "sec-websocket-key: ") and line.len == 19 + 24 + 2) key_buf = line[19..][0..24].*;
         }
         var out_buf: [256]u8 = undefined;
-        var writer = stream.writer(fs.io, &out_buf);
+        var writer = stream.writer(std.testing.io, &out_buf);
         const w = &writer.interface;
         w.print("HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: {s}\r\n\r\n", .{&acceptKey(&key_buf)}) catch return;
         w.flush() catch return;
@@ -472,13 +471,13 @@ const WebSocketPeer = struct {
 test "a WebSocket opens over the HTTP client, sends, receives and answers a ping" {
     const a = std.testing.allocator;
     const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
-    var server = try address.listen(fs.io, .{ .reuse_address = true });
-    defer server.deinit(fs.io);
+    var server = try address.listen(std.testing.io, .{ .reuse_address = true });
+    defer server.deinit(std.testing.io);
     var url_buf: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/play", .{server.socket.address.getPort()});
     var ponged = false;
     const thread = try std.Thread.spawn(.{}, WebSocketPeer.run, .{ &server, &ponged });
-    var c = client(a);
+    var c = client(a, std.testing.io);
     defer c.deinit();
     var ws: WebSocket = undefined;
     try ws.open(&c, url, &.{});

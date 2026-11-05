@@ -41,7 +41,7 @@ pub fn open(a: *App) void {
     close(a);
     var arena = std.heap.ArenaAllocator.init(a.gpa);
     const al = arena.allocator();
-    const files = skin_mod.allFiles(al) catch &.{};
+    const files = skin_mod.allFiles(al, a.io) catch &.{};
     a.skinslots = .{};
     for (slots, &a.skinslots.choices) |slot, *out| {
         var list: std.ArrayList([]const u8) = .empty;

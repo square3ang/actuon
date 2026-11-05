@@ -433,7 +433,7 @@ fn pollPicker(a: *App) void {
 fn startSync(a: *App, upload: bool) void {
     if (a.set.sync != null) return;
     if (a.cfg.ir_url.len == 0 or a.cfg.ir_token.len == 0) return say(a, "Sign in to an IR server first", .{});
-    a.set.sync = ir.startSync(a.gpa, a.cfg.ir_url, a.cfg.ir_token, upload);
+    a.set.sync = ir.startSync(a.gpa, a.io, a.cfg.ir_url, a.cfg.ir_token, upload);
     if (a.set.sync == null) say(a, "Could not start IR sync", .{});
 }
 
@@ -488,7 +488,7 @@ fn updateLabel(a: *App, buf: []u8) []const u8 {
 
 fn activateUpdate(a: *App) void {
     const j = a.set.update orelse {
-        a.set.update = update.start(a.gpa);
+        a.set.update = update.start(a.gpa, a.io);
         return;
     };
     switch (j.phase.load(.acquire)) {
@@ -509,7 +509,7 @@ fn startAccount(a: *App, it: Item) void {
 }
 
 fn sendAccount(a: *App, name: []const u8, register: bool) void {
-    a.set.account = ir.startAccount(a.gpa, a.cfg.ir_url, name, a.text.items, if (register) .register else .login);
+    a.set.account = ir.startAccount(a.gpa, a.io, a.cfg.ir_url, name, a.text.items, if (register) .register else .login);
     a.text.clearRetainingCapacity();
     if (a.set.account == null) say(a, "Could not reach the IR server", .{});
 }
@@ -686,8 +686,8 @@ fn openDrop(a: *App, it: Item) void {
             labels.append(al, tr("Built-in")) catch return;
             values.append(al, "") catch return;
             const root = skin_mod.skinsDir(al) catch break :fill;
-            fs.mkdirs(root) catch {};
-            for (skin_mod.listSkins(al, root) catch break :fill) |n| {
+            fs.mkdirs(a.io, root) catch {};
+            for (skin_mod.listSkins(al, a.io, root) catch break :fill) |n| {
                 labels.append(al, n) catch return;
                 values.append(al, std.fs.path.join(al, &.{ root, n }) catch return) catch return;
             }
@@ -708,7 +708,7 @@ fn openDrop(a: *App, it: Item) void {
             last = tr("Pick a folder...");
             labels.append(al, tr("From the skin")) catch return;
             values.append(al, "") catch return;
-            const sets = if (it == .bgm_set) skin_sound.musicSets(al, a.cfg.bgm_root) else skin_sound.soundSets(al, a.cfg.sound_root);
+            const sets = if (it == .bgm_set) skin_sound.musicSets(al, a.io, a.cfg.bgm_root) else skin_sound.soundSets(al, a.io, a.cfg.sound_root);
             for (sets) |set| {
                 labels.append(al, std.fmt.allocPrint(al, "{s}/{s}", .{ std.fs.path.basename(std.fs.path.dirname(set) orelse ""), std.fs.path.basename(set) }) catch return) catch return;
                 values.append(al, set) catch return;
@@ -1174,13 +1174,13 @@ fn cycleDevice(a: *App, dir: i32) void {
     say(a, "{s}", .{if (a.cfg.audio_device.len > 0) a.cfg.audio_device else tr("Default")});
 }
 
-const SetList = *const fn (std.mem.Allocator, []const u8) []const []const u8;
+const SetList = *const fn (std.mem.Allocator, std.Io, []const u8) []const []const u8;
 
 fn cycleSet(a: *App, path: *[]const u8, root: []const u8, list: SetList, dir: i32) void {
     var tmp = std.heap.ArenaAllocator.init(a.gpa);
     defer tmp.deinit();
     const al = tmp.allocator();
-    const sets = list(al, root);
+    const sets = list(al, a.io, root);
     if (sets.len == 0) return say(a, "No sets yet: press Enter to pick a folder", .{});
     path.* = a.arena.allocator().dupe(u8, skin_sound.nextSet(path.*, sets, dir)) catch return;
     a.saveConfig();
@@ -1193,7 +1193,7 @@ fn pickSetRoot(a: *App, path: *[]const u8, root: *[]const u8, v: []const u8, lis
     var tmp = std.heap.ArenaAllocator.init(a.gpa);
     defer tmp.deinit();
     const al = tmp.allocator();
-    for (list(al, v)) |set| if (std.mem.startsWith(u8, set, v)) {
+    for (list(al, a.io, v)) |set| if (std.mem.startsWith(u8, set, v)) {
         path.* = a.arena.allocator().dupe(u8, set) catch return;
         a.saveConfig();
         a.refreshBgm();
@@ -1208,8 +1208,8 @@ fn cycleSkin(a: *App, dir: i32) void {
     defer tmp.deinit();
     const al = tmp.allocator();
     const root = skin_mod.skinsDir(al) catch return;
-    fs.mkdirs(root) catch {};
-    const names = skin_mod.listSkins(al, root) catch return;
+    fs.mkdirs(a.io, root) catch {};
+    const names = skin_mod.listSkins(al, a.io, root) catch return;
     if (names.len == 0) return say(a, "No skins yet: put skin folders in {s}", .{root});
     var at: i64 = 0;
     for (names, 1..) |n, i| {
@@ -1442,7 +1442,7 @@ fn commit(a: *App, it: Item) void {
         },
         .ir_rename => {
             if (v.len == 0) return;
-            a.set.account = ir.startAccount(a.gpa, a.cfg.ir_url, v, a.cfg.ir_token, .rename);
+            a.set.account = ir.startAccount(a.gpa, a.io, a.cfg.ir_url, v, a.cfg.ir_token, .rename);
             if (a.set.account == null) say(a, "Could not reach the IR server", .{});
         },
         .ir_signup, .ir_signin => {
@@ -1550,7 +1550,7 @@ fn activate(a: *App, it: Item) void {
             var tmp = std.heap.ArenaAllocator.init(a.gpa);
             defer tmp.deinit();
             const dir = (if (it == .open_skins) skin_mod.skinsDir(tmp.allocator()) else fs.dataDir(tmp.allocator())) catch |e| return say(a, "Could not open the folder: {t}", .{e});
-            fs.openFolder(tmp.allocator(), dir) catch |e| say(a, "Could not open the folder: {t}", .{e});
+            fs.openFolder(tmp.allocator(), a.io, dir) catch |e| say(a, "Could not open the folder: {t}", .{e});
         },
         .bind_4k, .bind_5k, .bind_6k, .bind_7k, .bind_10k, .bind_14k, .bind_9k, .bind_start => {
             s.capture_group = it;

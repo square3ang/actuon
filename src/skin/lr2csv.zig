@@ -7,6 +7,7 @@ const bitfont = @import("bitfont.zig");
 
 const Parser = struct {
     a: std.mem.Allocator,
+    io: std.Io,
     skin: *m.Skin,
     mode: core.types.Mode,
     root: []const u8,
@@ -60,10 +61,10 @@ fn vals(str: []const []const u8) [24]i32 {
 }
 
 fn resolve(p: *Parser, raw: []const u8) ?[]const u8 {
-    return resolvePath(p.a, p.root, raw);
+    return resolvePath(p.a, p.io, p.root, raw);
 }
 
-fn resolvePath(a: std.mem.Allocator, root: []const u8, raw: []const u8) ?[]const u8 {
+fn resolvePath(a: std.mem.Allocator, io: std.Io, root: []const u8, raw: []const u8) ?[]const u8 {
     const norm = a.dupe(u8, raw) catch return null;
     std.mem.replaceScalar(u8, norm, '\\', '/');
     // shortcut: wildcard picks the first match or the #CUSTOMFILE default; a chooser UI can come with skin settings
@@ -74,14 +75,14 @@ fn resolvePath(a: std.mem.Allocator, root: []const u8, raw: []const u8) ?[]const
         if (std.mem.indexOfScalar(u8, rel, '/')) |sl| rel = rel[sl + 1 ..];
     }
     if (fs.climbs(rel) or std.fs.path.isAbsolute(rel)) return null;
-    return walk(a, root, rel);
+    return walk(a, io, root, rel);
 }
 
-pub fn walk(a: std.mem.Allocator, root: []const u8, rel: []const u8) ?[]const u8 {
+pub fn walk(a: std.mem.Allocator, io: std.Io, root: []const u8, rel: []const u8) ?[]const u8 {
     var cur: []const u8 = root;
     var it = std.mem.tokenizeScalar(u8, rel, '/');
     while (it.next()) |seg| {
-        const entries = fs.list(a, cur) catch return null;
+        const entries = fs.list(a, io, cur) catch return null;
         var found: ?[]const u8 = null;
         if (std.mem.indexOfScalar(u8, seg, '*')) |star| {
             const pre = seg[0..star];
@@ -262,7 +263,7 @@ fn line(p: *Parser, raw: []const u8) anyerror!void {
         try p.images.append(p.a, if (str.len > 1) resolve(p, str[1]) else null);
     } else if (eq(cmd, "LR2FONT")) {
         // shortcut: only unpacked .lr2font files, as in beatoraja; a skin's encrypted .dxa archives get the built-in font.
-        try p.fonts.append(p.a, if (str.len > 1) if (resolve(p, str[1])) |path| bitfont.loadCapped(p.a, path, &p.fonts_loaded) else null else null);
+        try p.fonts.append(p.a, if (str.len > 1) if (resolve(p, str[1])) |path| bitfont.loadCapped(p.a, p.io, path, &p.fonts_loaded) else null else null);
     } else if (eq(cmd, "SRC_IMAGE")) {
         p.current = null;
         try begin(p, runtimeImage(v[2]) orelse .{ .kind = .image, .src = srcOf(v) });
@@ -349,33 +350,33 @@ fn line(p: *Parser, raw: []const u8) anyerror!void {
     }
 }
 
-fn readText(a: std.mem.Allocator, path: []const u8) ![]const u8 {
-    const bytes = try fs.readAlloc(a, path, 1 << 24);
+fn readText(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
+    const bytes = try fs.readAlloc(a, io, path, 1 << 24);
     return if (std.unicode.utf8ValidateSlice(bytes)) bytes else core.encoding.toUtf8(a, bytes, .sjis);
 }
 
 pub const CustomOption = struct { title: []const u8, items: []const []const u8 };
 
 /// #IF is ignored: a chooser shows every #CUSTOMOPTION.
-pub fn customOptions(a: std.mem.Allocator, path: []const u8) ![]const CustomOption {
+pub fn customOptions(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]const CustomOption {
     var out: std.ArrayList(CustomOption) = .empty;
     var includes: u32 = 0;
-    try scanOptions(a, skinRoot(path), path, &out, 0, &includes);
+    try scanOptions(a, io, skinRoot(path), path, &out, 0, &includes);
     return out.items;
 }
 
-fn scanOptions(a: std.mem.Allocator, root: []const u8, path: []const u8, out: *std.ArrayList(CustomOption), depth: u32, includes: *u32) anyerror!void {
-    var lines = std.mem.splitScalar(u8, try readText(a, path), '\n');
+fn scanOptions(a: std.mem.Allocator, io: std.Io, root: []const u8, path: []const u8, out: *std.ArrayList(CustomOption), depth: u32, includes: *u32) anyerror!void {
+    var lines = std.mem.splitScalar(u8, try readText(a, io, path), '\n');
     while (lines.next()) |raw| {
         const text = std.mem.trimEnd(u8, raw, " \r\t");
         var fields = std.mem.splitScalar(u8, text, ',');
         const cmd = fields.next().?;
         if (std.ascii.eqlIgnoreCase(cmd, "#INCLUDE")) {
             if (depth > 8) continue;
-            const inc = resolvePath(a, root, fields.next() orelse continue) orelse continue;
+            const inc = resolvePath(a, io, root, fields.next() orelse continue) orelse continue;
             includes.* += 1;
             if (includes.* > max_includes) return error.BadInclude;
-            try scanOptions(a, root, inc, out, depth + 1, includes);
+            try scanOptions(a, io, root, inc, out, depth + 1, includes);
         } else if (std.ascii.eqlIgnoreCase(cmd, "#CUSTOMOPTION")) {
             const title = fields.next() orelse continue;
             _ = fields.next() orelse continue;
@@ -390,7 +391,7 @@ fn scanOptions(a: std.mem.Allocator, root: []const u8, path: []const u8, out: *s
 }
 
 fn runFile(p: *Parser, path: []const u8) !void {
-    const text = try readText(p.a, path);
+    const text = try readText(p.a, p.io, path);
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |l| try line(p, l);
 }
@@ -401,9 +402,9 @@ pub fn skinRoot(path: []const u8) []const u8 {
     return std.fs.path.dirname(d) orelse d;
 }
 
-pub fn load(skin: *m.Skin, path: []const u8, mode: core.types.Mode, resolver: *const fn (i32) bool, conf: jsonskin.Conf) ![]const ?[]const u8 {
+pub fn load(skin: *m.Skin, io: std.Io, path: []const u8, mode: core.types.Mode, resolver: *const fn (i32) bool, conf: jsonskin.Conf) ![]const ?[]const u8 {
     const a = skin.arena.allocator();
-    var p: Parser = .{ .a = a, .skin = skin, .mode = mode, .root = skinRoot(path), .resolver = resolver, .conf = conf };
+    var p: Parser = .{ .a = a, .io = io, .skin = skin, .mode = mode, .root = skinRoot(path), .resolver = resolver, .conf = conf };
     try runFile(&p, path);
     for (p.objects.items, p.keys.items) |*o, k| o.keys = k.items;
     if (p.has_judge) {
@@ -433,12 +434,12 @@ test "a saved pick selects its #CUSTOMOPTION item, includes too" {
     defer tmp.cleanup();
     const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     const play = try std.fs.path.join(a, &.{ root, "play" });
-    try fs.mkdirs(play);
+    try fs.mkdirs(std.testing.io, play);
     const path = try std.fs.path.join(a, &.{ play, "s.lr2skin" });
-    try fs.write(path, "#CUSTOMOPTION,T,900,A,B,C,\r\n#INCLUDE,LR2files\\Theme\\x\\play\\i.csv\r\n");
-    try fs.write(try std.fs.path.join(a, &.{ play, "i.csv" }), "#CUSTOMOPTION,U,910,X,Y\n");
+    try fs.write(std.testing.io, path, "#CUSTOMOPTION,T,900,A,B,C,\r\n#INCLUDE,LR2files\\Theme\\x\\play\\i.csv\r\n");
+    try fs.write(std.testing.io, try std.fs.path.join(a, &.{ play, "i.csv" }), "#CUSTOMOPTION,U,910,X,Y\n");
 
-    const got = try customOptions(a, path);
+    const got = try customOptions(a, std.testing.io, path);
     try std.testing.expectEqual(@as(usize, 2), got.len);
     try std.testing.expectEqualStrings("T", got[0].title);
     try std.testing.expectEqual(@as(usize, 3), got[0].items.len);
@@ -453,7 +454,7 @@ test "a saved pick selects its #CUSTOMOPTION item, includes too" {
             return false;
         }
     }.f;
-    _ = try load(&skin, path, .beat7, &none, conf);
+    _ = try load(&skin, std.testing.io, path, .beat7, &none, conf);
     try std.testing.expect(skin.enabled.contains(902));
     try std.testing.expect(!skin.enabled.contains(900));
     try std.testing.expect(skin.enabled.contains(910));
@@ -477,13 +478,13 @@ test "paths that climb out of the skin are refused" {
     defer tmp.cleanup();
     const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     const inner = try std.fs.path.join(a, &.{ root, "skin" });
-    try fs.mkdirs(inner);
-    try fs.write(try std.fs.path.join(a, &.{ inner, "in.png" }), "");
-    try fs.write(try std.fs.path.join(a, &.{ root, "out.png" }), "");
-    try std.testing.expect(resolvePath(a, inner, "LR2files\\Theme\\x\\in.png") != null);
-    try std.testing.expectEqual(@as(?[]const u8, null), resolvePath(a, inner, "LR2files\\Theme\\x\\..\\out.png"));
-    try std.testing.expectEqual(@as(?[]const u8, null), resolvePath(a, inner, "../out.png"));
-    try std.testing.expectEqual(@as(?[]const u8, null), resolvePath(a, inner, "/etc/hostname"));
+    try fs.mkdirs(std.testing.io, inner);
+    try fs.write(std.testing.io, try std.fs.path.join(a, &.{ inner, "in.png" }), "");
+    try fs.write(std.testing.io, try std.fs.path.join(a, &.{ root, "out.png" }), "");
+    try std.testing.expect(resolvePath(a, std.testing.io, inner, "LR2files\\Theme\\x\\in.png") != null);
+    try std.testing.expectEqual(@as(?[]const u8, null), resolvePath(a, std.testing.io, inner, "LR2files\\Theme\\x\\..\\out.png"));
+    try std.testing.expectEqual(@as(?[]const u8, null), resolvePath(a, std.testing.io, inner, "../out.png"));
+    try std.testing.expectEqual(@as(?[]const u8, null), resolvePath(a, std.testing.io, inner, "/etc/hostname"));
 }
 
 fn noneEnabled(_: i32) bool {
@@ -498,17 +499,17 @@ test "a skin that includes itself twice is refused" {
     defer tmp.cleanup();
     const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     const play = try std.fs.path.join(a, &.{ root, "play" });
-    try fs.mkdirs(play);
+    try fs.mkdirs(std.testing.io, play);
     const path = try std.fs.path.join(a, &.{ play, "s.lr2skin" });
     const once = "#INCLUDE,LR2files\\Theme\\x\\play\\s.lr2skin\n";
-    try fs.write(path, once ++ once);
+    try fs.write(std.testing.io, path, once ++ once);
     var skin: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
     defer skin.arena.deinit();
-    try std.testing.expectError(error.BadInclude, load(&skin, path, .beat7, &noneEnabled, .{}));
-    try std.testing.expectError(error.BadInclude, customOptions(a, path));
+    try std.testing.expectError(error.BadInclude, load(&skin, std.testing.io, path, .beat7, &noneEnabled, .{}));
+    try std.testing.expectError(error.BadInclude, customOptions(a, std.testing.io, path));
     // One self-include is only a long chain, which depth ends.
-    try fs.write(path, once);
-    _ = try load(&skin, path, .beat7, &noneEnabled, .{});
+    try fs.write(std.testing.io, path, once);
+    _ = try load(&skin, std.testing.io, path, .beat7, &noneEnabled, .{});
 }
 
 test "hostile numbers in a CSV skin are bounded" {
@@ -519,7 +520,7 @@ test "hostile numbers in a CSV skin are bounded" {
     defer tmp.cleanup();
     const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     const path = try std.fs.path.join(a, &.{ root, "s.lr2skin" });
-    try fs.write(path,
+    try fs.write(std.testing.io, path,
         \\#RESOLUTION
         \\#IF,-2147483648
         \\#ENDIF
@@ -531,7 +532,7 @@ test "hostile numbers in a CSV skin are bounded" {
     );
     var skin: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
     defer skin.arena.deinit();
-    _ = try load(&skin, path, .beat7, &noneEnabled, .{});
+    _ = try load(&skin, std.testing.io, path, .beat7, &noneEnabled, .{});
     try std.testing.expectEqual(@as(i32, m.max_div), skin.objects[0].src.divx);
     try std.testing.expect(skin.objects[0].digits <= 33); // 32 and a sign
     try std.testing.expectEqual(@as(i32, m.max_parts), skin.objects[1].parts);

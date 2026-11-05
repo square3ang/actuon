@@ -41,6 +41,7 @@ pub const Pending = struct {
 
 pub const App = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     /// Shared with main, so what menus allocate here is freed with what main allocated.
     arena: *std.heap.ArenaAllocator,
     cfg: config.Config,
@@ -192,7 +193,7 @@ pub const App = struct {
 
     fn skinDir(a: *App, slot: config.SkinSlot) []const u8 {
         const root = a.cfg.skinFor(slot);
-        const st = fs.stat(root) orelse return root;
+        const st = fs.stat(a.io, root) orelse return root;
         return if (st.is_dir) root else std.fs.path.dirname(root) orelse root;
     }
 
@@ -211,7 +212,7 @@ pub const App = struct {
     }
 
     fn systemSound(a: *App, al: std.mem.Allocator, name: []const u8) ?*skin_sound.Entry {
-        if (a.cfg.sound_path.len > 0) if (skin_sound.findIn(al, a.cfg.sound_path, name)) |p| return a.sounds.entry(p);
+        if (a.cfg.sound_path.len > 0) if (skin_sound.findIn(al, a.io, a.cfg.sound_path, name)) |p| return a.sounds.entry(p);
         // A built-in song select borrows a full skin's sounds; a skin picked for one other screen keeps its own.
         for (std.enums.values(config.SkinSlot)) |slot| {
             if (slot != .select and a.cfg.skins.get(slot).len > 0) continue;
@@ -221,7 +222,7 @@ pub const App = struct {
     }
 
     fn musicSound(a: *App, al: std.mem.Allocator, slot: config.SkinSlot, name: []const u8) ?*skin_sound.Entry {
-        if (a.cfg.bgm_path.len > 0) if (skin_sound.findIn(al, a.cfg.bgm_path, name)) |p| return a.sounds.entry(p);
+        if (a.cfg.bgm_path.len > 0) if (skin_sound.findIn(al, a.io, a.cfg.bgm_path, name)) |p| return a.sounds.entry(p);
         return a.skinSound(al, slot, name);
     }
 
@@ -237,7 +238,7 @@ pub const App = struct {
         if (dir.len == 0) return null;
         for ([_][]const u8{ "Sound", "Sound/bgm", "bgm" }) |sub| {
             const folder = std.fs.path.join(al, &.{ dir, sub }) catch return null;
-            if (skin_sound.findIn(al, folder, name)) |p| return a.sounds.entry(p);
+            if (skin_sound.findIn(al, a.io, folder, name)) |p| return a.sounds.entry(p);
         }
         return null;
     }
@@ -340,7 +341,7 @@ pub const App = struct {
 
     fn loadThread(ud: ?*anyopaque) callconv(.c) c_int {
         const a: *App = @ptrCast(@alignCast(ud));
-        a.load_result = Session.create(a.gpa, a.engine, &a.cfg, a.load_params, &a.load_progress, &a.load_total, &a.load_parsed) catch |e| blk: {
+        a.load_result = Session.create(a.gpa, a.io, a.engine, &a.cfg, a.load_params, &a.load_progress, &a.load_total, &a.load_parsed) catch |e| blk: {
             std.log.err("load failed: {t}", .{e});
             break :blk null;
         };
@@ -353,7 +354,7 @@ pub const App = struct {
         @memcpy(a.preview_buf[0..file.len], file);
         a.preview_path = a.preview_buf[0..file.len];
         a.preview_measure = measure;
-        a.preview_mtime = if (fs.stat(a.preview_path)) |st| st.mtime else 0;
+        a.preview_mtime = if (fs.stat(a.io, a.preview_path)) |st| st.mtime else 0;
         a.preview_pending = true;
     }
 
@@ -363,7 +364,7 @@ pub const App = struct {
         defer tmp.deinit();
         var start_us: i64 = 0;
         if (a.preview_measure > 0) {
-            if (Session.parseFile(a.gpa, a.preview_path, null, 0)) |parsed| {
+            if (Session.parseFile(a.gpa, a.io, a.preview_path, null, 0)) |parsed| {
                 var ch = parsed;
                 defer ch.deinit();
                 start_us = editor.measureStart(&ch, a.preview_measure);
@@ -379,8 +380,8 @@ pub const App = struct {
         var tmp = std.heap.ArenaAllocator.init(a.gpa);
         defer tmp.deinit();
         const al = tmp.allocator();
-        editor.heartbeat(al);
-        if (editor.receive(al)) |cmd| {
+        editor.heartbeat(al, a.io);
+        if (editor.receive(al, a.io)) |cmd| {
             if (a.session != null and a.scene == .play) {
                 const s = a.session.?;
                 a.finishPlay(s.snapshot(), false);
@@ -391,7 +392,7 @@ pub const App = struct {
             } else a.startPreview(cmd.file, cmd.measure);
         }
         if (a.preview_path.len > 0 and a.load_thread == null) {
-            if (fs.stat(a.preview_path)) |st| if (st.mtime != a.preview_mtime) {
+            if (fs.stat(a.io, a.preview_path)) |st| if (st.mtime != a.preview_mtime) {
                 a.preview_mtime = st.mtime;
                 if (a.session != null and a.scene == .play) {
                     const s = a.session.?;
@@ -432,7 +433,7 @@ pub const App = struct {
         defer tmp.deinit();
         const al = tmp.allocator();
         const dir = std.fs.path.dirname(a.load_params.path) orelse ".";
-        const path = (fs.resolveAsset(al, dir, ch.stagefile, &.{ "png", "jpg", "jpeg", "bmp", "gif", "tga" }) catch null) orelse return;
+        const path = (fs.resolveAsset(al, a.io, dir, ch.stagefile, &.{ "png", "jpg", "jpeg", "bmp", "gif", "tga" }) catch null) orelse return;
         a.stagefile_path = a.gpa.dupe(u8, path) catch return;
         a.stagefile_done.store(false, .release);
         a.stagefile_thread = c.SDL_CreateThread(stagefileThread, "stagefile", a);
@@ -446,8 +447,8 @@ pub const App = struct {
         const dir = std.fs.path.dirname(a.load_params.path) orelse ".";
         for ([_]struct { []const u8, *?*gfx.Texture }{ .{ ch.backbmp, &a.skin_state.backbmp }, .{ ch.banner, &a.skin_state.banner } }) |img| {
             if (img[0].len == 0) continue;
-            const path = (fs.resolveAsset(al, dir, img[0], &.{ "png", "jpg", "jpeg", "bmp", "gif", "tga" }) catch null) orelse continue;
-            const bytes = fs.readAlloc(al, path, 1 << 26) catch continue;
+            const path = (fs.resolveAsset(al, a.io, dir, img[0], &.{ "png", "jpg", "jpeg", "bmp", "gif", "tga" }) catch null) orelse continue;
+            const bytes = fs.readAlloc(al, a.io, path, 1 << 26) catch continue;
             if (!gfx.imageFits(bytes, gfx.max_chart_image_px)) continue;
             img[1].* = gfx.loadTexture(&a.g, path, bytes);
         }
@@ -456,7 +457,7 @@ pub const App = struct {
     fn stagefileThread(ud: ?*anyopaque) callconv(.c) c_int {
         const a: *App = @ptrCast(@alignCast(ud));
         defer a.stagefile_done.store(true, .release);
-        const bytes = fs.readAlloc(a.gpa, a.stagefile_path, 1 << 26) catch return 0;
+        const bytes = fs.readAlloc(a.gpa, a.io, a.stagefile_path, 1 << 26) catch return 0;
         defer a.gpa.free(bytes);
         if (!gfx.imageFits(bytes, gfx.max_chart_image_px)) return 0;
         var n: c_int = 0;
@@ -569,11 +570,11 @@ pub const App = struct {
             return;
         } };
         const bga_shown = a.cfg.bga and (!a.cfg.bga_auto or s.params.autoplay or s.params.replay != null);
-        a.view.bga = if (bga_shown) bga.Bga.create(a.gpa, &a.g, s) else null;
+        a.view.bga = if (bga_shown) bga.Bga.create(a.gpa, a.io, &a.g, s) else null;
         {
             var arena = std.heap.ArenaAllocator.init(a.gpa);
             defer arena.deinit();
-            a.view.scratch_right = skin_mod.scratchRight(skin_mod.loadConf(arena.allocator(), "", skin_mod.playType(s.chart.mode)));
+            a.view.scratch_right = skin_mod.scratchRight(skin_mod.loadConf(arena.allocator(), a.io, "", skin_mod.playType(s.chart.mode)));
         }
         a.view.best_ex = a.bestEx(&s.chart.sha256, s.params.rec.ln_mode);
         const pace_target = play.paceTarget(a.cfg.pace_target, s.params.practice != null);
@@ -625,11 +626,11 @@ pub const App = struct {
     fn loadSlot(a: *App, al: std.mem.Allocator, slot: config.SkinSlot, mode: core.types.Mode) ?*skin_mod.model.Skin {
         const root = a.cfg.skinFor(slot);
         if (root.len == 0) return null;
-        const p = skin_mod.find(al, root, skin_mod.slotType(slot)) orelse {
+        const p = skin_mod.find(al, a.io, root, skin_mod.slotType(slot)) orelse {
             std.log.warn("no skin of the needed type under {s}", .{root});
             return null;
         };
-        return skin_mod.load(a.gpa, &a.g, p, mode, noOption, skin_mod.loadConf(al, root, skin_mod.slotType(slot))) catch |e| {
+        return skin_mod.load(a.gpa, a.io, &a.g, p, mode, noOption, skin_mod.loadConf(al, a.io, root, skin_mod.slotType(slot))) catch |e| {
             std.log.err("skin {s}: {t}", .{ p, e });
             return null;
         };
@@ -668,11 +669,11 @@ pub const App = struct {
         var tmp = std.heap.ArenaAllocator.init(a.gpa);
         defer tmp.deinit();
         const al = tmp.allocator();
-        const p = skin_mod.find(al, root, skin_mod.type_result) orelse return;
+        const p = skin_mod.find(al, a.io, root, skin_mod.type_result) orelse return;
         const load_ctx = a.skin_state.loadCtx();
         skin_mod.setLuaCtx(&load_ctx);
         defer skin_mod.setLuaCtx(null);
-        const fresh = skin_mod.load(a.gpa, &a.g, p, a.skin_mode, noOption, skin_mod.loadConf(al, root, skin_mod.type_result)) catch return;
+        const fresh = skin_mod.load(a.gpa, a.io, &a.g, p, a.skin_mode, noOption, skin_mod.loadConf(al, a.io, root, skin_mod.type_result)) catch return;
         if (a.result_skin) |old| skin_mod.destroy(a.gpa, old);
         a.result_skin = fresh;
     }
@@ -691,7 +692,7 @@ pub const App = struct {
         if (now - a.skin_poll_ms < 1000) return;
         a.skin_poll_ms = now;
         const sk = a.play_skin orelse return;
-        if (skin_mod.changed(sk)) a.reloadSkins(mode);
+        if (skin_mod.changed(sk, a.io)) a.reloadSkins(mode);
     }
 
     fn tickPlay(a: *App) void {
@@ -952,7 +953,7 @@ pub const App = struct {
     }
 
     pub fn saveConfig(a: *App) void {
-        config.save(a.gpa, a.cfg) catch |e| std.log.err("config save failed: {t}", .{e});
+        config.save(a.gpa, a.io, a.cfg) catch |e| std.log.err("config save failed: {t}", .{e});
     }
 
     fn pressShotKey(a: *App) void {
@@ -973,7 +974,7 @@ pub const App = struct {
     fn saveScreenshot(a: *App) void {
         var ok = false;
         defer a.showNotice(if (ok) tr("Screenshot saved") else tr("Screenshot failed"));
-        const path = screenshotPath(a.gpa) catch |e| {
+        const path = screenshotPath(a.gpa, a.io) catch |e| {
             std.log.err("screenshot failed: {t}", .{e});
             a.g.present();
             return;
@@ -1091,12 +1092,12 @@ pub const App = struct {
 };
 
 const select_fade_ms = 300;
-fn screenshotPath(gpa: std.mem.Allocator) ![:0]u8 {
+fn screenshotPath(gpa: std.mem.Allocator, io: std.Io) ![:0]u8 {
     const dir = try fs.dataDir(gpa);
     defer gpa.free(dir);
     const folder = try std.fmt.allocPrint(gpa, "{s}screenshots", .{dir});
     defer gpa.free(folder);
-    try fs.mkdirs(folder);
+    try fs.mkdirs(io, folder);
     var ns: c.SDL_Time = 0;
     var t: c.SDL_DateTime = undefined;
     if (!c.SDL_GetCurrentTime(&ns) or !c.SDL_TimeToDateTime(ns, &t, true)) return error.NoClock;
@@ -1147,12 +1148,12 @@ fn setWindowIcon(win: *c.SDL_Window) void {
     _ = c.SDL_SetWindowIcon(win, surf);
 }
 
-pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
+pub fn main(gpa: std.mem.Allocator, io: std.Io, opts: Options) !void {
     if (!c.SDL_Init(c.SDL_INIT_VIDEO | c.SDL_INIT_JOYSTICK | c.SDL_INIT_EVENTS)) return error.SdlInit;
     defer c.SDL_Quit();
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    const cfg = config.load(arena.allocator());
+    const cfg = config.load(arena.allocator(), io);
     i18n.current = i18n.resolve(cfg.language);
     const flags: u64 = c.rb_window_flags() | c.SDL_WINDOW_RESIZABLE | c.SDL_WINDOW_HIGH_PIXEL_DENSITY | (if (cfg.fullscreen) @as(u64, c.SDL_WINDOW_FULLSCREEN) else 0);
     const win = c.SDL_CreateWindow("actuon", @intCast(cfg.width), @intCast(cfg.height), flags) orelse return error.SdlWindow;
@@ -1168,6 +1169,7 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
     defer gpa.destroy(app);
     app.* = .{
         .gpa = gpa,
+        .io = io,
         .arena = &arena,
         .cfg = cfg,
         .g = try gfx.Gfx.init(gpa, win),
@@ -1191,9 +1193,9 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
     app.g.upscale_on = cfg.bga_upscale;
     app.kept = .init(gpa);
     defer app.kept.deinit();
-    app.sounds = .{ .gpa = gpa, .engine = app.engine, .slot = &app.sfx_slot };
+    app.sounds = .{ .gpa = gpa, .io = io, .engine = app.engine, .slot = &app.sfx_slot };
     defer app.sounds.deinit();
-    app.preview = .{ .gpa = gpa, .rate = app.engine.rate };
+    app.preview = .{ .gpa = gpa, .io = io, .rate = app.engine.rate };
     defer app.preview.deinit();
     skin_mod.lua_mod.audio_hook = .{ .ud = app, .f = App.skinAudio };
     // Textures stay cached, so a play's skins come up without the wait.
@@ -1209,7 +1211,7 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
         app.exit_after_play = opts.shot == null;
         var params: session_mod.Params = .{ .path = p, .autoplay = opts.autoplay, .rec = config.playOptions(&app.cfg, 0), .start_us = opts.start_us };
         if (opts.replay) |rp| {
-            const bytes = try fs.readAlloc(arena.allocator(), rp, 1 << 28);
+            const bytes = try fs.readAlloc(arena.allocator(), io, rp, 1 << 28);
             const r = try core.replay.decode(arena.allocator(), bytes);
             params.replay = r;
             params.rec = r;
@@ -1222,10 +1224,10 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
     }
     if (config.set_aside) app.sel.status = tr("Settings could not be read: moved to config.json.bad");
     if (config.stuck) app.sel.status = tr("Settings could not be read or moved: changes this run are not saved");
-    if (crash.takePrevious(arena.allocator())) app.sel.status = tr("The last run crashed: see crash-last.txt in the data folder");
+    if (crash.takePrevious(arena.allocator(), io)) app.sel.status = tr("The last run crashed: see crash-last.txt in the data folder");
     if (opts.preview) |cmd| if (!cmd.stop) app.startPreview(cmd.file, cmd.measure);
     // Captures stay offline, so every run draws the same version row.
-    if (app.shot_path == null) app.set.update = update.start(gpa);
+    if (app.shot_path == null) app.set.update = update.start(gpa, io);
     app.run();
     const update_ended = if (app.set.update) |j| j.abandon() else true;
     // A thread stuck on a dead connection still allocates, and the allocator's shutdown check would crash it.
@@ -1236,7 +1238,7 @@ pub fn main(gpa: std.mem.Allocator, opts: Options) !void {
     versus.leave(app);
     var hb = std.heap.ArenaAllocator.init(gpa);
     defer hb.deinit();
-    editor.clearHeartbeat(hb.allocator());
+    editor.clearHeartbeat(hb.allocator(), io);
     if (app.load_thread) |t| c.SDL_WaitThread(t, null);
     // Quit during decide or loading: nothing took what the loader made.
     if (app.load_result) |loaded| loaded.destroy();

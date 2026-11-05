@@ -8,41 +8,41 @@ pub const Op = enum { cache, play, loop, stop };
 
 pub const extensions = [_][]const u8{ "ogg", "wav", "flac", "mp3" };
 
-pub fn findIn(al: std.mem.Allocator, dir: []const u8, name: []const u8) ?[]const u8 {
+pub fn findIn(al: std.mem.Allocator, io: std.Io, dir: []const u8, name: []const u8) ?[]const u8 {
     for (extensions) |ext| {
         const p = std.fmt.allocPrint(al, "{s}/{s}.{s}", .{ dir, name, ext }) catch return null;
-        if (fs.stat(p) != null) return p;
+        if (fs.stat(io, p) != null) return p;
     }
     return null;
 }
 
-fn collectSets(al: std.mem.Allocator, dir: []const u8, markers: []const []const u8, depth: u8, out: *std.ArrayList([]const u8)) void {
-    for (markers) |name| if (findIn(al, dir, name) != null) {
+fn collectSets(al: std.mem.Allocator, io: std.Io, dir: []const u8, markers: []const []const u8, depth: u8, out: *std.ArrayList([]const u8)) void {
+    for (markers) |name| if (findIn(al, io, dir, name) != null) {
         out.append(al, dir) catch return;
         break;
     };
     if (depth == 0) return;
-    for (fs.list(al, dir) catch return) |e| {
+    for (fs.list(al, io, dir) catch return) |e| {
         if (!e.is_dir) continue;
-        collectSets(al, std.fs.path.join(al, &.{ dir, e.name }) catch return, markers, depth - 1, out);
+        collectSets(al, io, std.fs.path.join(al, &.{ dir, e.name }) catch return, markers, depth - 1, out);
     }
 }
 
-fn sets(al: std.mem.Allocator, folder: []const u8, root: []const u8, markers: []const []const u8) []const []const u8 {
+fn sets(al: std.mem.Allocator, io: std.Io, folder: []const u8, root: []const u8, markers: []const []const u8) []const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     if (fs.dataDir(al)) |data| {
-        collectSets(al, std.fmt.allocPrint(al, "{s}{s}", .{ data, folder }) catch return out.items, markers, 3, &out);
+        collectSets(al, io, std.fmt.allocPrint(al, "{s}{s}", .{ data, folder }) catch return out.items, markers, 3, &out);
     } else |_| {}
-    if (root.len > 0) collectSets(al, root, markers, 3, &out);
+    if (root.len > 0) collectSets(al, io, root, markers, 3, &out);
     return out.items;
 }
 
-pub fn musicSets(al: std.mem.Allocator, root: []const u8) []const []const u8 {
-    return sets(al, "bgm", root, &.{ "select", "decide" });
+pub fn musicSets(al: std.mem.Allocator, io: std.Io, root: []const u8) []const []const u8 {
+    return sets(al, io, "bgm", root, &.{ "select", "decide" });
 }
 
-pub fn soundSets(al: std.mem.Allocator, root: []const u8) []const []const u8 {
-    return sets(al, "sound", root, &.{ "f-open", "scratch", "o-open" });
+pub fn soundSets(al: std.mem.Allocator, io: std.Io, root: []const u8) []const []const u8 {
+    return sets(al, io, "sound", root, &.{ "f-open", "scratch", "o-open" });
 }
 
 pub fn nextSet(now: []const u8, list: []const []const u8, dir: i32) []const u8 {
@@ -56,6 +56,7 @@ pub fn nextSet(now: []const u8, list: []const []const u8, dir: i32) []const u8 {
 
 pub const Entry = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     rate: u32,
     path: []const u8,
     data: []const f32 = &.{},
@@ -68,7 +69,7 @@ pub const Entry = struct {
     fn run(ud: ?*anyopaque) callconv(.c) c_int {
         const e: *Entry = @ptrCast(@alignCast(ud));
         defer e.ready.store(true, .release);
-        const bytes = fs.readAlloc(e.gpa, e.path, 1 << 28) catch return 0;
+        const bytes = fs.readAlloc(e.gpa, e.io, e.path, 1 << 28) catch return 0;
         defer e.gpa.free(bytes);
         // Voices read this until exit, past the engine, like the menu sounds.
         const s = decode.decode(std.heap.page_allocator, bytes, e.path, e.rate) catch return 0;
@@ -87,6 +88,7 @@ const max_entries = 256;
 
 pub const Player = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     engine: *engine_mod.Engine,
     slot: *u8,
     entries: std.ArrayList(*Entry) = .empty,
@@ -101,7 +103,7 @@ pub const Player = struct {
             p.gpa.free(owned);
             return null;
         };
-        e.* = .{ .gpa = p.gpa, .rate = p.engine.rate, .path = owned };
+        e.* = .{ .gpa = p.gpa, .io = p.io, .rate = p.engine.rate, .path = owned };
         p.entries.append(p.gpa, e) catch {
             p.gpa.free(owned);
             p.gpa.destroy(e);
@@ -163,11 +165,10 @@ test "one-shot slots skip the music's slots" {
 }
 
 test "a script naming a new sound every frame stops adding them" {
-    fs.io = std.testing.io;
     var eng: engine_mod.Engine = undefined;
     eng.rate = 48000;
     var slot: u8 = engine_mod.first_oneshot_slot;
-    var p: Player = .{ .gpa = std.testing.allocator, .engine = &eng, .slot = &slot };
+    var p: Player = .{ .gpa = std.testing.allocator, .io = std.testing.io, .engine = &eng, .slot = &slot };
     defer p.deinit();
     var buf: [32]u8 = undefined;
     for (0..max_entries + 10) |i| p.request(try std.fmt.bufPrint(&buf, "missing/{d}.ogg", .{i}), .cache, 1);

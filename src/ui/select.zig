@@ -155,7 +155,7 @@ fn scanThread(ud: ?*anyopaque) callconv(.c) c_int {
     defer a.sel.scan_done.store(true, .release);
     const d = db_mod.openMain(a.gpa) catch return 1;
     defer d.close();
-    a.sel.stats = db_mod.scan(a.gpa, d, a.cfg.roots, &a.sel.scan_progress) catch |e| {
+    a.sel.stats = db_mod.scan(a.gpa, a.io, d, a.cfg.roots, &a.sel.scan_progress) catch |e| {
         std.log.err("scan failed: {t}", .{e});
         return 1;
     };
@@ -561,6 +561,7 @@ fn scrollStep(cur: f32, target: f32, dt_s: f32) f32 {
 /// Off the main thread so changing songs never stalls a frame.
 const JacketJob = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     key: u64,
     dir: []u8,
     stagefile: []u8,
@@ -578,8 +579,8 @@ const JacketJob = struct {
         var arena = std.heap.ArenaAllocator.init(j.gpa);
         defer arena.deinit();
         const al = arena.allocator();
-        const path = (fs.resolveAsset(al, j.dir, j.stagefile, &.{ "png", "jpg", "jpeg", "bmp", "gif", "tga" }) catch null) orelse return 0;
-        const bytes = fs.readAlloc(al, path, 32 << 20) catch return 0;
+        const path = (fs.resolveAsset(al, j.io, j.dir, j.stagefile, &.{ "png", "jpg", "jpeg", "bmp", "gif", "tga" }) catch null) orelse return 0;
+        const bytes = fs.readAlloc(al, j.io, path, 32 << 20) catch return 0;
         if (!gfx.imageFits(bytes, gfx.max_chart_image_px)) return 0;
         var n: c_int = 0;
         j.px = c.stbi_load_from_memory(bytes.ptr, @intCast(bytes.len), &j.w, &j.h, &n, 4);
@@ -613,7 +614,7 @@ fn startImageJob(a: *App, sg: db_mod.Song, name: []const u8, image: u64, max_w: 
         a.gpa.destroy(j);
         return null;
     };
-    j.* = .{ .gpa = a.gpa, .key = image, .dir = d, .stagefile = st, .max_w = max_w };
+    j.* = .{ .gpa = a.gpa, .io = a.io, .key = image, .dir = d, .stagefile = st, .max_w = max_w };
     j.thread = c.SDL_CreateThread(JacketJob.run, "jacket", j);
     if (j.thread == null) {
         j.destroy();
@@ -774,13 +775,13 @@ fn drawJacketTexture(a: *App, tex: *gfx.Texture, cover: bool, dst: ?*const c.SDL
     g.sprite(tex, .{ .x = (tex.w - g.w * k) / 2, .y = (tex.h - g.h * k) / 2, .w = g.w * k, .h = g.h * k }, box, o);
 }
 
-fn findPreview(al: std.mem.Allocator, song: db_mod.Song) ?[]const u8 {
+fn findPreview(al: std.mem.Allocator, io: std.Io, song: db_mod.Song) ?[]const u8 {
     const dir = std.fs.path.dirname(song.path) orelse return null;
     const exts = session_mod.audio_exts;
     if (song.preview.len > 0) {
-        if (fs.resolveAsset(al, dir, song.preview, exts) catch null) |p| return p;
+        if (fs.resolveAsset(al, io, dir, song.preview, exts) catch null) |p| return p;
     }
-    for (fs.list(al, dir) catch return null) |e| {
+    for (fs.list(al, io, dir) catch return null) |e| {
         if (!e.is_dir and preview_mod.isPreviewFile(e.name, exts)) return std.fs.path.join(al, &.{ dir, e.name }) catch null;
     }
     return null;
@@ -819,7 +820,7 @@ fn updatePreview(a: *App) void {
         var tmp = std.heap.ArenaAllocator.init(a.gpa);
         defer tmp.deinit();
         if (song) |sg| {
-            const found = findPreview(tmp.allocator(), sg);
+            const found = findPreview(tmp.allocator(), a.io, sg);
             // A chart with no preview of its own gets one mixed from its sounds.
             s.preview_from_chart = found == null;
             const p = found orelse sg.path;
@@ -1103,7 +1104,7 @@ fn tickBoard(a: *App, now_ms: u64) void {
     }
     if (sha.len == 0 or s.board_asked or now_ms - s.board_since_ms < board_delay_ms) return;
     s.board_asked = true;
-    s.board = ir.startRanking(a.gpa, a.cfg.ir_url, a.cfg.ir_token, sha);
+    s.board = ir.startRanking(a.gpa, a.io, a.cfg.ir_url, a.cfg.ir_token, sha);
     a.select_state.ir_board = s.board;
 }
 
@@ -1433,7 +1434,7 @@ fn tableThread(ud: ?*anyopaque) callconv(.c) c_int {
     defer d.close();
     const only = [_][]const u8{a.sel.table_only orelse ""};
     for (if (a.sel.table_only != null) &only else a.cfg.tables) |url| {
-        _ = table.fetch(a.gpa, d, url) catch |e| {
+        _ = table.fetch(a.gpa, a.io, d, url) catch |e| {
             std.log.err("table {s}: {t}", .{ url, e });
             _ = a.sel.table_failed.fetchAdd(1, .monotonic);
         };
@@ -1480,7 +1481,7 @@ fn startDownload(a: *App, row: Row) void {
         s.status = tr("No download source for this chart");
         return;
     }
-    s.download = download.start(a.gpa, url, a.cfg.roots[0], row.target);
+    s.download = download.start(a.gpa, a.io, url, a.cfg.roots[0], row.target);
     s.status = if (s.download != null) tr("Downloading...") else tr("Could not start download");
     s.download_seen = 0;
     s.download_shown = 0;
@@ -1702,7 +1703,7 @@ fn openRanking(a: *App) void {
     if (row.song) |song| {
         // With a token the list narrows to rivals only when asked: full ranking is the default view.
         const url = std.fmt.allocPrint(al, "{s}/scores/{s}?limit=50", .{ a.cfg.ir_url, song.sha256 }) catch return;
-        s.query = ir.startQuery(a.gpa, url, a.cfg.ir_token, null);
+        s.query = ir.startQuery(a.gpa, a.io, url, a.cfg.ir_token, null);
         s.query_title = tr("Ranking");
         return;
     }
@@ -1727,7 +1728,7 @@ fn openRanking(a: *App) void {
     }
     body.appendSlice(al, "]}") catch return;
     const url = std.fmt.allocPrint(al, "{s}/table-ranking", .{a.cfg.ir_url}) catch return;
-    s.query = ir.startQuery(a.gpa, url, a.cfg.ir_token, body.items);
+    s.query = ir.startQuery(a.gpa, a.io, url, a.cfg.ir_token, body.items);
     s.query_title = tr("Table standings");
 }
 
@@ -1739,7 +1740,7 @@ fn keyQuery(a: *App, sc: u32) void {
         if (url_ok and !std.mem.eql(u8, s.query_title, tr("Rivals"))) {
             var buf: [1024]u8 = undefined;
             const url = std.fmt.bufPrint(&buf, "{s}/scores/{s}/rivals", .{ a.cfg.ir_url, s.rows[s.cursor].song.?.sha256 }) catch return;
-            s.query = ir.startQuery(a.gpa, url, a.cfg.ir_token, null);
+            s.query = ir.startQuery(a.gpa, a.io, url, a.cfg.ir_token, null);
             s.query_title = tr("Rivals");
         }
     } else if (sc == c.SDL_SCANCODE_ESCAPE) closeQuery(a);

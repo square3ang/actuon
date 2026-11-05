@@ -42,8 +42,8 @@ pub fn sanitize(a: std.mem.Allocator, src: []const u8) ![]u8 {
     return out.toOwnedSlice(a);
 }
 
-pub fn parseFile(a: std.mem.Allocator, path: []const u8) !J {
-    const raw = try fs.readAlloc(a, path, 1 << 25);
+pub fn parseFile(a: std.mem.Allocator, io: std.Io, path: []const u8) !J {
+    const raw = try fs.readAlloc(a, io, path, 1 << 25);
     const text = if (std.unicode.utf8ValidateSlice(raw)) raw else try core.encoding.toUtf8(a, raw, .sjis);
     const clean = try sanitize(a, if (std.mem.startsWith(u8, text, "\xEF\xBB\xBF")) text[3..] else text);
     return std.json.parseFromSliceLeaky(J, a, clean, .{ .allocate = .alloc_always });
@@ -143,7 +143,7 @@ pub fn applyConf(a: std.mem.Allocator, head: J, conf: Conf) !void {
     }
 }
 
-pub fn wildChoices(a: std.mem.Allocator, dir: []const u8, rel: []const u8) ![]const []const u8 {
+pub fn wildChoices(a: std.mem.Allocator, io: std.Io, dir: []const u8, rel: []const u8) ![]const []const u8 {
     const star = std.mem.indexOfScalar(u8, rel, '*') orelse return &.{};
     const base_end = if (std.mem.lastIndexOfScalar(u8, rel[0..star], '/')) |i| i + 1 else 0;
     // The choices are file names shown to the player, and a skin lists only its own folder.
@@ -153,7 +153,7 @@ pub fn wildChoices(a: std.mem.Allocator, dir: []const u8, rel: []const u8) ![]co
     const ext = tail[0 .. std.mem.indexOfScalar(u8, tail, '|') orelse tail.len];
     const pre = rel[base_end..star];
     var out: std.ArrayList([]const u8) = .empty;
-    for (try fs.list(a, try std.fs.path.join(a, &.{ dir, rel[0..base_end] }))) |e| {
+    for (try fs.list(a, io, try std.fs.path.join(a, &.{ dir, rel[0..base_end] }))) |e| {
         if (e.name.len < pre.len + ext.len) continue;
         if (!std.ascii.startsWithIgnoreCase(e.name, pre) or !std.ascii.endsWithIgnoreCase(e.name, ext)) continue;
         if (seg_end < rel.len and !e.is_dir) continue;
@@ -169,7 +169,7 @@ pub fn wildChoices(a: std.mem.Allocator, dir: []const u8, rel: []const u8) ![]co
 }
 
 /// In "dir/*.png|1|/foot" the |n| marks only tell `filepath` entries apart.
-pub fn resolveWild(a: std.mem.Allocator, dir: []const u8, files: []const J, rel: []const u8) ![]const u8 {
+pub fn resolveWild(a: std.mem.Allocator, io: std.Io, dir: []const u8, files: []const J, rel: []const u8) ![]const u8 {
     const star = std.mem.indexOfScalar(u8, rel, '*') orelse return rel;
     const base_end = if (std.mem.lastIndexOfScalar(u8, rel[0..star], '/')) |i| i + 1 else 0;
     const seg_end = std.mem.indexOfScalarPos(u8, rel, star, '/') orelse rel.len;
@@ -178,7 +178,7 @@ pub fn resolveWild(a: std.mem.Allocator, dir: []const u8, files: []const J, rel:
     for (files) |f| if (f == .object and std.mem.eql(u8, str(f.object.get("path")), rel[0..seg_end])) {
         def = str(f.object.get("def"));
     };
-    const names = wildChoices(a, dir, rel) catch return rel;
+    const names = wildChoices(a, io, dir, rel) catch return rel;
     var best: ?[]const u8 = null;
     var best_score: usize = 0;
     for (names) |name| {
@@ -199,6 +199,7 @@ fn hexColor(s: []const u8) gfx.Color {
 
 const Loader = struct {
     a: std.mem.Allocator,
+    io: std.Io,
     skin: *m.Skin,
     dir: []const u8,
     resolver: *const fn (i32) bool,
@@ -273,8 +274,8 @@ const Loader = struct {
         if (std.mem.indexOf(u8, rel, "..") != null or std.fs.path.isAbsolute(rel)) return error.BadInclude;
         l.includes += 1;
         if (l.includes > lr2.max_includes) return error.BadInclude;
-        const p = lr2.walk(l.a, l.dir, rel) orelse return error.BadInclude;
-        return l.expand(try parseFile(l.a, p), depth + 1);
+        const p = lr2.walk(l.a, l.io, l.dir, rel) orelse return error.BadInclude;
+        return l.expand(try parseFile(l.a, l.io, p), depth + 1);
     }
 
     fn src(l: *Loader, o: std.json.ObjectMap) !m.Src {
@@ -365,9 +366,9 @@ const Loader = struct {
         const dir = try l.a.dupe(u8, l.dir);
         std.mem.replaceScalar(u8, dir, '\\', '/');
         const abs_inside = if (std.mem.startsWith(u8, rel, dir)) std.mem.trimStart(u8, rel[dir.len..], "/") else rel;
-        const inside = try resolveWild(l.a, l.dir, l.head_files, abs_inside);
+        const inside = try resolveWild(l.a, l.io, l.dir, l.head_files, abs_inside);
         const safe = !fs.climbs(inside) and !std.fs.path.isAbsolute(inside);
-        return if (safe) lr2.walk(l.a, l.dir, inside) else null;
+        return if (safe) lr2.walk(l.a, l.io, l.dir, inside) else null;
     }
 
     fn build(l: *Loader, root: J) !void {
@@ -398,7 +399,7 @@ const Loader = struct {
             const file = try l.assetPath(str(v.object.get("path"))) orelse continue;
             const font_id = try idOf(a, v.object.get("id"));
             if (std.ascii.endsWithIgnoreCase(file, ".fnt")) {
-                const font = bitfont.loadCapped(a, file, &fonts_loaded) orelse continue;
+                const font = bitfont.loadCapped(a, l.io, file, &fonts_loaded) orelse continue;
                 font.first_tex = @intCast(l.paths.items.len);
                 try l.paths.appendSlice(a, font.pages);
                 try l.bitmaps.put(a, font_id, font);
@@ -599,9 +600,9 @@ const Loader = struct {
 };
 
 /// `head` holds the options: the root itself for a JSON skin, the script's header for a Lua one.
-pub fn fromJson(skin: *m.Skin, root_in: J, head: J, dir: []const u8, resolver: *const fn (i32) bool, conf: Conf) ![]const ?[]const u8 {
+pub fn fromJson(skin: *m.Skin, io: std.Io, root_in: J, head: J, dir: []const u8, resolver: *const fn (i32) bool, conf: Conf) ![]const ?[]const u8 {
     const a = skin.arena.allocator();
-    var l: Loader = .{ .a = a, .skin = skin, .dir = dir, .resolver = resolver };
+    var l: Loader = .{ .a = a, .io = io, .skin = skin, .dir = dir, .resolver = resolver };
     if (root_in != .object or head != .object) return error.BadSkin;
     try applyConf(a, head, conf);
     try applyConf(a, root_in, conf);
@@ -623,9 +624,9 @@ pub fn fromJson(skin: *m.Skin, root_in: J, head: J, dir: []const u8, resolver: *
     return l.paths.items;
 }
 
-pub fn load(skin: *m.Skin, path: []const u8, resolver: *const fn (i32) bool, conf: Conf) ![]const ?[]const u8 {
-    const root = try parseFile(skin.arena.allocator(), path);
-    return fromJson(skin, root, root, std.fs.path.dirname(path) orelse ".", resolver, conf);
+pub fn load(skin: *m.Skin, io: std.Io, path: []const u8, resolver: *const fn (i32) bool, conf: Conf) ![]const ?[]const u8 {
+    const root = try parseFile(skin.arena.allocator(), io, path);
+    return fromJson(skin, io, root, root, std.fs.path.dirname(path) orelse ".", resolver, conf);
 }
 
 test "sanitize strips comments and trailing commas" {
@@ -646,12 +647,12 @@ test "includes that climb, are absolute or fan out are refused" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    try fs.write(try std.fs.path.join(a, &.{ dir, "twice.json" }), "[{\"include\":\"twice.json\"},{\"include\":\"twice.json\"}]");
+    try fs.write(std.testing.io, try std.fs.path.join(a, &.{ dir, "twice.json" }), "[{\"include\":\"twice.json\"},{\"include\":\"twice.json\"}]");
     var skin: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
     defer skin.arena.deinit();
     for ([_][]const u8{ "{\"a\":{\"include\":\"../x.json\"}}", "{\"a\":{\"include\":\"/etc/hostname\"}}", "{\"a\":{\"include\":\"missing.json\"}}", "{\"a\":{\"include\":\"twice.json\"}}" }) |text| {
         const root = try std.json.parseFromSliceLeaky(J, a, text, .{});
-        try std.testing.expectError(error.BadInclude, fromJson(&skin, root, root, dir, &noneEnabled, .{}));
+        try std.testing.expectError(error.BadInclude, fromJson(&skin, std.testing.io, root, root, dir, &noneEnabled, .{}));
     }
 }
 
@@ -663,12 +664,12 @@ test "assets outside the skin folder are refused" {
     defer tmp.cleanup();
     const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     const dir = try std.fs.path.join(a, &.{ root, "skin" });
-    try fs.mkdirs(dir);
-    try fs.write(try std.fs.path.join(a, &.{ dir, "in.png" }), "");
-    try fs.write(try std.fs.path.join(a, &.{ root, "out.png" }), "");
+    try fs.mkdirs(std.testing.io, dir);
+    try fs.write(std.testing.io, try std.fs.path.join(a, &.{ dir, "in.png" }), "");
+    try fs.write(std.testing.io, try std.fs.path.join(a, &.{ root, "out.png" }), "");
     var skin: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
     defer skin.arena.deinit();
-    var l: Loader = .{ .a = a, .skin = &skin, .dir = dir, .resolver = &noneEnabled };
+    var l: Loader = .{ .a = a, .io = std.testing.io, .skin = &skin, .dir = dir, .resolver = &noneEnabled };
     try std.testing.expect((try l.assetPath("in.png")) != null);
     try std.testing.expect((try l.assetPath(try std.fmt.allocPrint(a, "{s}/in.png", .{dir}))) != null);
     try std.testing.expectEqual(@as(?[]const u8, null), try l.assetPath("../out.png"));
@@ -693,7 +694,7 @@ test "hostile numbers in a JSON skin are bounded" {
     , .{});
     var skin: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
     defer skin.arena.deinit();
-    _ = try fromJson(&skin, root, root, ".", &noneEnabled, .{});
+    _ = try fromJson(&skin, std.testing.io, root, root, ".", &noneEnabled, .{});
     const number = skin.objects[skin.objects.len - 2];
     try std.testing.expectEqual(@as(i32, m.max_div), number.src.divx);
     try std.testing.expectEqual(@as(i32, 32), number.digits);
@@ -706,7 +707,7 @@ test "hostile numbers in a JSON skin are bounded" {
     const nested = try std.json.parseFromSliceLeaky(J, a, text, .{});
     var skin2: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
     defer skin2.arena.deinit();
-    _ = try fromJson(&skin2, nested, nested, ".", &noneEnabled, .{});
+    _ = try fromJson(&skin2, std.testing.io, nested, nested, ".", &noneEnabled, .{});
 }
 
 test "a destination's mouseRect is read, and one without has none" {
@@ -721,7 +722,7 @@ test "a destination's mouseRect is read, and one without has none" {
     , .{});
     var skin: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
     defer skin.arena.deinit();
-    _ = try fromJson(&skin, root, root, ".", &noneEnabled, .{});
+    _ = try fromJson(&skin, std.testing.io, root, root, ".", &noneEnabled, .{});
     try std.testing.expectEqual(@as(?[4]f32, .{ 2, 3, 40, 5 }), skin.objects[skin.objects.len - 2].mouse_rect);
     try std.testing.expectEqual(@as(?[4]f32, null), skin.objects[skin.objects.len - 1].mouse_rect);
 }
@@ -735,8 +736,8 @@ test "wildcards resolve to the default, or the closest name" {
     const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     for ([_][]const u8{ "s/FHD_center.lua", "s/FHD_default_Left.lua", "b/x/BOMB.png", "b/y/BOMB.png" }) |f| {
         const full = try std.fs.path.join(a, &.{ dir, f });
-        try fs.mkdirs(std.fs.path.dirname(full).?);
-        try fs.write(full, "");
+        try fs.mkdirs(std.testing.io, std.fs.path.dirname(full).?);
+        try fs.write(std.testing.io, full, "");
     }
     const entry = struct {
         fn f(al: std.mem.Allocator, path: []const u8, def: []const u8) !J {
@@ -747,10 +748,10 @@ test "wildcards resolve to the default, or the closest name" {
         }
     }.f;
     const files = [_]J{ try entry(a, "s/*.lua", "FHD_default_1P.lua"), try entry(a, "b/*|2|", "y") };
-    try std.testing.expectEqualStrings("s/FHD_default_Left.lua", try resolveWild(a, dir, &files, "s/*.lua"));
-    try std.testing.expectEqualStrings("b/y/BOMB.png", try resolveWild(a, dir, &files, "b/*|2|/BOMB.png"));
-    try std.testing.expectEqualStrings("b/x/BOMB.png", try resolveWild(a, dir, &files, "b/*|9|/BOMB.png"));
-    try std.testing.expect((try wildChoices(a, dir, "s/*.lua")).len > 0);
-    try std.testing.expectEqual(@as(usize, 0), (try wildChoices(a, dir, "s/../*")).len);
-    try std.testing.expectEqual(@as(usize, 0), (try wildChoices(a, dir, "/*")).len);
+    try std.testing.expectEqualStrings("s/FHD_default_Left.lua", try resolveWild(a, std.testing.io, dir, &files, "s/*.lua"));
+    try std.testing.expectEqualStrings("b/y/BOMB.png", try resolveWild(a, std.testing.io, dir, &files, "b/*|2|/BOMB.png"));
+    try std.testing.expectEqualStrings("b/x/BOMB.png", try resolveWild(a, std.testing.io, dir, &files, "b/*|9|/BOMB.png"));
+    try std.testing.expect((try wildChoices(a, std.testing.io, dir, "s/*.lua")).len > 0);
+    try std.testing.expectEqual(@as(usize, 0), (try wildChoices(a, std.testing.io, dir, "s/../*")).len);
+    try std.testing.expectEqual(@as(usize, 0), (try wildChoices(a, std.testing.io, dir, "/*")).len);
 }
