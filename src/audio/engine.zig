@@ -577,7 +577,8 @@ pub const Engine = struct {
         if (e.hold_frames > 0) return;
         e.audio_err_us += @divTrunc(err_us - e.audio_err_us, 32);
         if (@abs(e.audio_err_us) > sync_skip_us) {
-            if (e.audio_err_us < 0) e.skip_frames = @max(e.usToFrame(-err_us), 0) else e.hold_frames = @max(e.usToFrame(err_us), 0);
+            // Sized from the smoothed error, so one glitched reading cannot skip or hold for seconds.
+            if (e.audio_err_us < 0) e.skip_frames = e.usToFrame(-e.audio_err_us) else e.hold_frames = e.usToFrame(e.audio_err_us);
             e.audio_err_us = 0;
             e.slew = 0;
             return;
@@ -675,7 +676,7 @@ test "tick clock stays fixed after settling and audio follows it" {
     e.samples = &samples;
     e.startVoice(0, 0, 0, 0);
     e.slew = 0;
-    e.audio_err_us = -sync_skip_us - 1;
+    e.audio_err_us = -100_000;
     e.steerAudio(-100_000, 128);
     try std.testing.expectEqual(@as(i64, 4800), e.skip_frames);
     const f1 = e.frame.load(.monotonic);
@@ -691,13 +692,19 @@ test "audio far ahead holds the song until the clock catches up" {
     const samples = [_]decode.Sample{.{ .data = @constCast(&data) }};
     e.samples = &samples;
     e.startVoice(0, 0, 0, 0);
-    e.audio_err_us = 2 * sync_skip_us;
-    e.steerAudio(5_000, 128);
-    try std.testing.expectEqual(@as(i64, 240), e.hold_frames);
+    e.audio_err_us = 60_000;
+    e.steerAudio(60_000, 128);
+    try std.testing.expectEqual(@as(i64, 2880), e.hold_frames);
     try std.testing.expectEqual(@as(i64, 0), e.slew);
     e.steerAudio(-100_000, 128);
     try std.testing.expectEqual(@as(i64, 0), e.skip_frames);
 
+    e.hold_frames = 0;
+    e.audio_err_us = 49_000;
+    e.steerAudio(5_000_000, 128);
+    try std.testing.expectEqual(@as(i64, 9778), e.hold_frames);
+
+    e.hold_frames = 240;
     var out: [256]f32 = undefined;
     e.mix(&out, 128);
     try std.testing.expectEqual(@as(i64, 0), e.frame.load(.monotonic));

@@ -94,6 +94,8 @@ pub const Player = struct {
     next: std.atomic.Value(usize) = .init(0),
     quit: std.atomic.Value(bool) = .init(false),
     threads: [workers]?*c.SDL_Thread = @splat(null),
+    // Workers started later would take queue index 0 and reload entries that skipped the queue.
+    no_workers: bool = false,
 
     pub fn entry(p: *Player, path: []const u8) ?*Entry {
         for (p.entries[0..p.len]) |e| if (std.mem.eql(u8, e.path, path)) return e;
@@ -113,6 +115,8 @@ pub const Player = struct {
 
     fn startWorkers(p: *Player) bool {
         if (p.queued != null) return true;
+        if (p.no_workers) return false;
+        p.no_workers = true;
         const sem = c.SDL_CreateSemaphore(0) orelse return false;
         p.queued = sem;
         var started = false;
@@ -120,10 +124,13 @@ pub const Player = struct {
             t.* = c.SDL_CreateThread(work, "skin sound", p);
             started = started or t.* != null;
         }
-        if (started) return true;
-        c.SDL_DestroySemaphore(sem);
-        p.queued = null;
-        return false;
+        if (!started) {
+            c.SDL_DestroySemaphore(sem);
+            p.queued = null;
+            return false;
+        }
+        p.no_workers = false;
+        return true;
     }
 
     fn work(ud: ?*anyopaque) callconv(.c) c_int {
@@ -217,4 +224,17 @@ test "a burst of new sounds is loaded by the few workers, each one once" {
     }
     try std.testing.expectEqual(@as(usize, 40), p.next.load(.monotonic));
     for (p.threads) |t| try std.testing.expect(t != null);
+}
+
+test "after workers fail to start, new sounds skip the queue without starting them" {
+    var eng: engine_mod.Engine = undefined;
+    eng.rate = 48000;
+    var slot: u8 = engine_mod.first_oneshot_slot;
+    var p: Player = .{ .gpa = std.testing.allocator, .io = std.testing.io, .engine = &eng, .slot = &slot, .no_workers = true };
+    defer p.deinit();
+    const a = p.entry("missing/a.ogg").?;
+    const b = p.entry("missing/b.ogg").?;
+    try std.testing.expect(a.ready.load(.acquire) and b.ready.load(.acquire));
+    try std.testing.expect(p.queued == null);
+    for (p.threads) |t| try std.testing.expect(t == null);
 }
