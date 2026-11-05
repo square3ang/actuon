@@ -42,6 +42,8 @@ python3 tests/ui_shots.py zig-out/bin/actuon "$OLD_DIR"
 python3 tests/ui_shots.py zig-out/bin/actuon "$NEW_DIR" "$OLD_DIR"
 ```
 
+To release, follow README.md's steps to the end: the tag's CI only makes a draft. The signing key is `~/actuon-release.key`; never copy it into the repository or CI.
+
 For server changes, also run:
 
 ```sh
