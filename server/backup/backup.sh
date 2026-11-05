@@ -15,9 +15,9 @@ once() {
 	name=ir-$(date -u +%Y%m%d-%H%M%S).db.gz
 	# sqlite3 would create an empty database and back that up.
 	[ -f "$data/ir.db" ] || { echo "$data/ir.db does not exist" >&2; exit 1; }
-	# Not a plain copy, which misses what is still in ir.db-wal, nor .backup, which restarts on every commit
-	# and never finishes on a busy server: VACUUM INTO reads one snapshot.
-	sqlite3 "$data/ir.db" "VACUUM INTO '$work/ir.db'"
+	# .backup, because a plain copy of ir.db misses what is still in ir.db-wal.
+	# shortcut: .backup restarts on every commit and can stall on a busy server; use VACUUM INTO once the host's sqlite is 3.27+ (Rocky 8 has 3.26).
+	sqlite3 "$data/ir.db" ".backup '$work/ir.db'"
 	check_db "$work/ir.db"
 	# A database that lost its accounts must not become the newest copy, which restore would pick.
 	if [ "$(sqlite3 "$work/ir.db" 'SELECT EXISTS(SELECT 1 FROM user)' 2>/dev/null || echo 0)" != 1 ]; then
