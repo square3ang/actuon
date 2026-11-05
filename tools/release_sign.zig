@@ -31,7 +31,10 @@ pub fn main(init: std.process.Init) !void {
     const secret = try cwd.readFileAlloc(io, args[2], a, .limited(Ed25519.SecretKey.encoded_length + 1));
     if (secret.len != Ed25519.SecretKey.encoded_length) return error.BadSecretKey;
     const pair = try Ed25519.KeyPair.fromSecretKey(try .fromBytes(secret[0..Ed25519.SecretKey.encoded_length].*));
+    try release_sig.checkTag(args[3]);
     for (args[4..]) |path| {
+        // A second run over out/* would otherwise sign the signatures too.
+        if (std.mem.endsWith(u8, path, ".sig")) continue;
         const bytes = try cwd.readFileAlloc(io, path, a, .limited(1 << 32));
         var sum: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(bytes, &sum, .{});

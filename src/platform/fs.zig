@@ -54,6 +54,30 @@ pub fn rename(from: []const u8, to: []const u8) !void {
     }
 }
 
+/// Exchanges two paths in one step, so neither is ever missing.
+pub fn swap(from: []const u8, to: []const u8) !void {
+    var from_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var to_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const from_z = try std.fmt.bufPrintSentinel(&from_buf, "{s}", .{from}, 0);
+    const to_z = try std.fmt.bufPrintSentinel(&to_buf, "{s}", .{to}, 0);
+    const err = switch (@import("builtin").os.tag) {
+        .macos => std.c.errno(renamex_np(from_z, to_z, 0x2)), // RENAME_SWAP
+        .linux => std.os.linux.errno(std.os.linux.renameat2(std.os.linux.AT.FDCWD, from_z, std.os.linux.AT.FDCWD, to_z, .{ .EXCHANGE = true })),
+        else => return error.Unsupported,
+    };
+    if (err != .SUCCESS) {
+        std.log.warn("swap {s}: {t}", .{ from, err });
+        return error.RenameFailed;
+    }
+}
+
+extern "c" fn renamex_np(from: [*:0]const u8, to: [*:0]const u8, flags: c_uint) c_int;
+
+pub fn writable(io: Io, path: []const u8) bool {
+    Dir.cwd().access(io, path, .{ .write = true }) catch return false;
+    return true;
+}
+
 pub fn setExecutable(io: Io, path: []const u8) !void {
     if (@import("builtin").os.tag == .windows) return;
     try Dir.cwd().setFilePermissions(io, path, .fromMode(0o755), .{});

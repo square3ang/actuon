@@ -83,13 +83,18 @@ fn replaceFile(gpa: std.mem.Allocator, io: std.Io, url: []const u8, proof: Proof
     try fs.rename(tmp, target);
 }
 
-/// Stages beside the game, so the final renames stay on one volume.
-fn replacePackage(a: std.mem.Allocator, io: std.Io, url: []const u8, proof: Proof, target: Target, progress: *http.Progress) !void {
-    const dir = switch (target) {
-        .folder => |d| d,
-        .bundle => |app| std.fs.path.dirname(app) orelse return error.BadPackage,
-        .appimage => unreachable,
-    };
+/// The .sig sits beside the asset at `url`, which starts with `base`; the rest names the asset.
+fn fetchProof(gpa: std.mem.Allocator, io: std.Io, base: []const u8, url: []const u8, key: [32]u8) !Proof {
+    const sig_url = try std.fmt.allocPrint(gpa, "{s}.sig", .{url});
+    defer gpa.free(sig_url);
+    const signature = try http.get(gpa, io, sig_url);
+    defer gpa.free(signature);
+    if (signature.len != 64) return error.BadSignature;
+    return .{ .key = key, .signature = signature[0..64].*, .name = url[base.len..] };
+}
+
+/// Stages in `dir`, beside the game, so the final renames stay on one volume; `swap` moves `inner` of the package onto `to`.
+fn replacePackage(a: std.mem.Allocator, io: std.Io, url: []const u8, proof: Proof, dir: []const u8, inner: []const u8, comptime swap: anytype, to: []const u8, progress: *http.Progress) !void {
     const archive = try std.fs.path.join(a, &.{ dir, staged_name ++ ".zip" });
     const staged = try std.fs.path.join(a, &.{ dir, staged_name });
     defer fs.remove(io, archive);
@@ -97,29 +102,17 @@ fn replacePackage(a: std.mem.Allocator, io: std.Io, url: []const u8, proof: Proo
     fs.removeTree(io, staged);
     try fetchVerified(a, io, url, proof, archive, progress);
     _ = try download.extract(a, io, archive, staged);
-    switch (target) {
-        .folder => try swapFiles(a, io, try std.fs.path.join(a, &.{ staged, windows_folder }), dir),
-        .bundle => |app| try swapBundle(a, io, try std.fs.path.join(a, &.{ staged, macos_bundle }), app),
-        .appimage => unreachable,
-    }
+    try swap(a, io, try std.fs.path.join(a, &.{ staged, inner }), to);
 }
 
 /// The swap is atomic, so the old bundle stays whole until it lands in the staging folder, which the caller removes.
 fn swapBundle(a: std.mem.Allocator, io: std.Io, from: []const u8, to: []const u8) !void {
-    switch (builtin.os.tag) {
-        .macos => {
-            const exe = try std.fs.path.join(a, &.{ from, macos_exe });
-            if (!fs.exists(io, exe)) return error.BadPackage;
-            // The archive reader keeps no permissions.
-            try fs.setExecutable(io, exe);
-            const rename_swap = 0x2;
-            if (renamex_np(try a.dupeZ(u8, from), try a.dupeZ(u8, to), rename_swap) != 0) return error.RenameFailed;
-        },
-        else => unreachable,
-    }
+    const exe = try std.fs.path.join(a, &.{ from, macos_exe });
+    if (!fs.exists(io, exe)) return error.BadPackage;
+    // The archive reader keeps no permissions.
+    try fs.setExecutable(io, exe);
+    try fs.swap(from, to);
 }
-
-extern "c" fn renamex_np(from: [*:0]const u8, to: [*:0]const u8, flags: c_uint) c_int;
 
 /// Windows can rename a running exe but not overwrite it. shortcut: a power cut mid-swap leaves old and new files mixed, reinstall by hand; add a journal if that is ever reported.
 fn swapFiles(a: std.mem.Allocator, io: std.Io, from: []const u8, to: []const u8) !void {
@@ -166,9 +159,22 @@ fn removeLeftovers(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
         if (std.mem.endsWith(u8, e.name, old_suffix)) fs.remove(io, try std.fs.path.join(a, &.{ dir, e.name }));
     }
     fs.removeTree(io, try std.fs.path.join(a, &.{ dir, staged_name }));
+    fs.remove(io, try std.fs.path.join(a, &.{ dir, staged_name ++ ".zip" }));
 }
 
-const Target = union(enum) { appimage: []const u8, folder: []const u8, bundle: []const u8 };
+const Bundle = struct { app: []const u8, dir: []const u8 };
+const Target = union(enum) { appimage: []const u8, folder: []const u8, bundle: Bundle };
+
+/// A bundle's base path is its Contents/Resources/; zig-out/bin is not inside a .app.
+fn bundleOf(io: std.Io, base: []const u8) ?Bundle {
+    const contents = std.fs.path.dirname(base) orelse return null;
+    const app = std.fs.path.dirname(contents) orelse return null;
+    if (!std.mem.endsWith(u8, app, ".app")) return null;
+    const dir = std.fs.path.dirname(app) orelse return null;
+    // A translocated copy sits on a read-only mount, and a standard user cannot replace an admin's bundle; both get the releases page.
+    if (!fs.writable(io, app) or !fs.writable(io, dir)) return null;
+    return .{ .app = app, .dir = dir };
+}
 
 /// Dev builds and Flatpak find nothing and get the releases page.
 fn findTarget(a: std.mem.Allocator, io: std.Io) !?Target {
@@ -187,12 +193,8 @@ fn findTarget(a: std.mem.Allocator, io: std.Io) !?Target {
             return .{ .folder = dir };
         },
         .macos => {
-            // A bundle's base path is its Contents/Resources/; zig-out/bin is not inside a .app.
             const base = c.SDL_GetBasePath() orelse return null;
-            const contents = std.fs.path.dirname(std.mem.span(base)) orelse return null;
-            const app = std.fs.path.dirname(contents) orelse return null;
-            if (!std.mem.endsWith(u8, app, ".app")) return null;
-            return .{ .bundle = try a.dupe(u8, app) };
+            return .{ .bundle = bundleOf(io, try a.dupe(u8, std.mem.span(base))) orelse return null };
         },
         else => return null,
     }
@@ -281,7 +283,11 @@ fn runCheck(j: *Job) !void {
         .folder => windows_asset,
         .bundle => macos_asset,
     } else null;
-    if (j.target) |t| if (t == .folder) try removeLeftovers(a, j.io, t.folder);
+    if (j.target) |t| switch (t) {
+        .appimage => {},
+        .folder => |dir| try removeLeftovers(a, j.io, dir),
+        .bundle => |b| try removeLeftovers(a, j.io, b.dir),
+    };
     const json = try http.get(j.gpa, j.io, latest_api);
     defer j.gpa.free(json);
     j.release = try parseRelease(a, json, current_version, asset);
@@ -301,13 +307,11 @@ fn installThread(ud: ?*anyopaque) callconv(.c) c_int {
 fn runInstall(j: *Job) !void {
     const a = j.arena.allocator();
     const url = j.release.?.url.?;
-    const signature = try http.get(j.gpa, j.io, try std.fmt.allocPrint(a, "{s}.sig", .{url}));
-    defer j.gpa.free(signature);
-    if (signature.len != 64) return error.BadSignature;
-    const proof: Proof = .{ .key = release_key.?, .signature = signature[0..64].*, .name = url[download_base.len..] };
+    const proof = try fetchProof(a, j.io, download_base, url, release_key.?);
     switch (j.target.?) {
         .appimage => |path| try replaceFile(j.gpa, j.io, url, proof, path, &j.progress),
-        .folder, .bundle => try replacePackage(a, j.io, url, proof, j.target.?, &j.progress),
+        .folder => |dir| try replacePackage(a, j.io, url, proof, dir, windows_folder, swapFiles, dir, &j.progress),
+        .bundle => |b| try replacePackage(a, j.io, url, proof, b.dir, macos_bundle, swapBundle, b.app, &j.progress),
     }
 }
 
@@ -506,7 +510,7 @@ test "a verified package replaces the folder, and the next launch clears what it
     var server: TestServer = .{ .server = undefined, .thread = undefined };
     const url = try server.start(zip);
     var progress: http.Progress = .{};
-    const applied = replacePackage(a, std.testing.io, url, try proofFor(zip, "v1.0.0/a.zip", 1), .{ .folder = dir }, &progress);
+    const applied = replacePackage(a, std.testing.io, url, try proofFor(zip, "v1.0.0/a.zip", 1), dir, windows_folder, swapFiles, dir, &progress);
     server.stop();
     try applied;
     try std.testing.expectEqualStrings("new", try fs.readAlloc(a, std.testing.io, exe, 16));
@@ -515,8 +519,12 @@ test "a verified package replaces the folder, and the next launch clears what it
     try std.testing.expectEqualStrings("old", try fs.readAlloc(a, std.testing.io, old, 16));
     try std.testing.expect(!fs.exists(std.testing.io, try std.fs.path.join(a, &.{ dir, staged_name })));
 
+    // As a download cut short leaves it.
+    const archive = try std.fs.path.join(a, &.{ dir, staged_name ++ ".zip" });
+    try fs.write(std.testing.io, archive, "part");
     try removeLeftovers(a, std.testing.io, dir);
     try std.testing.expect(!fs.exists(std.testing.io, old));
+    try std.testing.expect(!fs.exists(std.testing.io, archive));
     try std.testing.expectEqualStrings("mine", try fs.readAlloc(a, std.testing.io, save, 16));
 }
 
@@ -539,7 +547,7 @@ test "a package with a bad signature or without the game changes nothing" {
     for (cases) |k| {
         var server: TestServer = .{ .server = undefined, .thread = undefined };
         const url = try server.start(k.zip);
-        const r = replacePackage(a, std.testing.io, url, k.proof, .{ .folder = dir }, &progress);
+        const r = replacePackage(a, std.testing.io, url, k.proof, dir, windows_folder, swapFiles, dir, &progress);
         server.stop();
         try std.testing.expectError(k.want, r);
         try std.testing.expectEqualStrings("old", try fs.readAlloc(a, std.testing.io, exe, 16));
@@ -569,4 +577,73 @@ test "a swap that fails partway puts every file back" {
 
     try std.testing.expect(std.meta.isError(swapFiles(a, std.testing.io, from, to)));
     for (names) |n| try std.testing.expectEqualStrings("old", try fs.readAlloc(a, std.testing.io, try std.fs.path.join(a, &.{ to, n }), 16));
+}
+
+test "a signature must be 64 bytes, and it vouches for the tag and asset in the url" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const key: [32]u8 = @splat(7);
+    for ([_][]const u8{ &@as([63]u8, @splat(1)), &@as([65]u8, @splat(1)) }) |body| {
+        var server: TestServer = .{ .server = undefined, .thread = undefined };
+        const base = try a.dupe(u8, try server.start(body));
+        const r = fetchProof(std.testing.allocator, std.testing.io, base, try std.fmt.allocPrint(a, "{s}v1.0.0/a.zip", .{base}), key);
+        server.stop();
+        try std.testing.expectError(error.BadSignature, r);
+    }
+    var server: TestServer = .{ .server = undefined, .thread = undefined };
+    const base = try a.dupe(u8, try server.start(&@as([64]u8, @splat(2))));
+    const r = fetchProof(std.testing.allocator, std.testing.io, base, try std.fmt.allocPrint(a, "{s}v1.0.0/a.zip", .{base}), key);
+    server.stop();
+    const proof = try r;
+    try std.testing.expectEqualStrings("v1.0.0/a.zip", proof.name);
+    try std.testing.expectEqual(@as([64]u8, @splat(2)), proof.signature);
+    try std.testing.expectEqual(key, proof.key);
+}
+
+test "only a writable bundle is a target" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try fs.mkdirs(std.testing.io, try tmpPath(a, &tmp, "apps/x.app/Contents/Resources"));
+    try fs.mkdirs(std.testing.io, try tmpPath(a, &tmp, "bin/Contents/Resources"));
+    const bundle = bundleOf(std.testing.io, try tmpPath(a, &tmp, "apps/x.app/Contents/Resources/")).?;
+    try std.testing.expectEqualStrings(try tmpPath(a, &tmp, "apps/x.app"), bundle.app);
+    try std.testing.expectEqualStrings(try tmpPath(a, &tmp, "apps"), bundle.dir);
+    try std.testing.expectEqual(@as(?Bundle, null), bundleOf(std.testing.io, try tmpPath(a, &tmp, "bin/Contents/Resources/")));
+    // Root writes anywhere, and Windows ignores the mode.
+    if (builtin.os.tag == .windows or std.c.geteuid() == 0) return;
+    try tmp.dir.setFilePermissions(std.testing.io, "apps", .fromMode(0o555), .{});
+    defer tmp.dir.setFilePermissions(std.testing.io, "apps", .fromMode(0o755), .{}) catch {};
+    try std.testing.expectEqual(@as(?Bundle, null), bundleOf(std.testing.io, try tmpPath(a, &tmp, "apps/x.app/Contents/Resources/")));
+}
+
+test "a verified bundle swaps in whole, and the old one leaves with the staging folder" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmpPath(a, &tmp, "apps");
+    const app = try std.fs.path.join(a, &.{ dir, "renamed.app" });
+    try fs.mkdirs(std.testing.io, app);
+    try fs.write(std.testing.io, try std.fs.path.join(a, &.{ app, "old.txt" }), "old");
+    const zip = try zipBytes(a, &tmp, &.{ macos_bundle ++ "/" ++ macos_exe, macos_bundle ++ "/Contents/Info.plist" });
+
+    var server: TestServer = .{ .server = undefined, .thread = undefined };
+    const url = try server.start(zip);
+    var progress: http.Progress = .{};
+    const applied = replacePackage(a, std.testing.io, url, try proofFor(zip, "v1.0.0/a.zip", 1), dir, macos_bundle, swapBundle, app, &progress);
+    server.stop();
+    try applied;
+    const exe = try std.fs.path.join(a, &.{ app, macos_exe });
+    try std.testing.expectEqualStrings("new", try fs.readAlloc(a, std.testing.io, exe, 16));
+    try std.testing.expect(!fs.exists(std.testing.io, try std.fs.path.join(a, &.{ app, "old.txt" })));
+    try std.testing.expect(!fs.exists(std.testing.io, try std.fs.path.join(a, &.{ dir, staged_name })));
+    const file = try std.Io.Dir.cwd().openFile(std.testing.io, exe, .{});
+    defer file.close(std.testing.io);
+    try std.testing.expect((try file.stat(std.testing.io)).permissions.toMode() & 0o111 != 0);
 }
