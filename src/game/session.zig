@@ -242,7 +242,7 @@ pub const Session = struct {
                     continue;
                 };
                 defer job.gpa.free(bytes);
-                job.samples[i] = decode.decode(job.gpa, bytes, path, job.rate) catch blk: {
+                job.samples[i] = decode.decode(job.gpa, bytes, path, job.rate, job.cancel) catch blk: {
                     _ = job.failed.fetchAdd(1, .monotonic);
                     break :blk .{};
                 };

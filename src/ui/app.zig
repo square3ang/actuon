@@ -53,12 +53,13 @@ const ChartImages = struct {
     h: [3]c_int = @splat(0),
     thread: ?*c.SDL_Thread = null,
     done: std.atomic.Value(bool) = .init(false),
+    cancel: std.atomic.Value(bool) = .init(false),
 
     fn run(ud: ?*anyopaque) callconv(.c) c_int {
         const j: *ChartImages = @ptrCast(@alignCast(ud));
         defer j.done.store(true, .release);
         for (j.names, &j.px, &j.w, &j.h) |name, *px, *w, *h| {
-            if (name.len == 0) continue;
+            if (name.len == 0 or j.cancel.load(.acquire)) continue;
             const path = (fs.resolveAsset(j.arena.allocator(), j.io, j.dir, name, &.{ "png", "jpg", "jpeg", "bmp", "gif", "tga" }) catch null) orelse continue;
             const bytes = fs.readAlloc(j.gpa, j.io, path, 1 << 26) catch continue;
             defer j.gpa.free(bytes);
@@ -491,6 +492,8 @@ pub const App = struct {
     fn finishChartImages(a: *App, show: bool) void {
         const j = a.chart_images orelse return;
         a.chart_images = null;
+        // Images nobody will see are skipped, so backing out waits on one decode at most.
+        if (!show) j.cancel.store(true, .release);
         c.SDL_WaitThread(j.thread, null);
         for (j.px, j.w, j.h, a.chartImageSlots()) |px, w, h, slot| if (px) |p| {
             if (show) slot.* = gfx.textureFitted(&a.g, p, w, h);
@@ -607,6 +610,8 @@ pub const App = struct {
         if (a.load_skin_at != 0 and a.play_skin != null) a.skin_state.load_ms = elapsed;
         a.skin_state.fromSession(s, &a.cfg);
         if (a.load_skin_at == 0) a.reloadSkins(s.chart.mode);
+        // Play and the result draw these too, and nothing polls the job after this.
+        a.finishChartImages(true);
         a.scene = .play;
         // As beatoraja, the load's end is heard; a preview jumping in partway stays quiet.
         if (a.load_params.start_us == 0) if (a.sfx_play_ready) |e| if (e.ready.load(.acquire) and e.data.len > 0) {
@@ -1279,4 +1284,27 @@ test "a chart image claiming to be huge is refused before decoding" {
     tga[15] = 0;
     try std.testing.expect(gfx.imageFits(&tga, gfx.max_chart_image_px));
     try std.testing.expect(!gfx.imageFits("not an image", gfx.max_chart_image_px));
+}
+
+test "a canceled chart image job decodes nothing more" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [128]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var tga: [19]u8 = @splat(0);
+    tga[2] = 3;
+    tga[12] = 1;
+    tga[14] = 1;
+    tga[16] = 8;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.tga", .data = &tga });
+    for ([_]bool{ false, true }) |cancel| {
+        var j: ChartImages = .{ .gpa = gpa, .io = std.testing.io, .arena = .init(gpa), .dir = dir };
+        defer j.arena.deinit();
+        j.names[0] = "a.tga";
+        j.cancel.store(cancel, .release);
+        _ = ChartImages.run(&j);
+        try std.testing.expectEqual(cancel, j.px[0] == null);
+        if (j.px[0]) |p| c.stbi_image_free(p);
+    }
 }

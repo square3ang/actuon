@@ -28,7 +28,7 @@ const Job = struct {
     fn decodeFile(j: *Job) ![]f32 {
         const bytes = try fs.readAlloc(j.gpa, j.io, j.path, 1 << 28);
         defer j.gpa.free(bytes);
-        return (try decode.decode(std.heap.page_allocator, bytes, j.path, j.rate)).data;
+        return (try decode.decode(std.heap.page_allocator, bytes, j.path, j.rate, null)).data;
     }
 
     /// Hands over `path`, which the caller keeps or frees.

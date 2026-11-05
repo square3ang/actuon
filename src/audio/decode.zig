@@ -20,7 +20,7 @@ fn lower(path: []const u8, buf: []u8) []const u8 {
     return std.ascii.lowerString(buf, path[path.len -| @min(path.len, buf.len)..]);
 }
 
-fn decodeRaw(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8) !Raw {
+fn decodeRaw(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8, cancel: ?*const std.atomic.Value(bool)) !Raw {
     var ext_buf: [8]u8 = undefined;
     const ext = lower(std.fs.path.extension(name), &ext_buf);
     // Trust content over extension order only as far as trying each decoder: charts mislabel files.
@@ -37,7 +37,7 @@ fn decodeRaw(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8) !Raw {
             var w: c.drwav = undefined;
             if (c.drwav_init_memory(&w, bytes.ptr, bytes.len, null) != 0) {
                 defer _ = c.drwav_uninit(&w);
-                if (try readAll(gpa, &w, w.channels, w.sampleRate, c.drwav_read_pcm_frames_f32)) |raw| return raw;
+                if (try readAll(gpa, cancel, &w, w.channels, w.sampleRate, c.drwav_read_pcm_frames_f32)) |raw| return raw;
             }
         },
         // drflac is opaque to zig, so rate and channels come from STREAMINFO, which a native FLAC file opens with.
@@ -46,14 +46,14 @@ fn decodeRaw(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8) !Raw {
                 defer c.drflac_close(f);
                 const rate = @as(u32, bytes[18]) << 12 | @as(u32, bytes[19]) << 4 | bytes[20] >> 4;
                 const channels = (bytes[20] >> 1 & 7) + 1;
-                if (try readAll(gpa, f, channels, rate, c.drflac_read_pcm_frames_f32)) |raw| return raw;
+                if (try readAll(gpa, cancel, f, channels, rate, c.drflac_read_pcm_frames_f32)) |raw| return raw;
             }
         },
         'm' => {
             var m: c.drmp3 = undefined;
             if (c.drmp3_init_memory(&m, bytes.ptr, bytes.len, null) != 0) {
                 defer c.drmp3_uninit(&m);
-                if (try readAll(gpa, &m, m.channels, m.sampleRate, c.drmp3_read_pcm_frames_f32)) |raw| return raw;
+                if (try readAll(gpa, cancel, &m, m.channels, m.sampleRate, c.drmp3_read_pcm_frames_f32)) |raw| return raw;
             }
         },
         'o' => if (bytes.len <= std.math.maxInt(c_int)) {
@@ -63,7 +63,7 @@ fn decodeRaw(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8) !Raw {
                 const info = c.stb_vorbis_get_info(v);
                 var ogg: Ogg = .{ .v = v, .channels = info.channels };
                 if (info.channels > 0) {
-                    if (try readAll(gpa, &ogg, @intCast(info.channels), info.sample_rate, Ogg.read)) |raw| return raw;
+                    if (try readAll(gpa, cancel, &ogg, @intCast(info.channels), info.sample_rate, Ogg.read)) |raw| return raw;
                 }
             }
         },
@@ -72,12 +72,13 @@ fn decodeRaw(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8) !Raw {
     return error.UndecodableAudio;
 }
 
-fn readAll(gpa: std.mem.Allocator, dec: anytype, channels: u32, rate: u32, comptime read: anytype) !?Raw {
+fn readAll(gpa: std.mem.Allocator, cancel: ?*const std.atomic.Value(bool), dec: anytype, channels: u32, rate: u32, comptime read: anytype) !?Raw {
     if (channels == 0 or rate == 0) return null;
     const chunk = 4096;
     var out: std.ArrayList(f32) = .empty;
     errdefer out.deinit(gpa);
     while (true) {
+        if (cancel) |f| if (f.load(.monotonic)) return error.Canceled;
         const room = try out.addManyAsSlice(gpa, chunk * channels);
         const got: usize = @intCast(@min(read(dec, chunk, room.ptr), chunk));
         out.shrinkRetainingCapacity(out.items.len - (chunk - got) * channels);
@@ -133,8 +134,9 @@ fn hermite(x0: f32, x1: f32, x2: f32, x3: f32, t: f32) f32 {
     return ((a * t + b) * t + cc) * t + x1;
 }
 
-pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8, out_rate: u32) !Sample {
-    const raw = try decodeRaw(gpa, bytes, name);
+/// A set `cancel` stops the decode between chunks, so one long song does not hold a backed-out load.
+pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8, out_rate: u32, cancel: ?*const std.atomic.Value(bool)) !Sample {
+    const raw = try decodeRaw(gpa, bytes, name, cancel);
     defer gpa.free(raw.samples);
     return resample(gpa, raw.samples, raw.channels, raw.rate, out_rate);
 }
@@ -144,7 +146,7 @@ pub fn decodeSpan(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8, o
         defer gpa.free(span.samples);
         return resample(gpa, span.samples, span.channels, span.rate, out_rate);
     } else |e| if (e != error.NotOgg) return e;
-    const raw = try decodeRaw(gpa, bytes, name);
+    const raw = try decodeRaw(gpa, bytes, name, null);
     defer gpa.free(raw.samples);
     const ch = raw.channels;
     const frames = raw.samples.len / ch;
@@ -218,12 +220,21 @@ test "a sound longer than any song is refused while reading, not after" {
     // 1 s of tone at 8 kHz decodes; 30.5 min of silence fits in 9 KB and does not.
     const tone = try fs.readAlloc(gpa, std.testing.io, "tests/audio/short_tone.flac", 1 << 20);
     defer gpa.free(tone);
-    const s = try decode(gpa, tone, "short_tone.flac", 48000);
+    const s = try decode(gpa, tone, "short_tone.flac", 48000, null);
     defer gpa.free(s.data);
     try std.testing.expectEqual(@as(usize, 48000), s.frames());
     const long = try fs.readAlloc(gpa, std.testing.io, "tests/audio/long_silence.flac", 1 << 20);
     defer gpa.free(long);
-    try std.testing.expectError(error.UndecodableAudio, decodeRaw(gpa, long, "long_silence.flac"));
+    try std.testing.expectError(error.UndecodableAudio, decodeRaw(gpa, long, "long_silence.flac", null));
+}
+
+test "a canceled decode stops and frees what it read" {
+    const fs = @import("../platform/fs.zig");
+    const gpa = std.testing.allocator;
+    const tone = try fs.readAlloc(gpa, std.testing.io, "tests/audio/short_tone.flac", 1 << 20);
+    defer gpa.free(tone);
+    const cancel: std.atomic.Value(bool) = .init(true);
+    try std.testing.expectError(error.Canceled, decode(gpa, tone, "short_tone.flac", 48000, &cancel));
 }
 
 test "wav decode through resampler keeps duration" {
@@ -241,7 +252,7 @@ test "wav decode through resampler keeps duration" {
     std.mem.writeInt(u16, buf[34..36], 16, .little);
     @memcpy(buf[36..40], "data");
     std.mem.writeInt(u32, buf[40..44], 4000, .little);
-    const s = try decode(std.testing.allocator, &buf, "x.wav", 48000);
+    const s = try decode(std.testing.allocator, &buf, "x.wav", 48000, null);
     defer std.testing.allocator.free(s.data);
     try std.testing.expectEqual(@as(usize, 12000), s.frames());
     try std.testing.expectEqual(@as(?i64, 250_000), lengthUs(&buf));
@@ -257,5 +268,5 @@ test "wav decode through resampler keeps duration" {
     try std.testing.expectEqual(@as(?i64, null), lengthUs(ogg[0..40]));
     std.mem.writeInt(u32, buf[24..28], 1, .little);
     std.mem.writeInt(u32, buf[28..32], 2, .little);
-    try std.testing.expectError(error.UndecodableAudio, decode(std.testing.allocator, &buf, "x.wav", 48000));
+    try std.testing.expectError(error.UndecodableAudio, decode(std.testing.allocator, &buf, "x.wav", 48000, null));
 }

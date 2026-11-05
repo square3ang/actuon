@@ -72,7 +72,7 @@ pub const Entry = struct {
         const bytes = fs.readAlloc(e.gpa, e.io, e.path, 1 << 28) catch return 0;
         defer e.gpa.free(bytes);
         // Voices read this until exit, past the engine, like the menu sounds.
-        const s = decode.decode(std.heap.page_allocator, bytes, e.path, e.rate) catch return 0;
+        const s = decode.decode(std.heap.page_allocator, bytes, e.path, e.rate, null) catch return 0;
         e.data = s.data;
         return 0;
     }
