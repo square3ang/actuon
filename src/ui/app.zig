@@ -1004,13 +1004,15 @@ pub const App = struct {
             return a.showNotice(tr("Screenshot failed"));
         };
         defer a.gpa.free(path);
+        // saveShot waits for the shot before, so report it rather than lose its notice.
+        a.noticeScreenshot(true);
         if (a.g.saveShot(path)) return;
         std.log.err("screenshot failed: {s}", .{c.SDL_GetError()});
         a.showNotice(tr("Screenshot failed"));
     }
 
-    fn noticeScreenshot(a: *App) void {
-        const ok = a.g.shotResult(false) orelse return;
+    fn noticeScreenshot(a: *App, wait: bool) void {
+        const ok = a.g.shotResult(wait) orelse return;
         a.showNotice(if (ok) tr("Screenshot saved") else tr("Screenshot failed"));
     }
 
@@ -1100,7 +1102,7 @@ pub const App = struct {
                 a.shot_wanted = false;
                 a.saveScreenshot();
             } else {
-                a.noticeScreenshot();
+                a.noticeScreenshot(false);
                 a.drawNotice();
                 a.g.present();
             }
@@ -1268,6 +1270,8 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, opts: Options) !void {
     // Captures stay offline, so every run draws the same version row.
     if (app.shot_path == null) app.set.update = update.start(gpa, io);
     app.run();
+    // The exit below skips Gfx.deinit, which would wait for a screenshot still being written.
+    _ = app.g.shotResult(true);
     const update_ended = if (app.set.update) |j| j.abandon() else true;
     // A thread stuck on a dead connection still allocates, and the allocator's shutdown check would crash it.
     if (!ir.waitForThreads() or !update_ended) std.process.exit(0);
