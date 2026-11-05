@@ -210,12 +210,14 @@ fn urlHost(url: []const u8) ?[]const u8 {
     return if (std.mem.indexOfScalar(u8, host, '%') == null) host else null;
 }
 
-/// shortcut: keeps hostile tables off the home network but checks the written host, not where its name resolves or a redirect goes; check the connected address if that matters.
+/// Refuses before any connection is made; http.getPublic then checks where the name really leads.
 fn isPrivateHost(written: []const u8) bool {
     const host = std.mem.trimEnd(u8, written, ".");
     if (std.ascii.eqlIgnoreCase(host, "localhost") or std.ascii.endsWithIgnoreCase(host, ".localhost")) return true;
-    // Only global unicast is public, which also covers the spellings of ::1 and mapped IPv4.
-    if (host.len > 0 and host[0] == '[') return host.len < 2 or (host[1] != '2' and host[1] != '3');
+    if (host.len > 0 and host[0] == '[') {
+        if (host.len < 2 or host[host.len - 1] != ']') return true;
+        return http.isPrivateAddress(std.Io.net.IpAddress.parseIp6(host[1 .. host.len - 1], 0) catch return true);
+    }
     const last = host[if (std.mem.lastIndexOfScalar(u8, host, '.')) |dot| dot + 1 else 0..];
     const is_number = for (last) |ch| {
         if (!std.ascii.isDigit(ch)) break false;
@@ -230,8 +232,7 @@ fn isPrivateHost(written: []const u8) bool {
         octet.* = std.fmt.parseInt(u8, text, 10) catch return true;
     }
     if (it.next() != null) return true;
-    return octets[0] == 0 or octets[0] == 10 or octets[0] == 127 or (octets[0] == 169 and octets[1] == 254) or
-        (octets[0] == 172 and octets[1] >= 16 and octets[1] <= 31) or (octets[0] == 192 and octets[1] == 168);
+    return http.isPrivateAddress(.{ .ip4 = .{ .bytes = octets, .port = 0 } });
 }
 
 /// Plain HTTP past the player's own network: a password or IR token sent there could be read on the way.
@@ -248,14 +249,14 @@ fn refAllowed(table_url: []const u8, ref_url: []const u8) bool {
 }
 
 pub fn fetch(gpa: std.mem.Allocator, io: std.Io, d: Db, url: []const u8) !FetchResult {
-    const page = try http.get(gpa, io, url);
+    const page = try http.getPublic(gpa, io, url, url);
     defer gpa.free(page);
     var head_url: []u8 = undefined;
     // Some entries point straight at the header JSON.
     if (findMeta(page)) |m| head_url = try http.join(gpa, url, m) else head_url = try gpa.dupe(u8, url);
     defer gpa.free(head_url);
     if (!refAllowed(url, head_url)) return error.BadTable;
-    const head_bytes = if (std.mem.eql(u8, head_url, url)) try gpa.dupe(u8, page) else try http.get(gpa, io, head_url);
+    const head_bytes = if (std.mem.eql(u8, head_url, url)) try gpa.dupe(u8, page) else try http.getPublic(gpa, io, head_url, url);
     defer gpa.free(head_bytes);
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -263,7 +264,7 @@ pub fn fetch(gpa: std.mem.Allocator, io: std.Io, d: Db, url: []const u8) !FetchR
     if (head != .object) return error.BadTable;
     const data_url = try http.join(arena.allocator(), head_url, str(head.object.get("data_url")));
     if (!refAllowed(url, data_url)) return error.BadTable;
-    const data_bytes = try http.get(gpa, io, data_url);
+    const data_bytes = try http.getPublic(gpa, io, data_url, url);
     defer gpa.free(data_bytes);
     return store(gpa, d, url, head_bytes, data_bytes);
 }
