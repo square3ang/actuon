@@ -197,12 +197,21 @@ pub const Session = struct {
     const no_seek = std.math.minInt(i64);
     /// Covers the OS handing over an event stamped a moment before.
     const input_grace_us = 5_000;
+    /// The evdev thread hands over kernel-stamped events only once it is scheduled, which load can delay.
+    const direct_grace_us = 20_000;
     /// A main loop stalled longer than this, as by a dragged window, stops holding judging back.
     const max_input_lag_us = 250_000;
 
-    /// Judging stops short of any input still on its way, so a late-read event keeps its own time.
-    fn judgedUntil(now: i64, read_us: i64, judge_offset_us: i64) i64 {
-        return @max(@min(now, read_us), now - max_input_lag_us) - @max(judge_offset_us, 0) - input_grace_us;
+    /// Judging stops short of input still on its way; a null `sdl_read_us` means no play input comes through SDL.
+    fn judgedUntil(now: i64, sdl_read_us: ?i64, direct: bool, judge_offset_us: i64) i64 {
+        var t = now - @as(i64, if (direct) direct_grace_us else input_grace_us);
+        if (sdl_read_us) |r| t = @min(t, @max(@min(now, r), now - max_input_lag_us) - input_grace_us);
+        return t - @max(judge_offset_us, 0);
+    }
+
+    /// An auto-scratch lane's keysounds ride the engine schedule, so a lagged judge step cannot delay them.
+    fn autoScratchLane(chart: *const Chart, auto_scratch: bool, lane: u8) bool {
+        return auto_scratch and chart.mode.scratchOf(lane) >= 0;
     }
 
     pub fn parseFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8, selected: ?[]const i32, seed: u64) !Chart {
@@ -297,7 +306,7 @@ pub const Session = struct {
         for (threads) |t| if (t != null) c.SDL_WaitThread(t, null);
 
         chart.last_time_us = playEnd(&chart, samples, engine.rate, params.practice != null);
-        const sched = try buildSchedule(gpa, &chart, engine);
+        const sched = try buildSchedule(gpa, &chart, engine, played.assist.auto_scratch);
         errdefer gpa.free(sched);
         const sim = try Sim.create(gpa, &chart, simConfig(played, params.autoplay));
         errdefer sim.destroy();
@@ -327,15 +336,28 @@ pub const Session = struct {
         return s;
     }
 
-    fn buildSchedule(gpa: std.mem.Allocator, chart: *const Chart, e: *engine_mod.Engine) ![]engine_mod.Sched {
-        const out = try gpa.alloc(engine_mod.Sched, chart.bg.len);
-        for (chart.bg, out) |b, *o| o.* = .{
+    fn buildSchedule(gpa: std.mem.Allocator, chart: *const Chart, e: *const engine_mod.Engine, auto_scratch: bool) ![]engine_mod.Sched {
+        var out: std.ArrayList(engine_mod.Sched) = try .initCapacity(gpa, chart.bg.len);
+        errdefer out.deinit(gpa);
+        for (chart.bg) |b| out.appendAssumeCapacity(.{
             .frame = e.usToFrame(b.time_us),
             .wav = b.wav,
             .start = @intCast(e.usToFrame(b.wav_start_us)),
             .len = @intCast(e.usToFrame(b.wav_dur_us)),
-        };
-        return out;
+        });
+        // The sim sounds an auto lane's normal and LN start notes, and never a mine there.
+        for (chart.notes) |n| if (autoScratchLane(chart, auto_scratch, n.lane) and n.wav >= 0 and (n.kind == .normal or n.kind == .ln_start)) try out.append(gpa, .{
+            .frame = e.usToFrame(n.time_us),
+            .wav = n.wav,
+            .start = @intCast(e.usToFrame(n.wav_start_us)),
+            .len = @intCast(e.usToFrame(n.wav_dur_us)),
+        });
+        std.mem.sort(engine_mod.Sched, out.items, {}, struct {
+            fn lt(_: void, a: engine_mod.Sched, b: engine_mod.Sched) bool {
+                return a.frame < b.frame;
+            }
+        }.lt);
+        return out.toOwnedSlice(gpa);
     }
 
     pub fn start(s: *Session) void {
@@ -394,14 +416,18 @@ pub const Session = struct {
         var out: [256]core.sim.Out = undefined;
         var snap: Snapshot = .{};
         var rp_i: usize = 0;
+        const joy_bound = for (s.bind[input.joy_base..]) |b| {
+            if (b != null) break true;
+        } else false;
         while (!s.quit.load(.acquire)) {
             const target = s.seek_to.swap(no_seek, .acq_rel);
             if (target != no_seek) s.doSeek(target, &snap);
 
             const paused = s.paused.load(.acquire);
             const now = if (paused) s.pause_t.load(.acquire) else s.songNow();
+            const direct = input.direct_keyboard.load(.acquire);
             // Read before the queue: the main loop publishes it after pushing what it read.
-            const read_us = if (s.engine.clockReady()) s.engine.toSongUs(input.sdl_read_ns.load(.acquire)) else now;
+            const sdl_read_us: ?i64 = if (direct and !joy_bound) null else if (s.engine.clockReady()) s.engine.toSongUs(input.sdl_read_ns.load(.acquire)) else now;
             while (input.pop()) |ev| {
                 if (!s.params.allow_input or s.params.replay != null or s.params.autoplay) continue;
                 const b = s.bind[ev.code] orelse continue;
@@ -421,11 +447,11 @@ pub const Session = struct {
                 }
             }
             // Replays and autoplay have no late events, and their keysounds must not lag.
-            s.sim.advance(if (s.params.replay != null or s.params.autoplay) now else judgedUntil(now, read_us, s.params.judge_offset_us));
+            s.sim.advance(if (s.params.replay != null or s.params.autoplay) now else judgedUntil(now, sdl_read_us, direct, s.params.judge_offset_us));
 
             const n = s.sim.drain(&out);
             for (out[0..n]) |o| switch (o.kind) {
-                .sound => {
+                .sound => if (!autoScratchLane(&s.chart, s.sim.auto_scratch, o.lane)) {
                     const note = s.chart.notes[@intCast(o.note)];
                     const startf: u32 = @intCast(s.engine.usToFrame(note.wav_start_us));
                     const lenf: u32 = @intCast(s.engine.usToFrame(note.wav_dur_us));
@@ -616,9 +642,13 @@ test "an input older than judged time scores the same when resimulated" {
 test "judging waits for input a slow frame has not read yet" {
     const now: i64 = 10_000_000;
     const read = now - 50_000;
-    try std.testing.expect(Session.judgedUntil(now, read, 0) <= read);
-    try std.testing.expect(Session.judgedUntil(now, now, 30_000) <= now - 30_000);
-    try std.testing.expectEqual(now - Session.max_input_lag_us - Session.input_grace_us, Session.judgedUntil(now, 0, 0));
+    try std.testing.expect(Session.judgedUntil(now, read, false, 0) <= read);
+    try std.testing.expect(Session.judgedUntil(now, now, false, 30_000) <= now - 30_000);
+    try std.testing.expectEqual(now - Session.max_input_lag_us - Session.input_grace_us, Session.judgedUntil(now, 0, false, 0));
+    // Direct keys alone: a stalled main loop holds nothing back, but a late evdev thread stays covered.
+    try std.testing.expectEqual(now - Session.direct_grace_us, Session.judgedUntil(now, null, true, 0));
+    try std.testing.expect(Session.judgedUntil(now, now, true, 0) <= now - Session.direct_grace_us);
+    try std.testing.expect(Session.judgedUntil(now, read, true, 0) <= read);
 
     const gpa = std.testing.allocator;
     var chart = try core.bms.parse(gpa, "#BPM 120\n#TOTAL 300\n#WAV01 a.wav\n#00111:01\n", .{});
@@ -631,10 +661,38 @@ test "judging waits for input a slow frame has not read yet" {
     s.events = try .initCapacity(gpa, 4);
     defer s.events.deinit(gpa);
     const note_t = chart.notes[0].time_us;
-    s.sim.advance(Session.judgedUntil(note_t + 50_000, note_t, 0));
+    s.sim.advance(Session.judgedUntil(note_t + 50_000, note_t, false, 0));
     s.applyInput(note_t, chart.notes[0].lane, 0, true);
     try std.testing.expectEqual(note_t, s.events.items[0].time_us);
     try std.testing.expectEqual(@as(u32, 1), s.sim.score.count(.pg));
+}
+
+test "auto-scratch keysounds play from the schedule, not from the lagged judge step" {
+    const gpa = std.testing.allocator;
+    // BGM at 2 s, a key note at 2.5 s and a scratch note at 3 s.
+    var chart = try core.bms.parse(gpa, "#BPM 120\n#WAV01 a.wav\n#WAV02 b.wav\n#WAV03 c.wav\n#00101:01\n#00111:0002\n#00116:0003\n", .{});
+    defer chart.deinit();
+    const e: engine_mod.Engine = .{ .gpa = gpa, .rate = 1000 };
+    const plain = try Session.buildSchedule(gpa, &chart, &e, false);
+    defer gpa.free(plain);
+    try std.testing.expectEqual(@as(usize, 1), plain.len);
+    const auto = try Session.buildSchedule(gpa, &chart, &e, true);
+    defer gpa.free(auto);
+    try std.testing.expectEqual(@as(usize, 2), auto.len);
+    try std.testing.expectEqual(@as(i64, 2000), auto[0].frame);
+    try std.testing.expectEqual(@as(i64, 3000), auto[1].frame);
+    try std.testing.expectEqual(@as(i32, 2), auto[1].wav);
+
+    var sim = try Sim.create(gpa, &chart, .{ .auto_scratch = true });
+    defer sim.destroy();
+    sim.advance(4_000_000);
+    var out: [16]core.sim.Out = undefined;
+    var sounds: u32 = 0;
+    for (out[0..sim.drain(&out)]) |o| if (o.kind == .sound) {
+        try std.testing.expect(Session.autoScratchLane(&chart, true, o.lane));
+        sounds += 1;
+    };
+    try std.testing.expectEqual(@as(u32, 1), sounds);
 }
 
 test "a practice section keeps its notes, hands the rest to the music and moves to the new speed" {

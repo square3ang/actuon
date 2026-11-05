@@ -260,6 +260,17 @@ test "a clip keeps pace with the practice speed" {
     try std.testing.expectEqual(@as(i64, 2_000_000), clipUs(1_000_000, 200));
     try std.testing.expectEqual(@as(i64, 500_000), clipUs(1_000_000, 50));
     try std.testing.expectEqual(@as(i64, 1_000_000), clipUs(1_000_000, 100));
+
+    const gpa = std.testing.allocator;
+    var s: Session = undefined;
+    s.chart = try core.bms.parse(gpa, "#BPM 120\n#BMP01 missing.png\n#00104:01\n", .{});
+    defer s.chart.deinit();
+    s.params = .{ .path = "/nonexistent-actuon/x.bms", .practice = .{ .start_us = 0, .end_us = 1, .freq = 150 } };
+    // A missing file never reaches the GPU.
+    var g: gfx.Gfx = undefined;
+    const b = Bga.create(gpa, std.testing.io, &g, &s).?;
+    defer b.destroy();
+    try std.testing.expectEqual(@as(u32, 150), b.freq);
 }
 
 pub const Look = struct {
