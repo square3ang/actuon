@@ -10,7 +10,7 @@ use hyper::body::{Bytes, Incoming};
 use hyper::header::{CONNECTION, CONTENT_TYPE, UPGRADE};
 use hyper::{Method, Request, Response};
 use hyper_util::rt::{TokioIo, TokioTimer};
-use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
+use rusqlite::{params, Connection, ErrorCode, OpenFlags, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -1053,6 +1053,14 @@ fn verify_main(args: &[String]) -> i32 {
     }
 }
 
+/// VACUUM INTO copies one snapshot without blocking the server, which the host's sqlite3 is too old for. Read-only, so a missing database is not created.
+fn backup(from: &str, to: &str) -> rusqlite::Result<()> {
+    let db = Connection::open_with_flags(from, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    db.busy_timeout(Duration::from_secs(5))?;
+    db.execute("VACUUM INTO ?1", [to])?;
+    Ok(())
+}
+
 fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     let db = Connection::open(path)?;
     db.busy_timeout(Duration::from_secs(5))?;
@@ -1088,6 +1096,17 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--verify") {
         std::process::exit(verify_main(&args));
+    }
+    if args.get(1).map(String::as_str) == Some("--backup") {
+        let (Some(from), Some(to)) = (args.get(2), args.get(3)) else {
+            eprintln!("usage: actuon-ir --backup DB COPY");
+            std::process::exit(2);
+        };
+        if let Err(e) = backup(from, to) {
+            eprintln!("backup {from}: {e}");
+            std::process::exit(1);
+        }
+        return;
     }
     let addr = args
         .get(1)

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Usage: backup_check.py BACKUP_SH WORKDIR"""
+"""Usage: backup_check.py BACKUP_SH ACTUON_IR WORKDIR"""
 import glob, os, sqlite3, subprocess, sys
 
-script, work = os.path.abspath(sys.argv[1]), sys.argv[2]
+script, server, work = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2]), sys.argv[3]
 data, bucket = os.path.join(work, "data"), os.path.join(work, "bucket")
 os.makedirs(data)
-env = {**os.environ, "DATA_DIR": data, "S3_BUCKET": bucket, "RCLONE_CONFIG_BACKUP_TYPE": "local"}
+env = {**os.environ, "DATA_DIR": data, "S3_BUCKET": bucket, "RCLONE_CONFIG_BACKUP_TYPE": "local", "ACTUON_IR": server}
 
 def run(*args):
     return subprocess.run(["sh", script, *args], env=env, capture_output=True, text=True)
@@ -37,7 +37,11 @@ assert len(copies()) == 1
 os.utime(copies()[0], (1, 1))
 old = copies()[0]
 os.rename(old, os.path.join(bucket, "db", "ir-20000101-000000.db.gz"))
-assert run("once").returncode == 0
+db.execute("BEGIN IMMEDIATE")
+db.execute("INSERT INTO t VALUES('uncommitted')")
+r = run("once")
+assert r.returncode == 0, "a busy server does not hold the backup up: " + r.stderr
+db.rollback()
 assert len(copies()) == 1 and "ir-2000" not in copies()[0], "copies past 30 days go"
 
 db.execute("INSERT INTO t VALUES('after backup')")
