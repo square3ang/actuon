@@ -113,6 +113,7 @@ pub fn build(b: *std.Build) void {
         mod.linkFramework("IOKit", .{});
         mod.linkFramework("CoreFoundation", .{});
         mod.linkFramework("CoreServices", .{});
+        mod.linkFramework("CoreGraphics", .{});
     }
     // zig does not search MSYS2's default folders; translate-c gets includes only, as -l fails on coff there.
     if (os == .windows) {

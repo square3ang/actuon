@@ -554,10 +554,10 @@ pub fn openControls(a: *App) void {
     a.scene = .settings;
 }
 
-/// Key polling needs a key state sampler: Windows has one, Linux only once evdev reads a keyboard, macOS none.
+/// Key polling needs a key state sampler: Windows has one, Linux once evdev reads a keyboard, macOS once HID does.
 fn rowShown(_: *const App, it: Item) bool {
     return switch (it) {
-        .input_poll => builtin.os.tag == .windows or (builtin.os.tag == .linux and input.direct_keyboard.load(.acquire)),
+        .input_poll => builtin.os.tag == .windows or input.direct_keyboard.load(.acquire),
         else => true,
     };
 }

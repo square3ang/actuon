@@ -24,16 +24,26 @@ static unsigned int fold_extended(unsigned int make, int extended) {
     }
 }
 
+// Only raw input sees the E0 prefix, so keys whose virtual key is shared with a twin are sampled from here.
+static volatile LONG held[4];
+
+void actuon_rawinput_key(unsigned int make, unsigned int flags) {
+    unsigned int code = fold_extended(make, (flags & RI_KEY_E0) != 0);
+    if (code == 0 || code >= 128) return;
+    int down = (flags & RI_KEY_BREAK) == 0;
+    LONG bit = (LONG)(1u << (code % 32));
+    if (down) InterlockedOr(&held[code / 32], bit);
+    else InterlockedAnd(&held[code / 32], ~bit);
+    actuon_input_push_set1(code, down);
+}
+
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_INPUT) {
         RAWINPUT ri;
         UINT size = sizeof(ri);
         if (GetRawInputData((HRAWINPUT)lp, RID_INPUT, &ri, &size, sizeof(RAWINPUTHEADER)) != (UINT)-1 &&
-            ri.header.dwType == RIM_TYPEKEYBOARD) {
-            const RAWKEYBOARD *k = &ri.data.keyboard;
-            unsigned int code = fold_extended(k->MakeCode, (k->Flags & RI_KEY_E0) != 0);
-            if (code != 0) actuon_input_push_set1(code, (k->Flags & RI_KEY_BREAK) == 0);
-        }
+            ri.header.dwType == RIM_TYPEKEYBOARD)
+            actuon_rawinput_key(ri.data.keyboard.MakeCode, ri.data.keyboard.Flags);
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
@@ -53,30 +63,39 @@ static DWORD WINAPI thread_main(LPVOID ready) {
     return 0;
 }
 
-// shortcut: keypad keys share virtual keys with the navigation cluster, split them when a binding needs both.
 static int code_vk[128];
+// The keypad digits, Enter and the navigation cluster share virtual keys, and NumLock changes the keypad's, so these read held.
+// held also needs one of the pair down: raw input misses a release on the secure desktop or under an elevated window.
+static int twin_vk[128][2];
 
 static void build_code_vk(void) {
     for (unsigned int i = 1; i < 84; i++) code_vk[i] = (int)MapVirtualKeyW(i, MAPVK_VSC_TO_VK_EX);
-    code_vk[96] = VK_RETURN;
     code_vk[97] = VK_RCONTROL;
     code_vk[98] = VK_DIVIDE;
     code_vk[100] = VK_RMENU;
-    code_vk[102] = VK_HOME;
-    code_vk[103] = VK_UP;
-    code_vk[104] = VK_PRIOR;
-    code_vk[105] = VK_LEFT;
-    code_vk[106] = VK_RIGHT;
-    code_vk[107] = VK_END;
-    code_vk[108] = VK_DOWN;
-    code_vk[109] = VK_NEXT;
-    code_vk[110] = VK_INSERT;
-    code_vk[111] = VK_DELETE;
+    static const unsigned char pad[] = {71, 72, 73, 75, 76, 77, 79, 80, 81, 82, 83};
+    static const unsigned char nav[] = {102, 103, 104, 105, 0, 106, 107, 108, 109, 110, 111}; // keypad 5 has no twin
+    static const int nav_vk[] = {VK_HOME, VK_UP, VK_PRIOR, VK_LEFT, VK_CLEAR, VK_RIGHT, VK_END, VK_DOWN, VK_NEXT, VK_INSERT, VK_DELETE};
+    static const int num_vk[] = {VK_NUMPAD7, VK_NUMPAD8, VK_NUMPAD9, VK_NUMPAD4, VK_NUMPAD5, VK_NUMPAD6,
+                                 VK_NUMPAD1, VK_NUMPAD2, VK_NUMPAD3, VK_NUMPAD0, VK_DECIMAL};
+    for (unsigned int i = 0; i < sizeof(pad); i++) {
+        code_vk[pad[i]] = 0;
+        twin_vk[pad[i]][0] = twin_vk[nav[i]][0] = nav_vk[i];
+        twin_vk[pad[i]][1] = twin_vk[nav[i]][1] = num_vk[i];
+    }
+    code_vk[28] = 0;
+    twin_vk[28][0] = twin_vk[96][0] = VK_RETURN;
+}
+
+static int pressed(int vk) {
+    return vk != 0 && (GetAsyncKeyState(vk) & 0x8000) != 0;
 }
 
 void actuon_rawinput_sample(unsigned char *bits) {
     for (int i = 0; i < 128; i++) {
-        if (code_vk[i] != 0 && (GetAsyncKeyState(code_vk[i]) & 0x8000)) bits[i / 8] |= (unsigned char)(1 << (i % 8));
+        int down = code_vk[i] != 0 ? pressed(code_vk[i])
+                                   : ((held[i / 32] >> (i % 32)) & 1) && (pressed(twin_vk[i][0]) || pressed(twin_vk[i][1]));
+        if (down) bits[i / 8] |= (unsigned char)(1 << (i % 8));
     }
 }
 
