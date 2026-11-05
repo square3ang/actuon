@@ -105,6 +105,7 @@ pub fn applyPractice(chart: *Chart, p: Practice) !void {
     for (notes.items) |*n| {
         if (n.pair >= 0) n.pair = new_index[@intCast(n.pair)];
         n.time_us = scaled(n.time_us, p.freq);
+        if (n.dropped_end_us) |*t| t.* = scaled(t.*, p.freq);
         n.wav_start_us = scaled(n.wav_start_us, p.freq);
         n.wav_dur_us = scaled(n.wav_dur_us, p.freq);
     }
@@ -337,7 +338,6 @@ pub const Session = struct {
             .end_us = if (params.practice != null) std.math.maxInt(i64) else chart.last_time_us + post_us,
             .load_warnings = failed.load(.monotonic),
         };
-        s.sim.notes = s.chart.notes;
         try s.events.ensureTotalCapacity(gpa, chart.total_notes * 4 + 4096);
         try s.timed_hits.ensureTotalCapacity(gpa, chart.total_notes);
         return s;
@@ -517,7 +517,6 @@ pub const Session = struct {
         s.engine.stopAll();
         s.sim.destroy();
         s.sim = fresh;
-        s.sim.notes = s.chart.notes;
         if (s.params.start_us > 0) s.sim.advance(s.params.start_us);
         var sink: [256]core.sim.Out = undefined;
         while (s.sim.drain(&sink) > 0) {}

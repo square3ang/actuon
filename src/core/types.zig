@@ -56,6 +56,8 @@ pub const Note = struct {
     damage: f32 = 0,
     wav_start_us: i64 = 0,
     wav_dur_us: i64 = 0,
+    /// An LN head whose end a later note overwrote: jbms-parser keeps that end off the lane but still judges the hold to it.
+    dropped_end_us: ?i64 = null,
 
     /// Counted once per note in graphs and density, as beatoraja shows them: an LN by its head.
     pub fn graphed(n: Note) bool {

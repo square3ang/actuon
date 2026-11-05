@@ -67,16 +67,6 @@ const no_time = std.math.minInt(i64);
 const hcn_duration: i64 = 200_000;
 const ring_size = 1024;
 
-/// A head or scored end whose partner was overwritten is judged as a plain note; an unscored LN end stays inert.
-fn kindOf(n: Note) types.NoteKind {
-    if (n.pair >= 0) return n.kind;
-    return switch (n.kind) {
-        .ln_start => .normal,
-        .ln_end => if (n.ln_type == .ln) .ln_end else .normal,
-        else => n.kind,
-    };
-}
-
 pub const Config = struct {
     gauge: gauge_mod.Type = .normal,
     autoplay: bool = false,
@@ -95,7 +85,8 @@ fn gasTop(cfg: Config) gauge_mod.Type {
 }
 
 pub const Sim = struct {
-    notes: []const Note,
+    /// The chart's notes, then the ends jbms-parser keeps off the lane for heads with `dropped_end_us`.
+    notes: []Note,
     /// 0 = unjudged, else judge + 1. Only the sim's thread touches it; render draws from a copy taken under a lock.
     state: []u8,
     lane_notes: [types.max_lanes][]u32,
@@ -127,12 +118,27 @@ pub const Sim = struct {
     pub fn create(gpa: std.mem.Allocator, chart: *const types.Chart, cfg: Config) !*Sim {
         const s = try gpa.create(Sim);
         errdefer gpa.destroy(s);
-        const state = try gpa.alloc(u8, chart.notes.len);
+        var dropped: usize = 0;
+        for (chart.notes) |n| {
+            if (n.kind == .ln_start and n.pair < 0 and n.dropped_end_us != null) dropped += 1;
+        }
+        const notes = try gpa.alloc(Note, chart.notes.len + dropped);
+        errdefer gpa.free(notes);
+        @memcpy(notes[0..chart.notes.len], chart.notes);
+        var next_end = chart.notes.len;
+        for (notes[0..chart.notes.len], 0..) |*n, i| {
+            if (n.kind != .ln_start or n.pair >= 0) continue;
+            const end_us = n.dropped_end_us orelse continue;
+            notes[next_end] = .{ .time_us = end_us, .y = n.y, .wav = -1, .lane = n.lane, .kind = .ln_end, .ln_type = n.ln_type, .pair = @intCast(i) };
+            n.pair = @intCast(next_end);
+            next_end += 1;
+        }
+        const state = try gpa.alloc(u8, notes.len);
         errdefer gpa.free(state);
         @memset(state, 0);
         const keys = chart.mode.keys();
         s.* = .{
-            .notes = chart.notes,
+            .notes = notes,
             .state = state,
             .lane_notes = @splat(&.{}),
             .lane_count = keys,
@@ -161,6 +167,7 @@ pub const Sim = struct {
         }
         for (0..gauge_mod.count) |i| s.gauges[i] = gauge_mod.init(@fromBackingInt(@intCast(i)), chart.total, chart.total_notes);
         var counts: [types.max_lanes]u32 = @splat(0);
+        // Dropped ends stay off the lanes, so only `processing` and the CN miss pass reach them.
         for (chart.notes) |n| counts[n.lane] += 1;
         errdefer for (s.lane_notes) |l| gpa.free(l);
         for (0..keys) |l| s.lane_notes[l] = try gpa.alloc(u32, counts[l]);
@@ -175,6 +182,7 @@ pub const Sim = struct {
 
     pub fn destroy(s: *Sim) void {
         for (s.lane_notes) |l| if (l.len > 0) s.gpa.free(l);
+        s.gpa.free(s.notes);
         s.gpa.free(s.state);
         s.gpa.destroy(s);
     }
@@ -278,7 +286,7 @@ pub const Sim = struct {
             const idx = list[ls.pass_cursor];
             const n = s.notes[idx];
             if (n.time_us > t) break;
-            switch (kindOf(n)) {
+            switch (n.kind) {
                 .ln_start, .ln_end => {
                     if (n.ln_type == .hcn) {
                         if (n.kind == .ln_end) {
@@ -312,7 +320,7 @@ pub const Sim = struct {
     fn autoNote(s: *Sim, lane: u8, idx: u32) void {
         const n = s.notes[idx];
         const ls = &s.lanes[lane];
-        switch (kindOf(n)) {
+        switch (n.kind) {
             .normal => if (s.state[idx] == 0) {
                 s.sound(@intCast(idx));
                 s.judgeNote(lane, @intCast(idx), 0, 0, true);
@@ -397,7 +405,7 @@ pub const Sim = struct {
             const dm = n.time_us - pt;
             if (dm >= s.judge_end) break;
             if (dm < s.judge_start) continue;
-            if (n.kind == .mine or kindOf(n) == .ln_end) continue;
+            if (n.kind == .mine or n.kind == .ln_end) continue;
             const st = s.state[@intCast(idx)];
             if (st == 0 and bad_len < bad_notes.len) {
                 bad_notes[bad_len] = idx;
@@ -412,7 +420,7 @@ pub const Sim = struct {
             if (!better) continue;
             if (st != 0) {
                 judge = if (dm >= w[4][0] and dm <= w[4][1]) 5 else 6;
-            } else if (kindOf(n) == .ln_start and dm < w[2][0]) {
+            } else if (n.kind == .ln_start and dm < w[2][0]) {
                 judge = 6; // lr2oraja-endlessdream: no late BAD on LN heads
             } else {
                 const j = windowJudge(w, dm);
@@ -434,7 +442,7 @@ pub const Sim = struct {
             const tdm = tn.time_us - pt;
             s.multiBad(lane, tnote, tdm, bad_notes[0..bad_len], bad_times[0..bad_len]);
             const vanish = judge != 5;
-            if (kindOf(tn) == .ln_start) {
+            if (tn.kind == .ln_start) {
                 s.sound(tnote);
                 if (tn.ln_type == .ln) {
                     if (vanish) {
@@ -463,7 +471,7 @@ pub const Sim = struct {
             for (list) |li| {
                 const n = s.notes[li];
                 if (n.time_us >= pt) break;
-                if (!(kindOf(n) == .ln_start and s.state[li] != 0) and kindOf(n) != .ln_end) n_idx = @intCast(li);
+                if (!(n.kind == .ln_start and s.state[li] != 0) and n.kind != .ln_end) n_idx = @intCast(li);
             }
             if (n_idx >= 0 and ls.passing < 0 and s.notes[@intCast(n_idx)].kind != .mine) s.sound(n_idx);
         }
@@ -489,7 +497,7 @@ pub const Sim = struct {
                 std.mem.swap(i64, &times[j], &times[j - 1]);
             }
         }
-        const t_is_ln = kindOf(s.notes[@intCast(tnote)]) == .ln_start;
+        const t_is_ln = s.notes[@intCast(tnote)].kind == .ln_start;
         const t_bad = (w[3][0] <= tdm and tdm < w[2][0]) or (w[2][1] < tdm and tdm <= w[3][1]);
         if (!t_bad or t_is_ln) {
             for (0..size) |k| {
@@ -501,7 +509,7 @@ pub const Sim = struct {
         }
         var start = size;
         for (0..size) |k| {
-            if (times[k] >= tdm or kindOf(s.notes[@intCast(notes[k])]) != .ln_start) {
+            if (times[k] >= tdm or s.notes[@intCast(notes[k])].kind != .ln_start) {
                 start = k;
                 break;
             }
@@ -593,7 +601,7 @@ pub const Sim = struct {
                 if (!(n.time_us < t + w[3][0])) break;
                 const mj = n.time_us - t;
                 const st = s.state[@intCast(idx)];
-                switch (kindOf(n)) {
+                switch (n.kind) {
                     .normal => if (st == 0) s.judgeNote(lane, idx, 4, mj, true),
                     .ln_start => if (st == 0) {
                         if (n.ln_type != .ln) {
@@ -877,6 +885,7 @@ test "a held plain long note names its end note and leaves the head's state alon
     ;
     var c = try chartFrom(src);
     defer c.deinit();
+    try testing.expectEqual(@as(?i64, null), c.notes[0].dropped_end_us);
     const s = try Sim.create(testing.allocator, &c, .{});
     defer s.destroy();
     s.input(.{ .time_us = c.notes[0].time_us, .lane = 0, .down = true });
@@ -886,26 +895,63 @@ test "a held plain long note names its end note and leaves the head's state alon
     try testing.expectEqual(c.notes[0].pair, s.lanes[0].processing);
 }
 
-test "a long note head without an end is judged like a plain note" {
-    for ([_][]const u8{ "", "#LNMODE 2\n" }) |mode| {
-        const src = try std.mem.concat(testing.allocator, u8, &.{ "#BPM 120\n", mode, "#WAV01 a.wav\n#00151:0101\n#00111:0001\n" });
+test "a long note head whose end a later note overwrote is held to that end, as in endlessdream" {
+    var ln = try chartFrom("#BPM 120\n#WAV01 a.wav\n#00151:0101\n#00111:0001\n");
+    defer ln.deinit();
+    const end = ln.notes[1].time_us;
+    try testing.expectEqual(@as(?i64, end), ln.notes[0].dropped_end_us);
+    {
+        const s = try Sim.create(testing.allocator, &ln, .{});
+        defer s.destroy();
+        s.input(.{ .time_us = ln.notes[0].time_us, .lane = 0, .down = true });
+        s.advance(end + 1_000_000);
+        // The held key cannot hit the plain note at the end.
+        try testing.expectEqual(@as(u32, 1), s.score.count(.pg));
+        try testing.expectEqual(@as(u32, 1), s.score.count(.pr));
+    }
+    {
+        const s = try Sim.create(testing.allocator, &ln, .{});
+        defer s.destroy();
+        s.input(.{ .time_us = ln.notes[0].time_us, .lane = 0, .down = true });
+        s.input(.{ .time_us = ln.notes[0].time_us + 100_000, .lane = 0, .down = false });
+        try testing.expectEqual(@as(u32, 1), s.score.count(.bd));
+    }
+
+    var cn = try chartFrom("#BPM 120\n#LNMODE 2\n#WAV01 a.wav\n#00151:0101\n#00111:0001\n");
+    defer cn.deinit();
+    try testing.expectEqual(@as(u32, 2), cn.total_notes);
+    {
+        const s = try Sim.create(testing.allocator, &cn, .{});
+        defer s.destroy();
+        s.input(.{ .time_us = cn.notes[0].time_us, .lane = 0, .down = true });
+        s.input(.{ .time_us = end - 1000, .lane = 0, .down = false });
+        s.input(.{ .time_us = end, .lane = 0, .down = true });
+        s.input(.{ .time_us = end + 1000, .lane = 0, .down = false });
+        s.advance(end + 1_000_000);
+        // The release judges the dropped end too: one more judgement than total notes.
+        try testing.expectEqual(@as(u32, 3), s.score.count(.pg));
+    }
+    {
+        const s = try Sim.create(testing.allocator, &cn, .{});
+        defer s.destroy();
+        s.advance(end + 1_000_000);
+        try testing.expectEqual(@as(u32, 3), s.score.count(.pr));
+    }
+}
+
+test "a long note end whose head a later note overwrote is inert under LN and a POOR under CN" {
+    for ([_][]const u8{ "", "#LNMODE 2\n" }, [_]u32{ 0, 1 }) |mode, poor| {
+        const src = try std.mem.concat(testing.allocator, u8, &.{ "#BPM 120\n", mode, "#WAV01 a.wav\n#00151:0101\n#00111:01\n" });
         defer testing.allocator.free(src);
         var c = try chartFrom(src);
         defer c.deinit();
-        try testing.expectEqual(@as(i32, -1), c.notes[0].pair);
-        const missed = try Sim.create(testing.allocator, &c, .{});
-        defer missed.destroy();
-        missed.advance(c.last_note_us + 2_000_000);
-        try testing.expectEqual(c.total_notes, missed.score.count(.pr));
-        const hit = try Sim.create(testing.allocator, &c, .{});
-        defer hit.destroy();
-        for (c.notes) |n| {
-            hit.input(.{ .time_us = n.time_us, .lane = n.lane, .down = true });
-            hit.input(.{ .time_us = n.time_us + 1000, .lane = n.lane, .down = false });
-        }
-        hit.advance(c.last_note_us + 2_000_000);
-        try testing.expectEqual(c.total_notes, hit.score.count(.pg));
-        try testing.expectEqual(types.Clear.max, hit.clear(true));
+        const s = try Sim.create(testing.allocator, &c, .{});
+        defer s.destroy();
+        s.input(.{ .time_us = c.notes[0].time_us, .lane = 0, .down = true });
+        s.input(.{ .time_us = c.notes[0].time_us + 1000, .lane = 0, .down = false });
+        s.advance(c.last_note_us + 2_000_000);
+        try testing.expectEqual(@as(u32, 1), s.score.count(.pg));
+        try testing.expectEqual(poor, s.score.count(.pr));
     }
 }
 

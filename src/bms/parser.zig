@@ -992,6 +992,10 @@ fn flatten(d: *Decoder, tls: *Timelines) !void {
                     if (ln.pair) |p| if (p.index >= 0) {
                         n.pair = p.index;
                         notes.items[@intCast(p.index)].pair = ln.index;
+                        notes.items[@intCast(p.index)].dropped_end_us = null;
+                    } else if (!ln.end) if (tls.tree.getEntryFor(p.section).node) |end_tl| {
+                        // Cleared when the end is reached on the lane; still set after flatten, the end was overwritten.
+                        n.dropped_end_us = Tl.of(end_tl).micro;
                     };
                     try notes.append(a, n);
                     if (!ln.end or ty != .ln) total += 1;
