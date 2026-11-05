@@ -1,7 +1,10 @@
 name: ci
+# Every push to main and every pull request, so a break shows before the tag; only a tag publishes.
 on:
   push:
+    branches: [main]
     tags: ['*']
+  pull_request:
   workflow_dispatch:
 # Building naga takes minutes, longest on Windows, so each OS caches the binary under .naga.
 # The public half of the release signing key; the packaging scripts build it in.

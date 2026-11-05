@@ -435,6 +435,11 @@ pub const App = struct {
             }
             if (cmd.stop) {
                 a.preview_path = "";
+                // A load left running would hold load_thread forever, refusing every later play.
+                if (a.scene == .loading and a.load_thread != null) {
+                    a.load_parsed.cancel.store(true, .release);
+                    a.dropChartImages();
+                }
                 a.scene = .select;
             } else a.startPreview(cmd.file, cmd.measure);
         }
@@ -774,7 +779,10 @@ pub const App = struct {
         s.destroy();
         a.session = null;
         if (a.exit_after_play) {
+            if (!continues and !practised and a.course != null) course_mod.finish(a);
             a.running = false;
+            // The rest of this frame must not draw a play whose session is gone.
+            a.scene = .select;
             return;
         }
         if (continues) {
@@ -915,7 +923,7 @@ pub const App = struct {
                         a.g.down = pressed;
                         if (pressed) {
                             a.g.clicked = true;
-                            if (a.scene == .play and !a.pause.open) a.clickSeek(ev.button.x);
+                            if (a.scene == .play and !a.pause.open) a.clickSeek(a.g.mx);
                         }
                     } else if (ev.button.button == c.SDL_BUTTON_RIGHT and pressed) a.g.right_clicked = true;
                 },
@@ -1050,6 +1058,8 @@ pub const App = struct {
             a.reapCanceledLoad();
             a.pollEditor();
             settings.pollUpdate(a);
+            settings.pollSync(a);
+            settings.pollAccount(a);
             a.g.beginFrame();
             versus.tick(a);
             const scene_now = a.scene;

@@ -8,6 +8,8 @@ Wants=network-online.target
 ExecStart=/opt/actuon/bin/actuon-ir 127.0.0.1:8730 /var/lib/actuon
 User=actuon
 Restart=always
+# Each open connection holds a descriptor; the default 1024 caps the server near 500 clients.
+LimitNOFILE=65536
 # The server and two checks at their 1 GiB limit.
 MemoryMax=3G
 NoNewPrivileges=yes

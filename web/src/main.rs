@@ -296,8 +296,13 @@ fn respond(url: &str, ir: &ureq::Agent, ir_url: &str) -> Response<std::io::Curso
 
 fn worker(server: Arc<Server>, ir: ureq::Agent, ir_url: String) {
     loop {
-        let Ok(req): Result<Request, _> = server.recv() else {
-            continue;
+        // tiny_http's accept thread quits for good on an accept error (out of descriptors): exit so systemd restarts us.
+        let req: Request = match server.recv() {
+            Ok(req) => req,
+            Err(e) => {
+                eprintln!("listener gone: {e}");
+                std::process::exit(1);
+            }
         };
         let response = if *req.method() == Method::Get {
             respond(req.url(), &ir, &ir_url)

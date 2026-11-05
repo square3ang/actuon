@@ -14,7 +14,7 @@ pub const Event = struct {
     down: bool,
 };
 
-pub const OutKind = enum(u8) { judge, sound, stop_sound, press_empty, hold_start, hold_end };
+pub const OutKind = enum(u8) { judge, sound, stop_sound };
 pub const Out = struct {
     kind: OutKind,
     lane: u8 = 0,
@@ -22,7 +22,6 @@ pub const Out = struct {
     wav: i32 = -1,
     note: i32 = -1,
     fast_us: i32 = 0,
-    combo: u32 = 0,
 };
 
 pub const Score = struct {
@@ -67,6 +66,16 @@ const LaneState = struct {
 const no_time = std.math.minInt(i64);
 const hcn_duration: i64 = 200_000;
 const ring_size = 1024;
+
+/// A head or scored end whose partner was overwritten is judged as a plain note; an unscored LN end stays inert.
+fn kindOf(n: Note) types.NoteKind {
+    if (n.pair >= 0) return n.kind;
+    return switch (n.kind) {
+        .ln_start => .normal,
+        .ln_end => if (n.ln_type == .ln) .ln_end else .normal,
+        else => n.kind,
+    };
+}
 
 pub const Config = struct {
     gauge: gauge_mod.Type = .normal,
@@ -247,10 +256,7 @@ pub const Sim = struct {
         if (ls.down[key] == ev.down or (s.auto_scratch and ls.scratch >= 0)) return;
         ls.down[key] = ev.down;
         // The lead-in is beatoraja's READY, which judges nothing: a key there only lights its lane.
-        if (ev.time_us < 0) {
-            if (ev.down) s.emit(.{ .kind = .press_empty, .lane = ev.lane });
-            return;
-        }
+        if (ev.time_us < 0) return;
         if (ev.down) s.onPress(ev.lane, key, ev.time_us) else s.onRelease(ev.lane, key, ev.time_us);
         s.endPhase(ev.time_us);
         s.checkFailed();
@@ -272,7 +278,7 @@ pub const Sim = struct {
             const idx = list[ls.pass_cursor];
             const n = s.notes[idx];
             if (n.time_us > t) break;
-            switch (n.kind) {
+            switch (kindOf(n)) {
                 .ln_start, .ln_end => {
                     if (n.ln_type == .hcn) {
                         if (n.kind == .ln_end) {
@@ -306,11 +312,10 @@ pub const Sim = struct {
     fn autoNote(s: *Sim, lane: u8, idx: u32) void {
         const n = s.notes[idx];
         const ls = &s.lanes[lane];
-        switch (n.kind) {
+        switch (kindOf(n)) {
             .normal => if (s.state[idx] == 0) {
                 s.sound(@intCast(idx));
                 s.judgeNote(lane, @intCast(idx), 0, 0, true);
-                s.emit(.{ .kind = .press_empty, .lane = lane });
             },
             .ln_start => if (s.state[idx] == 0 and ls.processing < 0) {
                 s.sound(@intCast(idx));
@@ -319,12 +324,10 @@ pub const Sim = struct {
                     ls.ln_start_dur = 0;
                 } else s.judgeNote(lane, @intCast(idx), 0, 0, true);
                 ls.processing = n.pair;
-                s.emit(.{ .kind = .hold_start, .lane = lane });
             },
             .ln_end => if (s.state[idx] == 0 and n.ln_type != .ln) {
                 s.judgeNote(lane, @intCast(idx), 0, 0, true);
                 ls.processing = -1;
-                s.emit(.{ .kind = .hold_end, .lane = lane });
             },
             .mine => {},
         }
@@ -394,7 +397,7 @@ pub const Sim = struct {
             const dm = n.time_us - pt;
             if (dm >= s.judge_end) break;
             if (dm < s.judge_start) continue;
-            if (n.kind == .mine or n.kind == .ln_end) continue;
+            if (n.kind == .mine or kindOf(n) == .ln_end) continue;
             const st = s.state[@intCast(idx)];
             if (st == 0 and bad_len < bad_notes.len) {
                 bad_notes[bad_len] = idx;
@@ -409,7 +412,7 @@ pub const Sim = struct {
             if (!better) continue;
             if (st != 0) {
                 judge = if (dm >= w[4][0] and dm <= w[4][1]) 5 else 6;
-            } else if (n.kind == .ln_start and dm < w[2][0]) {
+            } else if (kindOf(n) == .ln_start and dm < w[2][0]) {
                 judge = 6; // lr2oraja-endlessdream: no late BAD on LN heads
             } else {
                 const j = windowJudge(w, dm);
@@ -431,7 +434,7 @@ pub const Sim = struct {
             const tdm = tn.time_us - pt;
             s.multiBad(lane, tnote, tdm, bad_notes[0..bad_len], bad_times[0..bad_len]);
             const vanish = judge != 5;
-            if (tn.kind == .ln_start) {
+            if (kindOf(tn) == .ln_start) {
                 s.sound(tnote);
                 if (tn.ln_type == .ln) {
                     if (vanish) {
@@ -441,7 +444,6 @@ pub const Sim = struct {
                         ls.release_time = no_time;
                         ls.ln_end_judge = -1;
                         if (sc >= 0) s.sckey[@intCast(sc)] = @as(u8, key) + 1;
-                        s.emit(.{ .kind = .hold_start, .lane = lane });
                     } else s.judgeNote(lane, tnote, judge, tdm, false);
                 } else {
                     if (vanish) {
@@ -449,7 +451,6 @@ pub const Sim = struct {
                         ls.release_time = no_time;
                         ls.ln_end_judge = -1;
                         if (sc >= 0) s.sckey[@intCast(sc)] = @as(u8, key) + 1;
-                        s.emit(.{ .kind = .hold_start, .lane = lane });
                     }
                     s.judgeNote(lane, tnote, judge, tdm, vanish);
                 }
@@ -462,10 +463,9 @@ pub const Sim = struct {
             for (list) |li| {
                 const n = s.notes[li];
                 if (n.time_us >= pt) break;
-                if (!(n.kind == .ln_start and s.state[li] != 0) and n.kind != .ln_end) n_idx = @intCast(li);
+                if (!(kindOf(n) == .ln_start and s.state[li] != 0) and kindOf(n) != .ln_end) n_idx = @intCast(li);
             }
             if (n_idx >= 0 and ls.passing < 0 and s.notes[@intCast(n_idx)].kind != .mine) s.sound(n_idx);
-            s.emit(.{ .kind = .press_empty, .lane = lane });
         }
     }
 
@@ -489,7 +489,7 @@ pub const Sim = struct {
                 std.mem.swap(i64, &times[j], &times[j - 1]);
             }
         }
-        const t_is_ln = s.notes[@intCast(tnote)].kind == .ln_start;
+        const t_is_ln = kindOf(s.notes[@intCast(tnote)]) == .ln_start;
         const t_bad = (w[3][0] <= tdm and tdm < w[2][0]) or (w[2][1] < tdm and tdm <= w[3][1]);
         if (!t_bad or t_is_ln) {
             for (0..size) |k| {
@@ -501,7 +501,7 @@ pub const Sim = struct {
         }
         var start = size;
         for (0..size) |k| {
-            if (times[k] >= tdm or s.notes[@intCast(notes[k])].kind != .ln_start) {
+            if (times[k] >= tdm or kindOf(s.notes[@intCast(notes[k])]) != .ln_start) {
                 start = k;
                 break;
             }
@@ -552,7 +552,6 @@ pub const Sim = struct {
         ls.processing = -1;
         ls.release_time = no_time;
         ls.ln_end_judge = -1;
-        s.emit(.{ .kind = .hold_end, .lane = lane });
     }
 
     fn moveMark(s: *Sim, lane: u8) void {
@@ -594,13 +593,12 @@ pub const Sim = struct {
                 if (!(n.time_us < t + w[3][0])) break;
                 const mj = n.time_us - t;
                 const st = s.state[@intCast(idx)];
-                switch (n.kind) {
+                switch (kindOf(n)) {
                     .normal => if (st == 0) s.judgeNote(lane, idx, 4, mj, true),
                     .ln_start => if (st == 0) {
                         if (n.ln_type != .ln) {
                             s.judgeNote(lane, idx, 4, mj, true);
-                            // A head whose end was dropped has no pair.
-                            if (n.pair >= 0) s.judgeNote(lane, n.pair, 4, mj, true);
+                            s.judgeNote(lane, n.pair, 4, mj, true);
                         } else if (ls.processing != n.pair) {
                             s.judgeNote(lane, idx, 4, mj, true);
                         }
@@ -638,12 +636,12 @@ pub const Sim = struct {
             .judge = judge,
             .note = idx,
             .fast_us = @intCast(std.math.clamp(fast, -2_000_000_000, 2_000_000_000)),
-            .combo = s.score.combo,
         });
     }
 
     /// BMSPlayer.saveConfig clear logic.
     pub fn clear(s: *const Sim, finished: bool) types.Clear {
+        if (s.total_notes == 0) return .no_play;
         if (s.score.passed == 0 and !finished) return .no_play;
         if (s.failed or !s.gauge().qualified() or !finished) return .failed;
         if (s.score.passed == s.score.combo) {
@@ -888,18 +886,27 @@ test "a held plain long note names its end note and leaves the head's state alon
     try testing.expectEqual(c.notes[0].pair, s.lanes[0].processing);
 }
 
-test "a charge note head without an end survives a miss and a hit" {
-    const src = "#BPM 120\n#LNMODE 2\n#WAV01 a.wav\n#00151:0101\n#00111:0001\n";
-    var c = try chartFrom(src);
-    defer c.deinit();
-    try testing.expectEqual(@as(i32, -1), c.notes[0].pair);
-    const missed = try Sim.create(testing.allocator, &c, .{});
-    defer missed.destroy();
-    missed.advance(c.notes[c.notes.len - 1].time_us + 2_000_000);
-    const hit = try Sim.create(testing.allocator, &c, .{});
-    defer hit.destroy();
-    for (c.notes) |n| hit.input(.{ .time_us = n.time_us, .lane = n.lane, .down = true });
-    hit.advance(c.notes[c.notes.len - 1].time_us + 2_000_000);
+test "a long note head without an end is judged like a plain note" {
+    for ([_][]const u8{ "", "#LNMODE 2\n" }) |mode| {
+        const src = try std.mem.concat(testing.allocator, u8, &.{ "#BPM 120\n", mode, "#WAV01 a.wav\n#00151:0101\n#00111:0001\n" });
+        defer testing.allocator.free(src);
+        var c = try chartFrom(src);
+        defer c.deinit();
+        try testing.expectEqual(@as(i32, -1), c.notes[0].pair);
+        const missed = try Sim.create(testing.allocator, &c, .{});
+        defer missed.destroy();
+        missed.advance(c.last_note_us + 2_000_000);
+        try testing.expectEqual(c.total_notes, missed.score.count(.pr));
+        const hit = try Sim.create(testing.allocator, &c, .{});
+        defer hit.destroy();
+        for (c.notes) |n| {
+            hit.input(.{ .time_us = n.time_us, .lane = n.lane, .down = true });
+            hit.input(.{ .time_us = n.time_us + 1000, .lane = n.lane, .down = false });
+        }
+        hit.advance(c.last_note_us + 2_000_000);
+        try testing.expectEqual(c.total_notes, hit.score.count(.pg));
+        try testing.expectEqual(types.Clear.max, hit.clear(true));
+    }
 }
 
 test "multi-bad judges skipped notes in BAD range" {
@@ -931,4 +938,102 @@ test "autoplay reaches max" {
     defer s.destroy();
     s.advance(c.last_note_us + 1_000_000);
     try testing.expectEqual(types.Clear.max, s.clear(true));
+}
+
+test "a chart without notes never clears" {
+    var c = try chartFrom("#BPM 120\n#WAV01 a.wav\n#00101:01\n");
+    defer c.deinit();
+    const s = try Sim.create(testing.allocator, &c, .{ .gauge = .hard });
+    defer s.destroy();
+    s.advance(c.last_time_us + 2_000_000);
+    try testing.expectEqual(types.Clear.no_play, s.clear(true));
+}
+
+test "a held key takes a mine's damage, a free lane does not" {
+    var c = try chartFrom("#BPM 120\n#WAV01 a.wav\n#00111:0001\n#001D1:01\n");
+    defer c.deinit();
+    var mine_t: i64 = 0;
+    for (c.notes) |n| if (n.kind == .mine) {
+        mine_t = n.time_us;
+    };
+    // Both press alike, so the empty POOR is the same; only one is still down at the mine.
+    const free = try Sim.create(testing.allocator, &c, .{});
+    defer free.destroy();
+    free.input(.{ .time_us = mine_t - 300_000, .lane = 0, .down = true });
+    free.input(.{ .time_us = mine_t - 200_000, .lane = 0, .down = false });
+    free.advance(mine_t + 1000);
+    const held = try Sim.create(testing.allocator, &c, .{});
+    defer held.destroy();
+    held.input(.{ .time_us = mine_t - 300_000, .lane = 0, .down = true });
+    held.advance(mine_t + 1000);
+    try testing.expect(held.gauge().value < free.gauge().value);
+}
+
+test "a charge note judges its end at release, and an early release is not a PGREAT" {
+    var c = try chartFrom("#BPM 120\n#LNMODE 2\n#WAV01 a.wav\n#00151:0101\n");
+    defer c.deinit();
+    try testing.expectEqual(@as(u32, 2), c.total_notes);
+    const head = c.notes[0].time_us;
+    const tail = c.notes[1].time_us;
+    const clean = try Sim.create(testing.allocator, &c, .{});
+    defer clean.destroy();
+    clean.input(.{ .time_us = head, .lane = 0, .down = true });
+    clean.input(.{ .time_us = tail, .lane = 0, .down = false });
+    clean.advance(tail + 2_000_000);
+    try testing.expectEqual(@as(u32, 2), clean.score.count(.pg));
+    const early = try Sim.create(testing.allocator, &c, .{});
+    defer early.destroy();
+    early.input(.{ .time_us = head, .lane = 0, .down = true });
+    early.input(.{ .time_us = head + 100_000, .lane = 0, .down = false });
+    early.advance(tail + 2_000_000);
+    try testing.expectEqual(@as(u32, 1), early.score.count(.pg));
+    try testing.expectEqual(@as(u32, 2), early.score.passed);
+}
+
+test "a held hell charge note fills the gauge, a dropped one drains it" {
+    var c = try chartFrom("#BPM 60\n#LNMODE 3\n#WAV01 a.wav\n#00151:01\n#00351:01\n");
+    defer c.deinit();
+    const head = c.notes[0].time_us;
+    const tail = c.notes[1].time_us;
+    const held = try Sim.create(testing.allocator, &c, .{});
+    defer held.destroy();
+    held.input(.{ .time_us = head, .lane = 0, .down = true });
+    held.advance(tail - 100_000);
+    const dropped = try Sim.create(testing.allocator, &c, .{});
+    defer dropped.destroy();
+    dropped.input(.{ .time_us = head, .lane = 0, .down = true });
+    dropped.input(.{ .time_us = head + 1000, .lane = 0, .down = false });
+    dropped.input(.{ .time_us = head + 2000, .lane = 0, .down = true });
+    dropped.input(.{ .time_us = head + 3000, .lane = 0, .down = false });
+    dropped.advance(tail - 100_000);
+    try testing.expect(held.gauge().value > dropped.gauges[@backingInt(gauge_mod.Type.normal)].value);
+    try testing.expect(held.gauge().value > 22);
+    try testing.expect(dropped.gauge().value < held.gauge().value);
+}
+
+test "the other scratch direction ends a charge note on the scratch" {
+    var c = try chartFrom("#BPM 120\n#LNMODE 2\n#WAV01 a.wav\n#00156:0101\n");
+    defer c.deinit();
+    const lane = c.notes[0].lane;
+    const s = try Sim.create(testing.allocator, &c, .{});
+    defer s.destroy();
+    s.input(.{ .time_us = c.notes[0].time_us, .lane = lane, .key = 0, .down = true });
+    s.input(.{ .time_us = c.notes[1].time_us, .lane = lane, .key = 1, .down = true });
+    try testing.expectEqual(@as(u32, 2), s.score.count(.pg));
+    try testing.expectEqual(@as(i32, -1), s.lanes[lane].processing);
+}
+
+test "lamps: a GREAT is PERFECT, a GOOD is FULL COMBO, an untouched quit is NO PLAY" {
+    var c = try chartFrom("#BPM 120\n#RANK 3\n#TOTAL 300\n#WAV01 a.wav\n#00111:01\n");
+    defer c.deinit();
+    for ([_]struct { i64, types.Clear }{ .{ 40_000, .perfect }, .{ 100_000, .full_combo } }) |case| {
+        const s = try Sim.create(testing.allocator, &c, .{});
+        defer s.destroy();
+        s.input(.{ .time_us = c.notes[0].time_us + case[0], .lane = 0, .down = true });
+        s.advance(c.last_note_us + 1_000_000);
+        try testing.expectEqual(case[1], s.clear(true));
+    }
+    const idle = try Sim.create(testing.allocator, &c, .{});
+    defer idle.destroy();
+    try testing.expectEqual(types.Clear.no_play, idle.clear(false));
 }

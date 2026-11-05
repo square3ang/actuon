@@ -15,16 +15,18 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core })).step);
 
     // Always bounds-checked: the IR server feeds it uploads.
+    const capi = b.createModule(.{
+        .root_source_file = b.path("src/capi_entry.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .pic = true,
+    });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = capi })).step);
     const core_lib = b.addLibrary(.{
         .name = "actuon_core",
         .linkage = .static,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/capi_entry.zig"),
-            .target = target,
-            .optimize = .ReleaseSafe,
-            .link_libc = true,
-            .pic = true,
-        }),
+        .root_module = capi,
     });
     core_lib.bundle_compiler_rt = true; // Rust links this archive with no Zig runtime around it
     const core_step = b.step("core", "Build libactuon_core (C ABI)");

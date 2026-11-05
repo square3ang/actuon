@@ -156,7 +156,7 @@ const Timelines = struct {
     }
 };
 
-fn truncMicro(t: f64) i64 {
+pub fn truncMicro(t: f64) i64 {
     if (!(t < 9.0e18 and t > -9.0e18)) return 0; // hostile #STOP/#BPM values must not trap
     return @intFromFloat(t);
 }
@@ -253,8 +253,9 @@ const Rng = struct {
         z = (z ^ (z >> 27)) *% 0x94D049BB133111EB;
         return z ^ (z >> 31);
     }
+    /// As beatoraja's `(int)(Math.random() * n)`: a range <= 0 gives 0, so #RANDOM 0 takes branch 1.
     fn below(r: *Rng, n: i32) i32 {
-        if (n <= 0) return 1;
+        if (n <= 0) return 0;
         return @intCast(r.next() % @as(u64, @intCast(n)));
     }
 };
@@ -303,7 +304,7 @@ fn pickBranch(a: std.mem.Allocator, line: []const u8, is_set: bool, opts: Option
     const v: i32 = blk: {
         if (is_set) break :blk r;
         if (opts.selected_random) |sel| if (values.items.len < sel.len) {
-            // Untrusted: a value no roll gives would drop every #IF's notes (a range <= 0 rolls 1, so allow 2).
+            // Untrusted: a value no roll gives would drop every #IF's notes (a range <= 0 rolls 1; replays from before that recorded 2).
             const s = sel[values.items.len];
             if (s < 1 or s > (if (r >= 1) r else 2)) return error.BadRandom;
             break :blk s;
@@ -1092,6 +1093,12 @@ test "nested random with fixed selection" {
     try std.testing.expectEqual(@as(u8, 2), b.notes[0].lane);
     try std.testing.expectError(error.BadRandom, parse(std.testing.allocator, src, .{ .selected_random = &.{99} }));
     try std.testing.expectError(error.BadRandom, parse(std.testing.allocator, src, .{ .selected_random = &.{0} }));
+}
+
+test "#RANDOM 0 takes branch 1, as beatoraja" {
+    var c = try parse(std.testing.allocator, "#BPM 120\n#WAV01 a.wav\n#RANDOM 0\n#IF 1\n#00111:01\n#ENDIF\n#IF 2\n#00112:01\n#ENDIF\n#ENDRANDOM\n", .{});
+    defer c.deinit();
+    try std.testing.expectEqual(@as(u8, 0), c.notes[0].lane);
 }
 
 test "overlapping and touching LNs cover their union and nothing past it" {

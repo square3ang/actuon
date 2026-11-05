@@ -59,6 +59,7 @@ pub const State = struct {
     scan_thread: ?*c.SDL_Thread = null,
     scan_progress: std.atomic.Value(u32) = .init(0),
     scan_done: std.atomic.Value(bool) = .init(false),
+    scan_cancel: std.atomic.Value(bool) = .init(false),
     // A running scan may already have passed files added since it started.
     scan_again: bool = false,
     last_scan_ms: u64 = 0,
@@ -137,6 +138,7 @@ pub fn deinit(a: *App) void {
     const s = &a.sel;
     dropBoard(a);
     if (s.replay_arena) |*r| r.deinit();
+    s.scan_cancel.store(true, .release);
     if (s.scan_thread) |t| c.SDL_WaitThread(t, null);
     if (s.scan_watch) |*w| w.deinit();
     if (s.table_thread) |t| c.SDL_WaitThread(t, null);
@@ -159,8 +161,8 @@ fn scanThread(ud: ?*anyopaque) callconv(.c) c_int {
     const d = db_mod.openMain(a.gpa) catch return 1;
     defer d.close();
     if (a.sel.scan_watch == null) a.sel.scan_watch = .init(a.gpa);
-    a.sel.stats = db_mod.scan(a.gpa, a.io, d, a.cfg.roots, &a.sel.scan_progress, &a.sel.scan_watch.?) catch |e| {
-        std.log.err("scan failed: {t}", .{e});
+    a.sel.stats = db_mod.scan(a.gpa, a.io, d, a.cfg.roots, &a.sel.scan_progress, &a.sel.scan_watch.?, &a.sel.scan_cancel) catch |e| {
+        if (e != error.Canceled) std.log.err("scan failed: {t}", .{e});
         return 1;
     };
     return 0;

@@ -4,6 +4,7 @@ const types = @import("../core/types.zig");
 const hash = @import("hash.zig");
 const validBpm = @import("parser.zig").validBpm;
 const nodeBelow = @import("parser.zig").nodeBelow;
+const micro = @import("parser.zig").truncMicro;
 const Chart = types.Chart;
 const Mode = types.Mode;
 
@@ -109,11 +110,6 @@ const Timelines = struct {
         self.items = merged;
     }
 };
-
-fn micro(t: f64) i64 {
-    if (!(t < 9.0e18 and t > -9.0e18)) return 0;
-    return @intFromFloat(t);
-}
 
 const Placed = struct { y: i64, lane: u8, note: types.Note };
 

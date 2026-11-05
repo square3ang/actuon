@@ -443,7 +443,7 @@ fn fillDensity(v: *View, chart: *const core.types.Chart) void {
     v.density_max = 1;
     if (chart.last_time_us <= 0) return;
     for (chart.notes) |note| {
-        if (note.kind == .ln_end or note.kind == .mine) continue;
+        if (!note.graphed()) continue;
         const i: usize = @intCast(@min(@divTrunc(@max(note.time_us, 0) * @as(i64, v.density.len), chart.last_time_us), v.density.len - 1));
         v.density[i] += 1;
         v.density_max = @max(v.density_max, v.density[i]);

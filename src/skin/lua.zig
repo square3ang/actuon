@@ -691,6 +691,8 @@ const Host = struct {
     steps: u32 = load_steps,
     /// Pattern steps short of one hook firing, kept so many small matches still add up.
     pattern_steps: u32 = 0,
+    /// SDL ticks past which the call is out, as C work inside one instruction does not count steps.
+    deadline_ns: u64 = std.math.maxInt(u64),
     io: std.Io,
     /// The skin folder with symlinks resolved.
     root: []const u8,
@@ -700,10 +702,13 @@ const Host = struct {
 };
 
 const max_bytes = 256 << 20;
-const hook_every = 1 << 16;
+// Small, so a loop of cheap instructions that each do long C work (string.rep) still meets the clock check soon.
+const hook_every = 1 << 8;
 // About 1e9 instructions for a load, 8e6 for one draw callback.
-const load_steps = 1 << 14;
-const call_steps = 1 << 7;
+const load_steps = 1 << 22;
+const call_steps = 1 << 15;
+/// Wall time per hook firing: 250 ms for a draw callback, about 30 s for a load.
+const ns_per_firing = 250 * std.time.ns_per_ms / call_steps;
 
 fn hostOf(l: ?*c.lua_State) *Host {
     var ud: ?*anyopaque = null;
@@ -727,10 +732,11 @@ fn cappedAlloc(ud: ?*anyopaque, ptr: ?*anyopaque, old_or_tag: usize, new: usize)
 
 fn onCount(l: ?*c.lua_State, _: ?*c.lua_Debug) callconv(.c) void {
     const lim = hostOf(l);
-    if (lim.steps > 0) {
+    if (lim.steps > 0 and c.SDL_GetTicksNS() < lim.deadline_ns) {
         lim.steps -= 1;
         return;
     }
+    lim.steps = 0;
     // Raising at every instruction from here on: a pcall in a loop cannot keep the script alive.
     _ = c.lua_sethook(l, onCount, c.LUA_MASKCOUNT, 1);
     _ = c.luaL_error(l, "skin script ran too long");
@@ -741,6 +747,7 @@ fn protectedCall(l: *c.lua_State, args: c_int, results: c_int, steps: u32) c_int
     const lim = hostOf(l);
     if (lim.steps == 0) return c.LUA_ERRRUN;
     lim.steps = steps;
+    lim.deadline_ns = c.SDL_GetTicksNS() + @as(u64, steps) * ns_per_firing;
     lim.capped = true;
     defer lim.capped = false;
     return c.lua_pcallk(l, args, results, 0, 0, null);
@@ -1098,6 +1105,17 @@ test "a loop of slow matches runs out of the callback's steps" {
     try std.testing.expectEqual(c.LUA_OK, protectedCall(l, 0, 0, call_steps));
     try std.testing.expectEqual(c.LUA_OK, c.luaL_loadstring(l, "f(10)"));
     try std.testing.expect(protectedCall(l, 0, 0, call_steps) != c.LUA_OK);
+}
+
+test "a loop of long C calls runs out of the callback's time" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const l = try newState(arena.allocator(), std.testing.io, ".");
+    defer c.lua_close(l);
+    try std.testing.expectEqual(c.LUA_OK, c.luaL_loadstring(l, "for i = 1, 1e9 do local s = string.rep('x', 1e6) end"));
+    const start = c.SDL_GetTicksNS();
+    try std.testing.expect(protectedCall(l, 0, 0, call_steps) != c.LUA_OK);
+    try std.testing.expect(c.SDL_GetTicksNS() - start < 2 * std.time.ns_per_s);
 }
 
 test "get_path picks a wildcard file after the load too" {

@@ -37,6 +37,8 @@ const MAX_OWNER_CLAIMS: i64 = 50_000;
 /// Checks plus hashes stay below DB_CONNECTIONS, so reads still get through.
 const MAX_CHECKS: usize = 2;
 const MAX_HASHES: usize = 4;
+/// Needs no sign-in and scans every score on a table's charts, so few may run at once.
+const MAX_TABLE_RANKINGS: usize = 2;
 const MAX_UPLOADS: usize = 8;
 /// A 32 MiB upload at 2 Mbit/s still makes it.
 const BODY_TIMEOUT: Duration = Duration::from_secs(150);
@@ -71,6 +73,7 @@ CREATE VIEW best AS
 struct Ctx {
     checks: Mutex<HashSet<i64>>,
     hashes: AtomicUsize,
+    table_rankings: AtomicUsize,
     uploads: Arc<Semaphore>,
     rooms: Mutex<rooms::Rooms>,
     online: Mutex<HashMap<i64, usize>>,
@@ -162,20 +165,20 @@ impl Drop for CheckSlot<'_> {
     }
 }
 
-/// Each running password hash takes 19 MiB and a core.
-struct HashSlot<'a>(&'a AtomicUsize);
+/// One of `max` places for costly work: a password hash takes 19 MiB and a core, a table ranking seconds of a pool connection.
+struct Slot<'a>(&'a AtomicUsize);
 
-impl<'a> HashSlot<'a> {
-    fn take(ctx: &'a Ctx) -> Result<Self, ApiError> {
-        if ctx.hashes.fetch_add(1, Ordering::AcqRel) >= MAX_HASHES {
-            ctx.hashes.fetch_sub(1, Ordering::AcqRel);
+impl<'a> Slot<'a> {
+    fn take(running: &'a AtomicUsize, max: usize) -> Result<Self, ApiError> {
+        if running.fetch_add(1, Ordering::AcqRel) >= max {
+            running.fetch_sub(1, Ordering::AcqRel);
             return Err(ApiError::new(503, "server is busy"));
         }
-        Ok(HashSlot(&ctx.hashes))
+        Ok(Slot(running))
     }
 }
 
-impl Drop for HashSlot<'_> {
+impl Drop for Slot<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
     }
@@ -297,19 +300,21 @@ fn auth<B>(req: &Request<B>, db: &Connection) -> Result<i64, ApiError> {
         .ok_or(ApiError::new(401, "bad token"))
 }
 
-/// Only nginx reaches this port and it sets X-Real-IP (docs/ir.md). An IPv6 client owns a whole /64.
-fn client_key(real_ip: Option<&str>, peer: Option<IpAddr>) -> String {
+/// Only nginx reaches this port and it sets X-Real-IP (docs/ir.md). An IPv6 client owns a whole /64,
+/// and a free tunnel hands out a /48, so `v6_segments` 3 groups those.
+fn client_key(real_ip: Option<&str>, peer: Option<IpAddr>, v6_segments: usize) -> String {
     match real_ip.and_then(|ip| ip.trim().parse().ok()).or(peer) {
-        Some(IpAddr::V6(ip)) => format!("{:x?}", &ip.segments()[..4]),
+        Some(IpAddr::V6(ip)) => format!("{:x?}", &ip.segments()[..v6_segments]),
         Some(ip) => ip.to_string(),
         None => "unknown".to_string(),
     }
 }
 
-fn client_of(req: &Req) -> String {
+fn client_of(req: &Req, v6_segments: usize) -> String {
     client_key(
         header_of(req, "X-Real-IP").as_deref(),
         req.extensions().get::<IpAddr>().copied(),
+        v6_segments,
     )
 }
 
@@ -348,12 +353,16 @@ struct Credentials {
     password: String,
 }
 
-/// Invisible or direction-changing characters and edge spaces would let one name pass for another in rankings.
+/// Invisible, direction-changing or lookalike characters (Cyrillic a, Hangul jamo) and edge spaces would let one
+/// name pass for another in rankings, so letters are ASCII or whole kana, Hangul syllables and CJK ideographs.
 fn valid_name(n: &str) -> bool {
+    let letter = |c: char| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '\u{3041}'..='\u{3096}' | '\u{30A1}'..='\u{30FA}' | '\u{30FC}' | '\u{AC00}'..='\u{D7A3}' | '\u{4E00}'..='\u{9FFF}')
+    };
     (1..=32).contains(&n.chars().count())
         && n.trim() == n
-        && n.chars()
-            .all(|c| c.is_alphanumeric() || "_-./ ".contains(c))
+        && n.chars().all(|c| letter(c) || "_-./ ".contains(c))
 }
 
 fn register(req: &Req, db: &Connection, ctx: &Ctx) -> ApiResult {
@@ -367,11 +376,17 @@ fn register(req: &Req, db: &Connection, ctx: &Ctx) -> ApiResult {
     }
     throttle(
         db,
-        &format!("register:{}", client_of(req)),
+        &format!("register:{}", client_of(req, 4)),
         REGISTER_WINDOW_SECS,
         REGISTER_ATTEMPTS,
     )?;
-    let _slot = HashSlot::take(ctx)?;
+    throttle(
+        db,
+        &format!("register48:{}", client_of(req, 3)),
+        REGISTER_WINDOW_SECS,
+        REGISTER_ATTEMPTS * 4,
+    )?;
+    let _slot = Slot::take(&ctx.hashes, MAX_HASHES)?;
     let mut salt_bytes = [0u8; 16];
     getrandom::getrandom(&mut salt_bytes).map_err(|_| ApiError::new(500, "internal error"))?;
     let salt =
@@ -448,9 +463,16 @@ fn login(req: &Req, db: &Connection, ctx: &Ctx) -> ApiResult {
     // Hashed because the name is still unchecked and can be 1 MiB long.
     throttle(
         db,
-        &format!("login:{}:{}", client_of(req), token_hash(&c.name)),
+        &format!("login:{}:{}", client_of(req, 4), token_hash(&c.name)),
         LOGIN_WINDOW_SECS,
         LOGIN_ATTEMPTS,
+    )?;
+    // Cycling through public names would otherwise keep every hash place busy from one address.
+    throttle(
+        db,
+        &format!("login:{}", client_of(req, 4)),
+        LOGIN_WINDOW_SECS,
+        LOGIN_ATTEMPTS * 3,
     )?;
     let row = db
         .query_row("SELECT id, pass FROM user WHERE name=?1", [&c.name], |r| {
@@ -460,7 +482,7 @@ fn login(req: &Req, db: &Connection, ctx: &Ctx) -> ApiResult {
     let denied = || ApiError::new(401, "wrong name or password");
     let (id, pass) = row.ok_or_else(denied)?;
     let parsed = PasswordHash::new(&pass).map_err(|_| ApiError::new(500, "internal error"))?;
-    let _slot = HashSlot::take(ctx)?;
+    let _slot = Slot::take(&ctx.hashes, MAX_HASHES)?;
     Argon2::default()
         .verify_password(c.password.as_bytes(), &parsed)
         .map_err(|_| denied())?;
@@ -782,12 +804,13 @@ struct TableQuery {
     sha256: Vec<String>,
 }
 
-fn table_ranking(req: &Req, db: &Connection) -> ApiResult {
+fn table_ranking(req: &Req, db: &Connection, ctx: &Ctx) -> ApiResult {
     let q: TableQuery =
         serde_json::from_slice(req.body()).map_err(|_| ApiError::new(400, "bad json"))?;
     if q.sha256.len() > 8192 || !q.sha256.iter().all(|s| valid_sha(s)) {
         return Err(ApiError::new(400, "bad chart list"));
     }
+    let _slot = Slot::take(&ctx.table_rankings, MAX_TABLE_RANKINGS)?;
     // Verified only, so one claim cannot outweigh a table. clear>=4 is EASY or better in beatoraja numbering.
     let mut st = db.prepare_cached(
         "SELECT u.name,SUM(s.ex),COUNT(*) FILTER (WHERE s.clear>=4),COUNT(*) FROM score s JOIN user u ON u.id=s.user
@@ -836,7 +859,7 @@ fn route(req: &Req, db: &Connection, ctx: &Ctx) -> ApiResult {
         (&Method::GET, ["rivals"]) => rivals(req, db),
         (&Method::PUT, ["rivals", name]) => add_rival(req, db, &percent_decode(name)?),
         (&Method::DELETE, ["rivals", name]) => remove_rival(req, db, &percent_decode(name)?),
-        (&Method::POST, ["table-ranking"]) => table_ranking(req, db),
+        (&Method::POST, ["table-ranking"]) => table_ranking(req, db, ctx),
         _ => Err(ApiError::new(404, "not found")),
     }
 }
@@ -1089,6 +1112,7 @@ fn main() {
     let ctx = Arc::new(Ctx {
         checks: Mutex::new(HashSet::new()),
         hashes: AtomicUsize::new(0),
+        table_rankings: AtomicUsize::new(0),
         uploads: Arc::new(Semaphore::new(MAX_UPLOADS)),
         rooms: Mutex::new(rooms::Rooms::default()),
         online: Mutex::new(HashMap::new()),
@@ -1178,6 +1202,19 @@ mod tests {
         assert!(!valid_name("\u{202E}gna3erauqs"));
         assert!(!valid_name("square3ang "));
         assert!(!valid_name(""));
+        assert!(
+            valid_name("\u{3042}\u{30A2}\u{30FC}\u{6F22}"),
+            "kana, the long vowel mark and kanji"
+        );
+        assert!(
+            !valid_name("squ\u{0430}re"),
+            "Cyrillic a passes for Latin a"
+        );
+        assert!(
+            !valid_name("\u{1112}\u{1161}\u{11AB}"),
+            "jamo pass for a syllable"
+        );
+        assert!(!valid_name("\u{FF53}quare"), "fullwidth s");
     }
 
     #[test]
@@ -1212,6 +1249,7 @@ mod tests {
         Ctx {
             checks: Mutex::new(HashSet::new()),
             hashes: AtomicUsize::new(0),
+            table_rankings: AtomicUsize::new(0),
             uploads: Arc::new(Semaphore::new(MAX_UPLOADS)),
             rooms: Mutex::default(),
             online: Mutex::new(HashMap::new()),
@@ -1236,11 +1274,15 @@ mod tests {
     fn hashes_are_capped() {
         let ctx = test_ctx();
         let held: Vec<_> = (0..MAX_HASHES)
-            .map(|_| HashSlot::take(&ctx).unwrap())
+            .map(|_| Slot::take(&ctx.hashes, MAX_HASHES).unwrap())
             .collect();
-        assert_eq!(HashSlot::take(&ctx).err().unwrap().0, 503);
+        assert_eq!(Slot::take(&ctx.hashes, MAX_HASHES).err().unwrap().0, 503);
+        assert!(
+            Slot::take(&ctx.table_rankings, MAX_TABLE_RANKINGS).is_ok(),
+            "each kind of work has its own places"
+        );
         drop(held);
-        assert!(HashSlot::take(&ctx).is_ok());
+        assert!(Slot::take(&ctx.hashes, MAX_HASHES).is_ok());
     }
 
     #[test]
@@ -1303,18 +1345,23 @@ mod tests {
     #[test]
     fn throttling_sees_the_client_behind_the_proxy() {
         let proxy: Option<IpAddr> = "127.0.0.1".parse().ok();
-        assert_eq!(client_key(Some("198.51.100.7"), proxy), "198.51.100.7");
-        assert_eq!(client_key(Some("not an address"), proxy), "127.0.0.1");
-        assert_eq!(client_key(None, proxy), "127.0.0.1");
-        assert_eq!(client_key(None, None), "unknown");
+        assert_eq!(client_key(Some("198.51.100.7"), proxy, 4), "198.51.100.7");
+        assert_eq!(client_key(Some("not an address"), proxy, 4), "127.0.0.1");
+        assert_eq!(client_key(None, proxy, 4), "127.0.0.1");
+        assert_eq!(client_key(None, None, 4), "unknown");
         assert_eq!(
-            client_key(Some("2001:db8:1:2::a"), proxy),
-            client_key(Some("2001:db8:1:2::b"), proxy),
+            client_key(Some("2001:db8:1:2::a"), proxy, 4),
+            client_key(Some("2001:db8:1:2::b"), proxy, 4),
             "a /64 is one client"
         );
         assert_ne!(
-            client_key(Some("2001:db8:1:2::a"), proxy),
-            client_key(Some("2001:db8:1:3::a"), proxy)
+            client_key(Some("2001:db8:1:2::a"), proxy, 4),
+            client_key(Some("2001:db8:1:3::a"), proxy, 4)
+        );
+        assert_eq!(
+            client_key(Some("2001:db8:1:2::a"), proxy, 3),
+            client_key(Some("2001:db8:1:3::a"), proxy, 3),
+            "a /48 is one network"
         );
     }
 

@@ -343,6 +343,8 @@ pub fn load(a: std.mem.Allocator, io: std.Io) Loaded {
     clampOptions(&cfg);
     cfg.download_url = migrateDownloadUrl(cfg.download_url);
     dropPlainIr(&cfg);
+    // Every request appends "/path", and the room's WebSocket breaks on "//".
+    cfg.ir_url = std.mem.trimEnd(u8, cfg.ir_url, "/");
     return .{ .cfg = cfg };
 }
 

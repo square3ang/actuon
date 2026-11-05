@@ -84,3 +84,22 @@ export fn actuon_chart_hash(data: [*]const u8, len: usize, sha256_hex: *[64]u8, 
     std.crypto.hash.Md5.hash(data[0..len], &md5, .{});
     md5_hex.* = std.fmt.bytesToHex(md5, .lower);
 }
+
+fn verifyWith(chart_src: []const u8, r: replay.Replay) !i32 {
+    const gpa = std.testing.allocator;
+    var chart = try core.parse(gpa, .bms, chart_src, .{});
+    defer chart.deinit();
+    var with_hash = r;
+    with_hash.sha256 = chart.sha256;
+    const bytes = try replay.encode(gpa, with_hash);
+    defer gpa.free(bytes);
+    var out: replay.Result = .{};
+    return actuon_verify(&.{ .chart = chart_src.ptr, .chart_len = chart_src.len, .replay = bytes.ptr, .replay_len = bytes.len, .format = 1 }, &out);
+}
+
+test "the server refuses a CN play and a chart with nothing to hit" {
+    const chart = "#BPM 120\n#WAV01 a.wav\n#00111:01\n";
+    try std.testing.expectEqual(@as(i32, 0), try verifyWith(chart, .{}));
+    try std.testing.expectEqual(@as(i32, -1), try verifyWith(chart, .{ .ln_mode = .cn }));
+    try std.testing.expectEqual(@as(i32, -2), try verifyWith("#BPM 120\n#WAV01 a.wav\n#00101:01\n", .{ .gauge = .hard }));
+}

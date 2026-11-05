@@ -220,7 +220,8 @@ pub fn saveConf(a: std.mem.Allocator, io: std.Io, root: []const u8, want: i32, c
 
 fn headerOf(a: std.mem.Allocator, io: std.Io, path: []const u8) ?std.json.Value {
     if (std.ascii.endsWithIgnoreCase(path, ".luaskin")) return lua.header(a, io, path) catch null;
-    if (std.ascii.endsWithIgnoreCase(path, ".json")) return jsonskin.parseFile(a, io, path) catch null;
+    var room: usize = lr2.max_skin_bytes;
+    if (std.ascii.endsWithIgnoreCase(path, ".json")) return jsonskin.parseFile(a, io, path, &room) catch null;
     return null;
 }
 
@@ -426,7 +427,8 @@ test "a saved pick reaches the wildcard, the option and the offset" {
     try conf.property.map.put(a, "P", "off");
     try conf.file.map.put(a, "Font", "b.ttf");
     const again = try std.json.parseFromSliceLeaky(Conf, a, try std.json.Stringify.valueAlloc(a, conf, .{}), .{ .allocate = .alloc_always });
-    const head = try jsonskin.parseFile(a, std.testing.io, try std.fs.path.join(a, &.{ dir, "play.json" }));
+    var room: usize = lr2.max_skin_bytes;
+    const head = try jsonskin.parseFile(a, std.testing.io, try std.fs.path.join(a, &.{ dir, "play.json" }), &room);
     try jsonskin.applyConf(a, head, again);
     try std.testing.expectEqualStrings("off", jsonskin.defaultItem(head.object.get("property").?.array.items[0]).?.get("name").?.string);
     const files = head.object.get("filepath").?.array.items;

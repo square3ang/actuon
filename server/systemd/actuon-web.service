@@ -6,6 +6,8 @@ After=actuon-ir.service
 ExecStart=/opt/actuon/bin/actuon-web 127.0.0.1:8731 http://127.0.0.1:8730
 DynamicUser=yes
 Restart=always
+# tiny_http takes 2 descriptors a connection, so the default 1024 caps it near 500 clients.
+LimitNOFILE=65536
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 ProtectSystem=strict

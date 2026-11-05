@@ -74,7 +74,8 @@ pub const Out = struct {
 
     pub fn waitRoom(o: *Out) bool {
         const r = c.snd_pcm_wait(o.pcm, 100);
-        if (r < 0) _ = c.snd_pcm_recover(o.pcm, r, 1);
+        // An unplugged device fails both at once; spinning at realtime priority gets the game killed by SIGXCPU.
+        if (r < 0 and c.snd_pcm_recover(o.pcm, r, 1) < 0) c.SDL_Delay(100);
         return r > 0;
     }
 

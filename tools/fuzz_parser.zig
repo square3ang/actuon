@@ -35,18 +35,31 @@ pub fn main(init: std.process.Init) !void {
         ok += 1;
         const s = try core.sim.Sim.create(gpa, &chart, .{});
         defer s.destroy();
-        var t: i64 = 0;
-        for (0..200) |_| {
+        var events: [200]core.sim.Event = undefined;
+        var t: i64 = -1_000_000;
+        for (&events) |*e| {
             t += r.intRangeAtMost(i64, 0, 50_000);
-            s.input(.{ .time_us = t, .lane = r.uintLessThan(u8, 18), .key = r.uintLessThan(u8, 2), .down = r.boolean() });
+            e.* = .{ .time_us = t, .lane = r.uintLessThan(u8, 18), .key = r.uintLessThan(u8, 2), .down = r.boolean() };
+            s.input(e.*);
         }
-        var bytes: [512]u8 = undefined;
-        r.bytes(&bytes);
-        @memcpy(bytes[0..4], core.replay.magic);
-        bytes[4] = core.replay.version;
         var arena = std.heap.ArenaAllocator.init(gpa);
         defer arena.deinit();
-        _ = core.replay.decode(arena.allocator(), &bytes) catch {};
+        const a = arena.allocator();
+        // A valid replay with a few bytes changed gets past the header, so the server's re-simulation sees hostile fields.
+        const bytes = try core.replay.encode(a, .{
+            .sha256 = chart.sha256,
+            .gauge = r.enumValue(core.gauge.Type),
+            .gas = r.enumValue(core.options.Gas),
+            .random = r.enumValue(core.options.Random),
+            .flip = r.boolean(),
+            .seed = r.int(u64),
+            .events = &events,
+        });
+        for (0..r.uintLessThan(usize, 4)) |_| bytes[r.uintLessThan(usize, bytes.len)] = r.int(u8);
+        const replay = core.replay.decode(a, bytes) catch continue;
+        // The judge steps every ms, so only charts the server would accept (an hour) are re-simulated.
+        if (chart.last_time_us > 3600 * std.time.us_per_s) continue;
+        _ = try core.replay.resimulate(gpa, &chart, replay);
     }
     std.debug.print("{d} iterations, {d} parsed, no crash\n", .{ iters, ok });
 }

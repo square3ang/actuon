@@ -203,7 +203,7 @@ pub const State = struct {
         st.graph_end_us = if (ch.last_note_us > 0) ch.last_note_us else ch.last_time_us;
         st.note_counts = @splat(0);
         for (ch.notes) |note| {
-            if (note.kind == .ln_end or note.kind == .mine) continue;
+            if (!note.graphed()) continue;
             const scratch = ch.mode.scratchOf(note.lane) >= 0;
             const long = note.kind == .ln_start;
             st.note_counts[@as(usize, @intFromBool(scratch)) * 2 + @intFromBool(long)] += 1;
@@ -226,7 +226,7 @@ pub const State = struct {
             const hit = snap.hits[st.hits_seen % session_mod.hit_ring];
             if (hit.note < 0 or hit.note >= st.notes.len) continue;
             const note = st.notes[@intCast(hit.note)];
-            if (note.kind == .ln_end or note.kind == .mine or hit.judge >= 6) continue;
+            if (!note.graphed() or hit.judge >= 6) continue;
             st.graph_judged[st.binOf(note.time_us)][hit.judge] +|= 1;
         }
     }
@@ -710,7 +710,7 @@ fn drawNotesGraph(g: *gfx.Gfx, st: *const State, d: c.SDL_FRect, now_us: i64) vo
     var most: u16 = 1;
     const n = st.graphBins();
     for (st.notes) |note| {
-        if (note.kind == .ln_end or note.kind == .mine) continue;
+        if (!note.graphed()) continue;
         const at = st.binOf(note.time_us);
         totals[at] +|= 1;
         most = @max(most, totals[at]);

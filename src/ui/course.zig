@@ -41,7 +41,7 @@ fn lookup(a: *App, al: std.mem.Allocator, hash: []const u8) !?[]const u8 {
 
 pub fn start(a: *App, id: i64) void {
     startImpl(a, id) catch |e| {
-        std.log.err("course: {t}", .{e});
+        std.log.warn("course: {t}", .{e});
         a.sel.status = tr("Could not start course");
     };
 }
@@ -67,6 +67,7 @@ fn startImpl(a: *App, id: i64) !void {
         };
         try paths.append(al, p);
     }
+    if (paths.items.len == 0) return error.NoCourse;
     const chosen: core.options.Random = @fromBackingInt(a.cfg.random);
     const allowed: core.options.Random = switch (limits.random) {
         0 => .off,
@@ -174,4 +175,14 @@ test "stage scores add up" {
     try std.testing.expectEqual(@as(u32, 10), total.count(.pg));
     try std.testing.expectEqual(@as(u32, 5), total.max_combo);
     try std.testing.expectEqual(@as(u32, 10), total.passed);
+}
+
+test "a course with no usable hash does not start" {
+    const testing = @import("testing.zig");
+    const a = try testing.open();
+    defer testing.close(a);
+    try a.db.exec("INSERT INTO course(id,table_url,name,hashes,constraints) VALUES(99,'https://t.example/','Empty',',','')");
+    start(a, 99);
+    try std.testing.expect(a.course == null);
+    try std.testing.expect(a.load_thread == null);
 }

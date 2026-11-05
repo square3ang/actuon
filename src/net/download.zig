@@ -20,9 +20,7 @@ pub fn expand(a: std.mem.Allocator, template: []const u8, md5: []const u8) ![]u8
 pub fn safeEntry(name: []const u8) bool {
     if (name.len == 0 or name[0] == '/' or name[0] == '\\') return false;
     if (name.len >= 2 and name[1] == ':') return false;
-    var it = std.mem.tokenizeAny(u8, name, "/\\");
-    while (it.next()) |seg| if (std.mem.eql(u8, seg, "..")) return false;
-    return true;
+    return !fs.climbs(name);
 }
 
 /// Extracts regular files and folders only: links and devices are skipped, never followed.
@@ -33,8 +31,20 @@ pub fn extract(a: std.mem.Allocator, io: std.Io, archive_path: []const u8, dest:
 fn extractWithin(a: std.mem.Allocator, io: std.Io, archive_path: []const u8, dest: []const u8, limits: Limits) !u32 {
     const ar = c.archive_read_new() orelse return error.Archive;
     defer _ = c.archive_read_free(ar);
-    _ = c.archive_read_support_filter_all(ar);
-    _ = c.archive_read_support_format_all(ar);
+    // Not the _all calls: lrzip, lzop and grzip would run a program from PATH on the untrusted bytes.
+    // shortcut: a libarchive built without one of these libraries falls back to its program too; fine on distro and bundled builds.
+    _ = c.archive_read_support_filter_gzip(ar);
+    _ = c.archive_read_support_filter_bzip2(ar);
+    _ = c.archive_read_support_filter_xz(ar);
+    _ = c.archive_read_support_filter_lzma(ar);
+    _ = c.archive_read_support_filter_zstd(ar);
+    _ = c.archive_read_support_filter_lz4(ar);
+    _ = c.archive_read_support_format_zip(ar);
+    _ = c.archive_read_support_format_7zip(ar);
+    _ = c.archive_read_support_format_rar(ar);
+    _ = c.archive_read_support_format_rar5(ar);
+    _ = c.archive_read_support_format_tar(ar);
+    _ = c.archive_read_support_format_lha(ar);
     const pz = try a.dupeSentinel(u8, archive_path, 0);
     if (c.archive_read_open_filename(ar, pz.ptr, 1 << 16) != c.ARCHIVE_OK) return error.Archive;
     var entry: ?*c.archive_entry = null;
@@ -212,6 +222,18 @@ test "extraction keeps non-ASCII names and everything after them" {
     const dest = try std.fmt.allocPrint(a, "{s}/out", .{root});
     try std.testing.expectEqual(@as(u32, 3), try extract(a, std.testing.io, archive, dest));
     for (names) |name| try std.testing.expect(fs.exists(std.testing.io, try std.fs.path.join(a, &.{ dest, name })));
+}
+
+test "an archive needing an outside decompressor is refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const path = try std.fmt.allocPrint(a, "{s}/t.lrz", .{root});
+    try fs.write(std.testing.io, path, "LRZI\x00\x06\x00\x00\x00\x00\x00\x00\x00\x00");
+    try std.testing.expectError(error.Archive, extract(a, std.testing.io, path, try std.fmt.allocPrint(a, "{s}/out", .{root})));
 }
 
 test "entry names cannot escape" {

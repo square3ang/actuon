@@ -48,8 +48,6 @@ const Cmd = union(enum) {
     set_paused: bool,
 };
 
-pub const HostInfo = struct { name: [64]u8 = @splat(0), latency_ms: f64 = 0, exclusive: bool = false };
-
 pub const Engine = struct {
     gpa: std.mem.Allocator,
     rate: u32 = 48000,
@@ -78,7 +76,8 @@ pub const Engine = struct {
     skip_frames: i64 = 0,
     hold_frames: i64 = 0,
     song_buf: [song_max * 2]f32 = undefined,
-    host: HostInfo = .{},
+    /// PortAudio's output latency, read by its callback.
+    out_latency_s: f64 = 0,
     feed_thread: ?*c.SDL_Thread = null,
     feed_frames: u32 = 0,
     feed_quit: std.atomic.Value(bool) = .init(false),
@@ -160,8 +159,6 @@ pub const Engine = struct {
         const out = alsa.Out.open(name, e.rate, frames, feed_max) orelse return false;
         e.alsa_out = out;
         e.feed_frames = out.period;
-        e.host = .{ .latency_ms = out.lead_s * 1000, .exclusive = std.mem.startsWith(u8, name, "hw:") };
-        @memcpy(e.host.name[0.."ALSA".len], "ALSA");
         e.feed_quit.store(false, .release);
         e.feed_thread = c.SDL_CreateThread(alsaThread, "audio-write", e);
         return true;
@@ -263,26 +260,24 @@ pub const Engine = struct {
                 wasapi.flags = c.paWinWasapiExclusive | c.paWinWasapiThreadPriority;
                 wasapi.threadPriority = c.eThreadPriorityProAudio;
                 out.hostApiSpecificStreamInfo = &wasapi;
-                return e.startStream(ty, &out, rate, frames, true);
+                return e.startStream(&out, rate, frames);
             }
         } else if (exclusive) return false;
-        return e.startStream(ty, &out, rate, frames, false);
+        return e.startStream(&out, rate, frames);
     }
 
     /// Callback, not blocking writes: a 32-64 frame period is under 1.5 ms, too short for a polling thread; ALSA ioplug may never call back, so it uses `alsaThread`.
-    fn startStream(e: *Engine, ty: c.PaHostApiTypeId, out: *c.PaStreamParameters, rate: u32, frames: u32, exclusive: bool) bool {
+    fn startStream(e: *Engine, out: *c.PaStreamParameters, rate: u32, frames: u32) bool {
         var stream: ?*c.PaStream = null;
         const err = c.Pa_OpenStream(&stream, null, out, @floatFromInt(rate), @min(frames, feed_max), c.paClipOff | c.paDitherOff, paCallback, e);
         if (err != c.paNoError) return false;
         // Set before the start: the callback reads the latency from its first buffer.
         e.feed_frames = @min(frames, feed_max);
         const info = c.Pa_GetStreamInfo(stream);
-        e.host = .{ .latency_ms = if (info != null) info.*.outputLatency * 1000 else 0, .exclusive = exclusive };
-        const n = nameOf(ty);
-        @memcpy(e.host.name[0..n.len], n);
+        e.out_latency_s = if (info != null) info.*.outputLatency else 0;
         if (c.Pa_StartStream(stream) != c.paNoError) {
             _ = c.Pa_CloseStream(stream);
-            e.host = .{};
+            e.out_latency_s = 0;
             return false;
         }
         e.stream = stream;
@@ -294,7 +289,7 @@ pub const Engine = struct {
         const e: *Engine = @ptrCast(@alignCast(ud));
         const frames: u32 = @intCast(count);
         e.mix(@ptrCast(@alignCast(out.?)), frames);
-        if (!e.paused) e.updateClock(e.host.latency_ms / 1000, frames);
+        if (!e.paused) e.updateClock(e.out_latency_s, frames);
         return c.paContinue;
     }
 
@@ -307,8 +302,6 @@ pub const Engine = struct {
     }
 
     fn openNull(e: *Engine) !void {
-        const n = "none";
-        @memcpy(e.host.name[0..n.len], n);
         e.feed_quit.store(false, .release);
         e.feed_thread = c.SDL_CreateThread(nullThread, "audio-null", e);
     }

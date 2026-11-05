@@ -24,17 +24,29 @@ pub const Format = enum(u8) {
     }
 };
 
+/// Times past this overflow the audio frame and graph maths, which multiply microseconds.
+const max_chart_us: i64 = 12 * 3600 * std.time.us_per_s;
+
 pub fn parse(gpa: std.mem.Allocator, format: Format, data: []const u8, opts: bms.Options) !types.Chart {
-    if (format == .bmson) return bmson.parse(gpa, data);
     var o = opts;
     o.is_pms = format == .pms;
-    return bms.parse(gpa, data, o);
+    var chart = if (format == .bmson) try bmson.parse(gpa, data) else try bms.parse(gpa, data, o);
+    if (chart.last_time_us > max_chart_us) {
+        chart.deinit();
+        return error.TooLong;
+    }
+    return chart;
 }
 
 test "a chart's name picks its format" {
     try std.testing.expectEqual(Format.bmson, Format.of("a/B.BMSON"));
     try std.testing.expectEqual(Format.pms, Format.of("x.pms"));
     try std.testing.expectEqual(Format.bms, Format.of("x.bme"));
+}
+
+test "a chart longer than the cap is refused" {
+    try std.testing.expectError(error.TooLong, parse(std.testing.allocator, .bms, "#BPM 120\n#WAV01 a.wav\n#00002:10000000000\n#00111:01\n", .{}));
+    try std.testing.expectError(error.TooLong, parse(std.testing.allocator, .bms, "#BPM 0.001\n#WAV01 a.wav\n#99901:01\n", .{}));
 }
 
 test {

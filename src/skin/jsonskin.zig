@@ -44,8 +44,10 @@ pub fn sanitize(a: std.mem.Allocator, src: []const u8) ![]u8 {
 
 pub const ParseFileError = std.Io.Dir.ReadFileAllocError || std.json.ParseError(std.json.Scanner) || error{BadJson};
 
-pub fn parseFile(a: std.mem.Allocator, io: std.Io, path: []const u8) ParseFileError!J {
-    const raw = try fs.readAlloc(a, io, path, 1 << 25);
+/// `room` is the skin's bytes left to read; a parsed value costs about 140 times its text.
+pub fn parseFile(a: std.mem.Allocator, io: std.Io, path: []const u8, room: *usize) ParseFileError!J {
+    const raw = try fs.readAlloc(a, io, path, room.*);
+    room.* -= raw.len;
     const text = if (std.unicode.utf8ValidateSlice(raw)) raw else try core.encoding.toUtf8(a, raw, .sjis);
     const clean = try sanitize(a, if (std.mem.startsWith(u8, text, "\xEF\xBB\xBF")) text[3..] else text);
     return std.json.parseFromSliceLeaky(J, a, clean, .{ .allocate = .alloc_always });
@@ -239,6 +241,7 @@ const Loader = struct {
     protos: std.StringHashMapUnmanaged(m.Object) = .empty,
     note_id: []const u8 = "notes",
     includes: u32 = 0,
+    include_room: usize = lr2.max_skin_bytes,
 
     /// std.json parses any nesting without recursion, so this bounds its own.
     fn testOp(l: *Loader, v: J, depth: u32) bool {
@@ -302,7 +305,7 @@ const Loader = struct {
         l.includes += 1;
         if (l.includes > lr2.max_includes) return error.BadInclude;
         const p = lr2.walk(l.a, l.io, l.dir, rel) orelse return error.BadInclude;
-        return l.expand(try parseFile(l.a, l.io, p), depth + 1);
+        return l.expand(try parseFile(l.a, l.io, p, &l.include_room), depth + 1);
     }
 
     fn src(l: *Loader, o: std.json.ObjectMap) !m.Src {
@@ -645,7 +648,8 @@ pub fn fromJson(skin: *m.Skin, io: std.Io, root_in: J, head: J, dir: []const u8,
 }
 
 pub fn load(skin: *m.Skin, io: std.Io, path: []const u8, resolver: *const fn (i32) bool, conf: Conf) ![]const ?[]const u8 {
-    const root = try parseFile(skin.arena.allocator(), io, path);
+    var room: usize = lr2.max_skin_bytes;
+    const root = try parseFile(skin.arena.allocator(), io, path, &room);
     return fromJson(skin, io, root, root, std.fs.path.dirname(path) orelse ".", resolver, conf);
 }
 
@@ -674,6 +678,29 @@ test "includes that climb, are absolute or fan out are refused" {
         const root = try std.json.parseFromSliceLeaky(J, a, text, .{});
         try std.testing.expectError(error.BadInclude, fromJson(&skin, std.testing.io, root, root, dir, &noneEnabled, .{}));
     }
+}
+
+test "includes stop at the skin's byte budget" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const big = try a.alloc(u8, 1 << 20);
+    @memset(big, 'x');
+    big[0] = '"';
+    big[big.len - 1] = '"';
+    try fs.write(std.testing.io, try std.fs.path.join(a, &.{ dir, "big.json" }), big);
+    var skin: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
+    defer skin.arena.deinit();
+    const n = lr2.max_skin_bytes / big.len + 1;
+    var text: std.ArrayList(u8) = .empty;
+    try text.appendSlice(a, "[{\"include\":\"big.json\"}");
+    for (1..n) |_| try text.appendSlice(a, ",{\"include\":\"big.json\"}");
+    try text.append(a, ']');
+    const root = try std.json.parseFromSliceLeaky(J, a, text.items, .{});
+    if (fromJson(&skin, std.testing.io, root, root, dir, &noneEnabled, .{})) |_| return error.TestUnexpectedResult else |_| {}
 }
 
 test "assets outside the skin folder are refused" {

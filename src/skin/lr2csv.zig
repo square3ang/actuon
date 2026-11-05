@@ -24,6 +24,9 @@ const Parser = struct {
     taken: bool = false,
     depth: u32 = 0,
     includes: u32 = 0,
+    room: usize = max_skin_bytes,
+    /// Reused for every line: a field slice per comma would pile up in the arena.
+    parts: std.ArrayList([]const u8) = .empty,
     resolver: *const fn (i32) bool,
     conf: jsonskin.Conf = .{},
     /// #CUSTOMFILE entries in the shape jsonskin.resolveWild reads, "def" already the player's pick.
@@ -59,6 +62,8 @@ fn int(s: []const u8) i32 {
 
 /// Depth alone lets each file include many: the count stops the fan-out.
 pub const max_includes = 256;
+/// Bytes one skin may read across its files and includes.
+pub const max_skin_bytes = 8 << 20;
 
 fn vals(str: []const []const u8) [24]i32 {
     var v: [24]i32 = @splat(0);
@@ -237,10 +242,10 @@ const Error = std.Io.Dir.ReadFileAllocError || error{BadInclude};
 fn line(p: *Parser, raw: []const u8) Error!void {
     const text = std.mem.trimEnd(u8, raw, " \r\t");
     if (text.len == 0 or text[0] != '#') return;
-    var parts: std.ArrayList([]const u8) = .empty;
+    p.parts.clearRetainingCapacity();
     var it = std.mem.splitScalar(u8, text, ',');
-    while (it.next()) |s| try parts.append(p.a, s);
-    const str = parts.items;
+    while (it.next()) |s| try p.parts.append(p.a, s);
+    const str = p.parts.items;
     const cmd = str[0][1..];
     const eq = std.ascii.eqlIgnoreCase;
     if (eq(cmd, "IF")) {
@@ -385,8 +390,9 @@ fn line(p: *Parser, raw: []const u8) Error!void {
     }
 }
 
-fn readText(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
-    const bytes = try fs.readAlloc(a, io, path, 1 << 24);
+fn readText(a: std.mem.Allocator, io: std.Io, path: []const u8, room: *usize) ![]const u8 {
+    const bytes = try fs.readAlloc(a, io, path, room.*);
+    room.* -= bytes.len;
     return if (std.unicode.utf8ValidateSlice(bytes)) bytes else core.encoding.toUtf8(a, bytes, .sjis);
 }
 
@@ -394,14 +400,16 @@ fn readText(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
 pub fn customOptions(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]const jsonskin.Option {
     var out: std.ArrayList(jsonskin.Option) = .empty;
     var includes: u32 = 0;
-    try scanOptions(a, io, skinRoot(path), path, &out, 0, &includes);
+    var room: usize = max_skin_bytes;
+    var parts: std.ArrayList([]const u8) = .empty;
+    try scanOptions(a, io, skinRoot(path), path, &out, 0, &includes, &room, &parts);
     return out.items;
 }
 
-fn scanOptions(a: std.mem.Allocator, io: std.Io, root: []const u8, path: []const u8, out: *std.ArrayList(jsonskin.Option), depth: u32, includes: *u32) Error!void {
-    var lines = std.mem.splitScalar(u8, try readText(a, io, path), '\n');
+fn scanOptions(a: std.mem.Allocator, io: std.Io, root: []const u8, path: []const u8, out: *std.ArrayList(jsonskin.Option), depth: u32, includes: *u32, room: *usize, parts: *std.ArrayList([]const u8)) Error!void {
+    var lines = std.mem.splitScalar(u8, try readText(a, io, path, room), '\n');
     while (lines.next()) |raw| {
-        var parts: std.ArrayList([]const u8) = .empty;
+        parts.clearRetainingCapacity();
         var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, raw, " \r\t"), ',');
         while (it.next()) |s| try parts.append(a, s);
         const f = parts.items;
@@ -411,7 +419,7 @@ fn scanOptions(a: std.mem.Allocator, io: std.Io, root: []const u8, path: []const
             const inc = resolvePath(a, io, root, &.{}, f[1]) orelse continue;
             includes.* += 1;
             if (includes.* > max_includes) return error.BadInclude;
-            try scanOptions(a, io, root, inc, out, depth + 1, includes);
+            try scanOptions(a, io, root, inc, out, depth + 1, includes, room, parts);
         } else if (eq(f[0], "#CUSTOMOPTION")) {
             if (f.len < 3) continue;
             var items: std.ArrayList([]const u8) = .empty;
@@ -437,7 +445,7 @@ fn scanOptions(a: std.mem.Allocator, io: std.Io, root: []const u8, path: []const
 }
 
 fn runFile(p: *Parser, path: []const u8) !void {
-    const text = try readText(p.a, p.io, path);
+    const text = try readText(p.a, p.io, path, &p.room);
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |l| try line(p, l);
 }

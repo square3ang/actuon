@@ -46,6 +46,7 @@ pub const Video = struct {
     tb: f64,
     w: c_int,
     h: c_int,
+    pix_fmt: c_int,
     front: []u8,
     back: []u8,
     lock: *c.SDL_Mutex,
@@ -100,6 +101,7 @@ pub const Video = struct {
             .tb = c.av_q2d(st.*.time_base),
             .w = w,
             .h = h,
+            .pix_fmt = dec.?.pix_fmt,
             .front = try gpa.alloc(u8, size),
             .back = try gpa.alloc(u8, size),
             .lock = c.SDL_CreateMutex() orelse return error.Open,
@@ -196,10 +198,11 @@ pub const Video = struct {
             defer c.av_frame_unref(frame);
             if (frame.best_effort_timestamp != c.AV_NOPTS_VALUE) pts = frameUs(frame.best_effort_timestamp, v.tb);
             if (pts + 50_000 < clock) continue;
+            // sws and the deblock graph are built for the opening size; a file that changes it mid-stream would overread.
+            if (frame.width != v.w or frame.height != v.h or frame.format != v.pix_fmt) continue;
             var dst = [4]?[*]u8{ v.back.ptr, null, null, null };
             var stride = [4]c_int{ v.w * 4, 0, 0, 0 };
             if (v.filters) |f| {
-                // A frame the graph won't take (the size changed mid-file) is skipped: sws expects its output.
                 if (c.av_buffersrc_add_frame_flags(f.src, frame, c.AV_BUFFERSRC_FLAG_KEEP_REF) < 0) continue;
                 if (c.av_buffersink_get_frame(f.sink, filtered) < 0) continue;
                 defer c.av_frame_unref(filtered);

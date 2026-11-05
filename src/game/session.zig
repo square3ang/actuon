@@ -410,7 +410,8 @@ pub const Session = struct {
 
     fn applyInput(s: *Session, t_in: i64, lane: u8, key: u8, down: bool) void {
         // Replays and the sim need events ordered and never behind judged time, which a replay steps past.
-        const t = @max(t_in, s.last_event_t, s.sim.grid_t);
+        // Before the grid's first step a READY press keeps its negative time, so the sim judges nothing.
+        const t = @max(t_in, s.last_event_t, if (s.sim.grid_t > 0) s.sim.grid_t else t_in);
         s.last_event_t = t;
         const ev: core.sim.Event = .{ .time_us = t, .lane = lane, .key = key, .down = down };
         s.events.appendAssumeCapacity(ev);
@@ -479,7 +480,6 @@ pub const Session = struct {
                     }
                     if (s.params.autoplay) snap.flash_at_us[o.lane] = now;
                 },
-                .press_empty, .hold_start, .hold_end => {},
             };
 
             snap.time_us = now;
@@ -645,6 +645,23 @@ test "an input older than judged time scores the same when resimulated" {
     try std.testing.expectEqual(s.sim.score.exScore(), again.score.exScore());
     try std.testing.expectEqual(s.sim.score.count(.pr), again.score.count(.pr));
     try std.testing.expectEqual(s.sim.score.count(.ms), again.score.count(.ms));
+}
+
+test "a press during READY judges nothing" {
+    const gpa = std.testing.allocator;
+    var chart = try core.bms.parse(gpa, "#BPM 240\n#WAV01 a.wav\n#00011:01\n", .{});
+    defer chart.deinit();
+    var s: Session = undefined;
+    s.params = .{ .path = "" };
+    s.last_event_t = std.math.minInt(i64);
+    s.sim = try Sim.create(gpa, &chart, .{});
+    defer s.sim.destroy();
+    s.events = try .initCapacity(gpa, 4);
+    defer s.events.deinit(gpa);
+    s.applyInput(-400_000, chart.notes[0].lane, 0, true);
+    s.applyInput(-300_000, chart.notes[0].lane, 0, false);
+    try std.testing.expectEqual(@as(i64, -400_000), s.events.items[0].time_us);
+    try std.testing.expectEqual(@as(u32, 0), s.sim.score.passed + s.sim.score.count(.ms));
 }
 
 test "judging waits for input a slow frame has not read yet" {

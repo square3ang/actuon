@@ -56,6 +56,11 @@ pub const Note = struct {
     damage: f32 = 0,
     wav_start_us: i64 = 0,
     wav_dur_us: i64 = 0,
+
+    /// Counted once per note in graphs and density, as beatoraja shows them: an LN by its head.
+    pub fn graphed(n: Note) bool {
+        return n.kind != .ln_end and n.kind != .mine;
+    }
 };
 
 pub const Hidden = struct { time_us: i64, wav: i32, lane: u8 };

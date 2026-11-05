@@ -123,7 +123,8 @@ fn printTo(io: std.Io, file: std.Io.File, comptime fmt: []const u8, args: anytyp
     try w.interface.flush();
 }
 
-fn irAccount(gpa: std.mem.Allocator, io: std.Io, cmd: []const u8, url: []const u8, name: []const u8) !void {
+fn irAccount(gpa: std.mem.Allocator, io: std.Io, cmd: []const u8, typed_url: []const u8, name: []const u8) !void {
+    const url = std.mem.trimEnd(u8, typed_url, "/");
     if (!c.SDL_Init(c.SDL_INIT_EVENTS)) return error.SdlInit;
     defer c.SDL_Quit();
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -133,6 +134,11 @@ fn irAccount(gpa: std.mem.Allocator, io: std.Io, cmd: []const u8, url: []const u
     if (table.sendsInClear(url)) {
         printTo(io, .stderr(), "an IR on the internet needs https://\n", .{}) catch {};
         return error.PlainHttp;
+    }
+    // A running game saves its own copy of the config on exit, which would drop this token.
+    if (editor.otherInstanceRunning(a, io)) {
+        printTo(io, .stderr(), "quit actuon first: it would overwrite the saved token\n", .{}) catch {};
+        return error.GameRunning;
     }
     var buf: [1024]u8 = undefined;
     var rd = std.Io.File.stdin().reader(io, &buf);

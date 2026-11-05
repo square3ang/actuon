@@ -434,11 +434,12 @@ fn pollPicker(a: *App) void {
 fn startSync(a: *App, upload: bool) void {
     if (a.set.sync != null) return;
     if (a.cfg.ir_url.len == 0 or a.cfg.ir_token.len == 0) return say(a, "Sign in to an IR server first", .{});
-    a.set.sync = ir.startSync(a.gpa, a.io, a.cfg.ir_url, a.cfg.ir_token, upload);
+    a.set.sync = ir.startSync(a.gpa, a.io, a.cfg.ir_url, a.cfg.ir_token, upload, a.cfg.ir_send_failed);
     if (a.set.sync == null) say(a, "Could not start IR sync", .{});
 }
 
-fn pollSync(a: *App) void {
+/// Runs in every scene, so a sign-in or sync that ends after Settings closed still lands.
+pub fn pollSync(a: *App) void {
     const s = a.set.sync orelse return;
     if (!s.done.load(.acquire)) {
         const total = s.total.load(.acquire);
@@ -515,7 +516,7 @@ fn sendAccount(a: *App, name: []const u8, register: bool) void {
     if (a.set.account == null) say(a, "Could not reach the IR server", .{});
 }
 
-fn pollAccount(a: *App) void {
+pub fn pollAccount(a: *App) void {
     const s = a.set.account orelse return;
     if (!s.done.load(.acquire)) return say(a, "Talking to the IR server...", .{});
     if (s.err) |e| {
@@ -1034,8 +1035,6 @@ pub fn draw(a: *App) void {
     const s = &a.set;
     const u = g.h / 720;
     pollPicker(a);
-    pollSync(a);
-    pollAccount(a);
     if (select.tickTables(a)) say(a, "{s}", .{a.sel.status});
     const current = items[s.cursor].section();
     const drop_click = s.drop.open and g.clicked;
@@ -1448,7 +1447,11 @@ fn commit(a: *App, it: Item) void {
         // A bare host is what people type, and a password must not go out over plain HTTP by accident.
         .ir_url => {
             if (table.sendsInClear(v)) return say(a, "An IR on the internet needs https://", .{});
-            a.cfg.ir_url = if (v.len == 0 or isWebUrl(v)) v else std.fmt.allocPrint(al, "https://{s}", .{v}) catch return;
+            const bare = std.mem.trimEnd(u8, v, "/");
+            const url = if (bare.len == 0 or isWebUrl(bare)) bare else std.fmt.allocPrint(al, "https://{s}", .{bare}) catch return;
+            // The token belongs to the old server; sent to a new one it would hand that server the account.
+            if (!std.mem.eql(u8, url, a.cfg.ir_url)) a.cfg.ir_token = "";
+            a.cfg.ir_url = url;
         },
         .ir_rename => {
             if (v.len == 0) return;
@@ -1788,6 +1791,7 @@ test "an IR server typed without a scheme uses https" {
     openItem(a, .ir_url);
     for ([_][2][]const u8{
         .{ "ir.actuon.app", "https://ir.actuon.app" },
+        .{ "https://ir.actuon.app/", "https://ir.actuon.app" },
         .{ "http://127.0.0.1:8730", "http://127.0.0.1:8730" },
         .{ "", "" },
     }) |case| {
@@ -1796,6 +1800,21 @@ test "an IR server typed without a scheme uses https" {
         try a.text.appendSlice(a.gpa, case[0]);
         key(a, c.SDL_SCANCODE_RETURN);
         try std.testing.expectEqualStrings(case[1], a.cfg.ir_url);
+    }
+}
+
+test "a new IR address signs out, the same one keeps the sign-in" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.cfg.ir_url = "https://ir.actuon.app";
+    a.cfg.ir_token = "tok";
+    openItem(a, .ir_url);
+    for ([_][2][]const u8{ .{ "ir.actuon.app", "tok" }, .{ "evil.example", "" } }) |case| {
+        key(a, c.SDL_SCANCODE_RETURN);
+        a.text.clearRetainingCapacity();
+        try a.text.appendSlice(a.gpa, case[0]);
+        key(a, c.SDL_SCANCODE_RETURN);
+        try std.testing.expectEqualStrings(case[1], a.cfg.ir_token);
     }
 }
 
