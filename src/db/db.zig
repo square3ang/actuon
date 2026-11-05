@@ -26,8 +26,8 @@ fn foldSql(ctx: ?*c.sqlite3_context, _: c_int, argv: [*c]?*c.sqlite3_value) call
 fn foldCase(text: []const u8, out: []u8) void {
     var i: usize = 0;
     while (i < text.len) {
-        const n = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
-        const r = if (i + n <= text.len) std.unicode.utf8Decode(text[i .. i + n]) catch null else null;
+        const n = std.unicode.utf8ByteSequenceLength(text[i]) catch 0;
+        const r = if (n > 0 and i + n <= text.len) std.unicode.utf8Decode(text[i .. i + n]) catch null else null;
         if (r) |cp| {
             _ = std.unicode.utf8Encode(foldRune(cp), out[i .. i + n]) catch unreachable;
             i += n;
@@ -54,6 +54,13 @@ fn foldRune(r: u21) u21 {
         0x139...0x148, 0x179...0x17E, 0x1AF, 0x1CD...0x1DC, 0x4C1...0x4CE => r + (r & 1),
         else => r,
     };
+}
+
+test "bytes that are not UTF-8 pass through the fold" {
+    const text = "\xC3\x80\x80\xDE\xFFA";
+    var out: [text.len]u8 = undefined;
+    foldCase(text, &out);
+    try std.testing.expectEqualStrings("\xC3\xA0\x80\xDE\xFFa", &out);
 }
 
 pub const Stmt = struct {

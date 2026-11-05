@@ -403,6 +403,17 @@ test "search ignores case in accented Latin, Greek and Cyrillic" {
     }
 }
 
+test "a Hangul search split by an ideographic space finds its chart" {
+    const t = @import("testing.zig");
+    const a = try t.open();
+    defer t.close(a);
+    try a.db.exec("INSERT INTO song(path,folder,sha256,md5,title,artist,subtitle,subartist,genre) VALUES('k','f','k','k','가나 다라','','','','')");
+    a.sel.search = try a.gpa.dupe(u8, "가나\u{3000}다라");
+    reload(a);
+    try std.testing.expectEqual(@as(usize, 1), a.sel.rows.len);
+    try std.testing.expectEqualStrings("가나 다라", a.sel.rows[0].label);
+}
+
 fn searchRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row), words: *std.mem.TokenIterator(u8, .any)) !void {
     const s = &a.sel;
     var count: usize = 0;
@@ -413,7 +424,7 @@ fn searchRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row), words: 
     var at: c_int = 1;
     while (words.next()) |word| : (at += 1) st.bindText(at, try likePattern(al, word, true));
     // ?N: the whole query opening a title ranks first.
-    if (s.sort == 0) st.bindText(at, try likePattern(al, std.mem.trim(u8, s.search, " \t"), false));
+    if (s.sort == 0) st.bindText(at, try likePattern(al, std.mem.trim(u8, words.buffer, " \t"), false));
     while (try st.step()) {
         const song = try db_mod.readSong(al, st);
         try rows.append(al, .{ .label = song.title, .song = song });
@@ -548,7 +559,8 @@ fn courseRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
 fn buildRows(a: *App, al: std.mem.Allocator) ![]Row {
     const s = &a.sel;
     var rows: std.ArrayList(Row) = .empty;
-    var words = std.mem.tokenizeAny(u8, s.search, " \t\u{3000}");
+    // tokenizeAny splits on single bytes, and U+3000's bytes sit inside Hangul and kana.
+    var words = std.mem.tokenizeAny(u8, try std.mem.replaceOwned(u8, al, s.search, "\u{3000}", " "), " \t");
     if (words.peek() != null) {
         try searchRows(a, al, &rows, &words);
     } else switch (s.view) {
