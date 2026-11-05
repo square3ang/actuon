@@ -698,6 +698,38 @@ test "double play takes the 16 key section, two stages of kinds and the 2P timer
     try std.testing.expect(scratch_2p);
 }
 
+test "the 10 key screen takes the 12 key section and the 9 key screen its middle S column" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const path = try std.fs.path.join(a, &.{ dir, "skin.ini" });
+    try fs.write(std.testing.io, path, "[Mania]\nKeys: 9\nColumnStart: 20\n[Mania]\nKeys: 12\nColumnStart: 10\n");
+    const png = testPng(30, 10);
+    for ([_][]const u8{ "mania-note1.png", "mania-noteS.png", "mania-key1D.png" }) |f| {
+        try fs.write(std.testing.io, try std.fs.path.join(a, &.{ dir, f }), &png);
+    }
+    var dp: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
+    defer dp.arena.deinit();
+    _ = try load(&dp, std.testing.io, path, .beat10, .{}, 4.0 / 3.0);
+    // The 2P scratch is the last of 12 columns, held on the 2P scratch timer.
+    try std.testing.expectEqual(@as(f32, 10 + 11 * 30), dp.notes.lane[11].?[0]);
+    var scratch_2p = false;
+    for (dp.objects) |obj| for (obj.ops) |op| {
+        if (op == m.key_held + 10) scratch_2p = true;
+    };
+    try std.testing.expect(scratch_2p);
+
+    var pms: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
+    defer pms.arena.deinit();
+    const paths = try load(&pms, std.testing.io, path, .popn9, .{}, 4.0 / 3.0);
+    try std.testing.expectEqual(@as(f32, 20), pms.notes.lane[0].?[0]);
+    try std.testing.expect(std.mem.endsWith(u8, paths[@intCast(pms.notes.note[4].tex)].?, "mania-noteS.png"));
+    try std.testing.expect(std.mem.endsWith(u8, paths[@intCast(pms.notes.note[0].tex)].?, "mania-note1.png"));
+}
+
 test "an ini for other modes only is not a mania skin" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

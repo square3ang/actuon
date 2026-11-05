@@ -345,7 +345,8 @@ fn numberStart(o: *const Object, k: Key, digits: []const u8, pads: usize, pad_gl
     var used: f32 = if (o.signed) k.w - o.digit_gap else 0;
     if (pad_glyph) |g| used += @as(f32, @floatFromInt(pads)) * glyphAdvance(o, k, @intCast(g));
     for (digits) |d| used += glyphAdvance(o, k, d);
-    const slack = @as(f32, @floatFromInt(width)) * (k.w - o.digit_gap) - used;
+    // A signed one-place number overflows its places; it stays anchored at the key's x.
+    const slack = @max(0, @as(f32, @floatFromInt(width)) * (k.w - o.digit_gap) - used);
     return k.x + switch (o.align_) {
         1 => 0,
         2 => slack / 2,
@@ -751,4 +752,7 @@ test "an osu! font gives each digit its own width, or centres it in a fixed cell
     // Zero padded and right aligned, the cells fill the places from the key's x.
     o.align_ = 0;
     try std.testing.expectEqual(@as(f32, 0), numberStart(&o, k, &ten, 4, 0, 6));
+    const five = [_]u8{5};
+    const signed: Object = .{ .signed = true };
+    try std.testing.expectEqual(@as(f32, 0), numberStart(&signed, k, &five, 0, null, 1));
 }

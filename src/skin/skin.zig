@@ -272,12 +272,12 @@ fn addOption(a: std.mem.Allocator, out: *std.ArrayList(Option), o: Option) !void
     try out.append(a, o);
 }
 
-fn addFileOptions(a: std.mem.Allocator, io: std.Io, out: *std.ArrayList(Option), dir: []const u8, path: []const u8) !void {
+fn addFileOptions(a: std.mem.Allocator, io: std.Io, out: *std.ArrayList(Option), dir: []const u8, path: []const u8, want: i32) !void {
     if (osuskin.isIni(path)) {
         try addOption(a, out, .{ .kind = .property, .name = osuskin.bga_stretch_name, .choices = &osuskin.bga_stretch_choices, .def = "Fit" });
         try addOption(a, out, .{ .kind = .property, .name = osuskin.bga_dim_name, .choices = &osuskin.bga_dim_choices, .def = "0%" });
         try addOption(a, out, .{ .kind = .property, .name = osuskin.gauge_color_name, .choices = &osuskin.gauge_color_choices, .def = "On" });
-        try addOption(a, out, .{ .kind = .property, .name = osuskin.scratch_side_name, .choices = &osuskin.scratch_side_choices, .def = "Left" });
+        if (offersScratchSide(want)) try addOption(a, out, scratch_side_option);
         return;
     }
     if (std.ascii.endsWithIgnoreCase(path, ".lr2skin")) {
@@ -291,13 +291,19 @@ fn addFileOptions(a: std.mem.Allocator, io: std.Io, out: *std.ArrayList(Option),
 
 pub const scratchRight = osuskin.scratchRight;
 
-const builtin_options = [_]Option{.{ .kind = .property, .name = osuskin.scratch_side_name, .choices = &osuskin.scratch_side_choices, .def = "Left" }};
+const scratch_side_option: Option = .{ .kind = .property, .name = osuskin.scratch_side_name, .choices = &osuskin.scratch_side_choices, .def = "Left" };
+const builtin_options = [_]Option{scratch_side_option};
+
+/// play.laneOrder moves the scratch only on the single play screens.
+fn offersScratchSide(want: i32) bool {
+    return want == playType(.beat7) or want == playType(.beat5);
+}
 
 pub fn options(a: std.mem.Allocator, io: std.Io, root: []const u8, want: i32) ![]const Option {
-    if (root.len == 0) return if (want == playType(.beat7) or want == playType(.beat5)) &builtin_options else &.{};
+    if (root.len == 0) return if (offersScratchSide(want)) &builtin_options else &.{};
     const path = find(a, io, root, want) orelse return &.{};
     var out: std.ArrayList(Option) = .empty;
-    try addFileOptions(a, io, &out, std.fs.path.dirname(path) orelse ".", path);
+    try addFileOptions(a, io, &out, std.fs.path.dirname(path) orelse ".", path, want);
     return out.items;
 }
 
@@ -484,6 +490,7 @@ test "a skin.ini stands for every play screen only" {
     try std.testing.expectEqualStrings(osuskin.bga_dim_name, rows[1].name);
     try std.testing.expectEqualStrings(osuskin.gauge_color_name, rows[2].name);
     try std.testing.expectEqualStrings(osuskin.scratch_side_name, rows[3].name);
+    try std.testing.expectEqual(@as(usize, 3), (try options(a, io, dir, playType(.beat14))).len);
 }
 
 test "each screen offers only its own file's options" {
