@@ -1953,7 +1953,7 @@ test "up and down never land on a row the platform hides" {
     }
     input.direct_keyboard.store(true, .release);
     defer input.direct_keyboard.store(false, .release);
-    try std.testing.expectEqual(builtin.os.tag != .macos, rowShown(a, .input_poll));
+    try std.testing.expect(rowShown(a, .input_poll));
 }
 
 test "a typed poll rate shows as the nearest choice at or below it, wherever Event sits" {

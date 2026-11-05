@@ -11,12 +11,13 @@ const ir = @import("net/ir.zig");
 const config = @import("game/config.zig");
 const c = @import("c");
 const crash = @import("platform/crash.zig");
+const update = @import("net/update.zig");
 
 pub const panic = std.debug.FullPanic(crash.onPanic);
 pub const std_options: std.Options = .{ .enable_segfault_handler = false };
 
 const usage =
-    \\usage: actuon [chart] [--auto] [--replay FILE] [--from-ms N]
+    \\usage: actuon [chart] [--auto] [--replay FILE] [--from-ms N] [--version]
     \\              [--null-audio] [--shot FILE.bmp] [--shot-after-ms N] [--shot-keys F10,Down] [--decide]
     \\       actuon -P [-N<measure>] FILE    preview from an editor (-S stops)
     \\       actuon fetch-chart MD5
@@ -41,6 +42,8 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, args[2], "signal")) _ = std.c.raise(.SEGV);
         return;
     }
+    // The AppImage build runs this to catch a bundled library that breaks the loader.
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) return printTo(io, .stdout(), "actuon {s}\n", .{update.current_version});
     if (args.len >= 2 and std.mem.eql(u8, args[1], "latency")) {
         const keys: u32 = if (args.len >= 4) try std.fmt.parseInt(u32, args[3], 10) else 0;
         return latency.run(keys);
