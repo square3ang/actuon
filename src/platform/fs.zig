@@ -37,6 +37,14 @@ pub fn exists(io: Io, path: []const u8) bool {
     return true;
 }
 
+/// Null while another process holds it. The file stays behind: deleting it would let a later opener lock a different file.
+pub fn lock(io: Io, path: []const u8) !?Io.File {
+    return Dir.cwd().createFile(io, path, .{ .truncate = false, .lock = .exclusive, .lock_nonblocking = true }) catch |err| switch (err) {
+        error.WouldBlock => null,
+        else => err,
+    };
+}
+
 pub fn mkdirs(io: Io, path: []const u8) !void {
     try Dir.cwd().createDirPath(io, path);
 }

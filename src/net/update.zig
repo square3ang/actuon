@@ -33,6 +33,7 @@ const macos_exe = "Contents/MacOS/actuon";
 const staged_name = ".actuon-update";
 const old_suffix = ".actuon-old";
 const journal_name = ".actuon-swap";
+const lock_name = ".actuon-lock";
 
 pub const Release = struct {
     version: []const u8,
@@ -96,6 +97,8 @@ fn fetchProof(gpa: std.mem.Allocator, io: std.Io, base: []const u8, url: []const
 
 /// Stages in `dir`, beside the game, so the final renames stay on one volume; `swap` moves `inner` of the package onto `to`.
 fn replacePackage(a: std.mem.Allocator, io: std.Io, url: []const u8, proof: Proof, dir: []const u8, inner: []const u8, comptime swap: anytype, to: []const u8, progress: *http.Progress) !void {
+    const held = try fs.lock(io, try std.fs.path.join(a, &.{ dir, lock_name })) orelse return error.UpdateBusy;
+    defer held.close(io);
     const archive = try std.fs.path.join(a, &.{ dir, staged_name ++ ".zip" });
     const staged = try std.fs.path.join(a, &.{ dir, staged_name });
     const journal = try std.fs.path.join(a, &.{ dir, journal_name });
@@ -117,19 +120,21 @@ fn swapBundle(a: std.mem.Allocator, io: std.Io, from: []const u8, to: []const u8
     try fs.swap(from, to);
 }
 
-/// Windows can rename a running exe but not overwrite it. The journal lets the next start finish a swap that a power cut stopped.
+/// Windows can rename a running exe but not overwrite it. The journal lets the next start finish a swap that a power cut stopped, if the game still starts.
+/// shortcut: a power cut between the two renames of actuon.exe or a DLL it loads leaves a game that cannot start to replay the journal, reinstall by hand; add a separate launcher if that is ever reported.
 fn swapFiles(a: std.mem.Allocator, io: std.Io, from: []const u8, to: []const u8) !void {
     const entries = try fs.list(a, io, from);
-    var has_exe = false;
-    var plan: std.ArrayList(u8) = .empty;
-    for (entries) |e| {
+    var exe_at: ?usize = null;
+    for (entries, 0..) |e, i| {
         if (e.is_dir or !plainName(e.name)) return error.BadPackage;
-        if (std.mem.eql(u8, e.name, windows_exe)) has_exe = true;
+        if (std.mem.eql(u8, e.name, windows_exe)) exe_at = i;
         // finishSwap rolls forward, so every staged file must be on disk before the journal is.
         try fs.sync(io, try std.fs.path.join(a, &.{ from, e.name }));
-        try plan.print(a, "{s}\n", .{e.name});
     }
-    if (!has_exe) return error.BadPackage;
+    // Last, so the old exe still starts and replays the journal after a cut anywhere else.
+    std.mem.swap(fs.Entry, &entries[exe_at orelse return error.BadPackage], &entries[entries.len - 1]);
+    var plan: std.ArrayList(u8) = .empty;
+    for (entries) |e| try plan.print(a, "{s}\n", .{e.name});
     const journal = try std.fs.path.join(a, &.{ to, journal_name });
     try fs.writeAtomic(a, io, journal, plan.items);
     for (entries, 0..) |e, i| {
@@ -138,7 +143,8 @@ fn swapFiles(a: std.mem.Allocator, io: std.Io, from: []const u8, to: []const u8)
             for (entries[0..i]) |back| swapBack(a, io, from, to, back.name) catch {
                 intact = false;
             };
-            if (!intact) return error.UpdateLeftBroken;
+            // A file swapIn could not put back lives only as its old copy; the journal and staged tree restore it.
+            if (!intact or err == error.UpdateLeftBroken) return error.UpdateLeftBroken;
             fs.remove(io, journal);
             return err;
         };
@@ -190,12 +196,22 @@ fn swapBack(a: std.mem.Allocator, io: std.Io, from: []const u8, to: []const u8, 
 
 /// The files in use by the last update have been released by now.
 fn removeLeftovers(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
+    // Another instance mid-update still needs every file here.
+    const held = try fs.lock(io, try std.fs.path.join(a, &.{ dir, lock_name })) orelse return;
+    defer held.close(io);
     try finishSwap(a, io, dir);
     for (try fs.list(a, io, dir)) |e| {
         if (std.mem.endsWith(u8, e.name, old_suffix)) fs.remove(io, try std.fs.path.join(a, &.{ dir, e.name }));
     }
     fs.removeTree(io, try std.fs.path.join(a, &.{ dir, staged_name }));
     fs.remove(io, try std.fs.path.join(a, &.{ dir, staged_name ++ ".zip" }));
+    // As a power cut inside fs.writeAtomic leaves it.
+    fs.remove(io, try std.fs.path.join(a, &.{ dir, journal_name ++ ".tmp" }));
+}
+
+/// Only a package has LICENSE beside the exe, which spares zig-out/bin. A swap cut short may have moved LICENSE aside, but then the journal is there.
+fn isPackage(a: std.mem.Allocator, io: std.Io, dir: []const u8) !bool {
+    return fs.exists(io, try std.fs.path.join(a, &.{ dir, "LICENSE" })) or fs.exists(io, try std.fs.path.join(a, &.{ dir, journal_name }));
 }
 
 const Bundle = struct { app: []const u8, dir: []const u8 };
@@ -224,8 +240,7 @@ fn findTarget(a: std.mem.Allocator, io: std.Io) !?Target {
         .windows => {
             const base = c.SDL_GetBasePath() orelse return null;
             const dir = try a.dupe(u8, std.mem.span(base));
-            // Only a package has LICENSE beside the exe, which spares zig-out/bin.
-            if (!fs.exists(io, try std.fs.path.join(a, &.{ dir, "LICENSE" }))) return null;
+            if (!try isPackage(a, io, dir)) return null;
             return .{ .folder = dir };
         },
         .macos => {
@@ -625,29 +640,61 @@ test "the next start finishes a swap that stopped at any step" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const staged = staged_name ++ "/" ++ windows_folder ++ "/";
-    // swapIn's renames in order; new.dll has no old copy to keep.
+    const kept = [_][]const u8{ "LICENSE", "a.dll", windows_exe };
+    // swapIn's renames in swapFiles' order, the exe last; new.dll has no old copy to keep.
     const renames = [_][2][]const u8{
-        .{ windows_exe, windows_exe ++ old_suffix },
-        .{ staged ++ windows_exe, windows_exe },
+        .{ "LICENSE", "LICENSE" ++ old_suffix },
+        .{ staged ++ "LICENSE", "LICENSE" },
         .{ "a.dll", "a.dll" ++ old_suffix },
         .{ staged ++ "a.dll", "a.dll" },
         .{ staged ++ "new.dll", "new.dll" },
+        .{ windows_exe, windows_exe ++ old_suffix },
+        .{ staged ++ windows_exe, windows_exe },
     };
-    // Step 0 stops before the journal is written; step k after k-1 renames.
+    // Step 0 stops inside fs.writeAtomic, before the journal is renamed in; step k after k-1 renames.
     for (0..renames.len + 2) |step| {
         const dir = try tmpPath(a, &tmp, try std.fmt.allocPrint(a, "game{d}", .{step}));
         try fs.mkdirs(io, try std.fs.path.join(a, &.{ dir, staged }));
-        for ([_][]const u8{ windows_exe, "a.dll", "new.dll" }) |n| try fs.write(io, try std.fs.path.join(a, &.{ dir, staged, n }), "new");
-        for ([_][]const u8{ windows_exe, "a.dll" }) |n| try fs.write(io, try std.fs.path.join(a, &.{ dir, n }), "old");
-        if (step > 0) try fs.write(io, try std.fs.path.join(a, &.{ dir, journal_name }), windows_exe ++ "\na.dll\nnew.dll\n");
+        for (kept ++ [_][]const u8{"new.dll"}) |n| try fs.write(io, try std.fs.path.join(a, &.{ dir, staged, n }), "new");
+        for (kept) |n| try fs.write(io, try std.fs.path.join(a, &.{ dir, n }), "old");
+        const plan = "LICENSE\na.dll\nnew.dll\n" ++ windows_exe ++ "\n";
+        try fs.write(io, try std.fs.path.join(a, &.{ dir, if (step == 0) journal_name ++ ".tmp" else journal_name }), plan);
         for (renames[0..step -| 1]) |r| try fs.rename(try std.fs.path.join(a, &.{ dir, r[0] }), try std.fs.path.join(a, &.{ dir, r[1] }));
 
+        // Even with LICENSE moved aside, findTarget must still see a package.
+        try std.testing.expect(try isPackage(a, io, dir));
         try removeLeftovers(a, io, dir);
         const want = if (step == 0) "old" else "new";
-        for ([_][]const u8{ windows_exe, "a.dll" }) |n| try std.testing.expectEqualStrings(want, try fs.readAlloc(a, io, try std.fs.path.join(a, &.{ dir, n }), 16));
+        for (kept) |n| try std.testing.expectEqualStrings(want, try fs.readAlloc(a, io, try std.fs.path.join(a, &.{ dir, n }), 16));
         try std.testing.expectEqual(step > 0, fs.exists(io, try std.fs.path.join(a, &.{ dir, "new.dll" })));
-        for ([_][]const u8{ journal_name, staged_name, windows_exe ++ old_suffix, "a.dll" ++ old_suffix }) |n| try std.testing.expect(!fs.exists(io, try std.fs.path.join(a, &.{ dir, n })));
+        for ([_][]const u8{ journal_name, journal_name ++ ".tmp", staged_name, "LICENSE" ++ old_suffix, windows_exe ++ old_suffix, "a.dll" ++ old_suffix }) |n| try std.testing.expect(!fs.exists(io, try std.fs.path.join(a, &.{ dir, n })));
     }
+    try std.testing.expect(!try isPackage(a, io, try tmpPath(a, &tmp, "")));
+}
+
+test "a second instance leaves an update in progress alone" {
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmpPath(a, &tmp, "game");
+    const staged = try std.fs.path.join(a, &.{ dir, staged_name, windows_folder });
+    try fs.mkdirs(io, staged);
+    try fs.write(io, try std.fs.path.join(a, &.{ staged, windows_exe }), "new");
+    try fs.write(io, try std.fs.path.join(a, &.{ dir, windows_exe }), "old");
+    const journal = try std.fs.path.join(a, &.{ dir, journal_name });
+    try fs.write(io, journal, windows_exe ++ "\n");
+    const held = (try fs.lock(io, try std.fs.path.join(a, &.{ dir, lock_name }))).?;
+    defer held.close(io);
+
+    try removeLeftovers(a, io, dir);
+    try std.testing.expect(fs.exists(io, journal));
+    try std.testing.expectEqualStrings("old", try fs.readAlloc(a, io, try std.fs.path.join(a, &.{ dir, windows_exe }), 16));
+    var progress: http.Progress = .{};
+    try std.testing.expectError(error.UpdateBusy, replacePackage(a, io, "http://127.0.0.1:1/", try proofFor("x", "v1.0.0/a.zip", 1), dir, windows_folder, swapFiles, dir, &progress));
+    try std.testing.expect(fs.exists(io, try std.fs.path.join(a, &.{ staged, windows_exe })));
 }
 
 test "a journal naming a path outside the game folder moves nothing" {
