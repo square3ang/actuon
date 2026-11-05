@@ -9,9 +9,9 @@ replay. The chart must hash to SHA. The server checks both and keeps only the ch
 Scores and accounts live in SQLite in WAL mode (`ir.db`) in the data directory.
 
 It listens on `127.0.0.1:8730` over plain HTTP, so put a TLS proxy in front before opening it to the internet. Use one
-that buffers request bodies, as nginx does by default: the server holds each body in memory until it is whole, so many very
-slow clients would otherwise add up. A score upload can be 32 MiB, a 16 MiB chart and a 16 MiB replay, so let the proxy take that
-much (`client_max_body_size 32m`).
+that buffers request bodies, as nginx does by default: the server reads at most eight score uploads at once, answers 503
+to more, and drops a body that takes longer than 150 seconds, so slow clients would otherwise crowd out the rest. A score
+upload can be 32 MiB, a 16 MiB chart and a 16 MiB replay, so let the proxy take that much (`client_max_body_size 32m`).
 
 Registration allows 10 accounts a day per client address, and login 10 tries a minute per address and name. Each account
 can hold 50,000 unverified claims, and a chart must parse with notes. Two checks run at once, one per player, and four password hashes: the next gets a 503 until

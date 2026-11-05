@@ -47,9 +47,9 @@ pub const Board = struct {
     asked: ?usize = null,
 
     pub const Source = struct { io: std.Io, base: []u8, token: []u8, sha: []u8 };
-    const page_idle = 0;
+    pub const page_idle = 0;
     const page_busy = 1;
-    const page_ready = 2;
+    pub const page_ready = 2;
 
     pub fn release(b: *Board) void {
         if (b.refs.fetchSub(1, .acq_rel) != 1) return;
@@ -241,7 +241,16 @@ fn fetchStanding(a: std.mem.Allocator, io: std.Io, base: []const u8, token: []co
     const url = try std.fmt.allocPrint(a, "{s}/scores/{s}?limit={d}&offset={d}", .{ base, sha, page_len, offset });
     const r = try http.request(a, io, .GET, url, null, try bearer(a, token));
     if (r.status != 200) return error.HttpStatus;
-    return std.json.parseFromSliceLeaky(Standing, a, r.body, .{ .ignore_unknown_fields = true });
+    return parseStanding(a, r.body);
+}
+
+/// The server may be anyone's: out-of-range places would overflow the board's sums and percents.
+fn parseStanding(a: std.mem.Allocator, body: []const u8) !Standing {
+    const got = try std.json.parseFromSliceLeaky(Standing, a, body, .{ .ignore_unknown_fields = true });
+    if (got.total < 0 or got.total > std.math.maxInt(u32) or got.offset > got.total or got.rank < 0 or got.rank > got.total)
+        return error.BadStanding;
+    for (got.clears) |n| if (n < 0 or n > got.total) return error.BadStanding;
+    return got;
 }
 
 fn toRows(gpa: std.mem.Allocator, scores: []const Standing.Score) ![]Board.Row {
@@ -1117,6 +1126,21 @@ test "a server's place numbers cannot underflow the list" {
     fillBoard(&b, .{ .scores = &.{}, .rank = 50, .total = 0 });
     defer std.testing.allocator.free(b.rows);
     try std.testing.expectEqual(@as(usize, 0), b.offset);
+}
+
+test "a standing with places out of range is refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const got = try parseStanding(a, "{\"scores\":[],\"offset\":2,\"rank\":3,\"total\":3,\"clears\":[1,2]}");
+    try std.testing.expectEqual(@as(usize, 2), got.offset);
+    for ([_][]const u8{
+        "{\"scores\":[],\"offset\":18446744073709551615,\"total\":3}",
+        "{\"scores\":[],\"rank\":50,\"total\":-9223372036854775808}",
+        "{\"scores\":[],\"rank\":50,\"total\":3}",
+        "{\"scores\":[],\"total\":3,\"clears\":[9223372036854775807]}",
+        "{\"scores\":[],\"total\":9223372036854775807}",
+    }) |body| try std.testing.expectError(error.BadStanding, parseStanding(a, body));
 }
 
 test "the format numbers sent to the IR stay what the server reads" {

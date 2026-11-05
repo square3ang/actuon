@@ -22,7 +22,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const MAX_CHART: usize = 16 << 20;
 const MAX_REPLAY: usize = 16 << 20;
@@ -37,6 +37,9 @@ const MAX_OWNER_CLAIMS: i64 = 50_000;
 /// Checks plus hashes stay below DB_CONNECTIONS, so reads still get through.
 const MAX_CHECKS: usize = 2;
 const MAX_HASHES: usize = 4;
+const MAX_UPLOADS: usize = 8;
+/// A 32 MiB upload at 2 Mbit/s still makes it.
+const BODY_TIMEOUT: Duration = Duration::from_secs(150);
 /// A real chart takes far less: about 500 bytes a note.
 const CHILD_MEMORY_BYTES: libc::rlim_t = 1 << 30;
 const RANK_ORDER: &str = "ORDER BY s.verified DESC, s.ex DESC, s.date, s.user";
@@ -68,13 +71,14 @@ CREATE VIEW best AS
 struct Ctx {
     checks: Mutex<HashSet<i64>>,
     hashes: AtomicUsize,
+    uploads: Arc<Semaphore>,
     rooms: Mutex<rooms::Rooms>,
     online: Mutex<HashMap<i64, usize>>,
 }
 
 /// Each connection serves one request at a time: WAL lets them read while another writes.
 struct Pool {
-    free: Semaphore,
+    free: Arc<Semaphore>,
     conns: Mutex<Vec<Connection>>,
 }
 
@@ -85,14 +89,19 @@ impl Pool {
         job: impl FnOnce(&Connection) -> T + Send + 'static,
     ) -> Result<T, ApiError> {
         let busy = || ApiError::new(500, "internal error");
-        let _permit = self.free.acquire().await.map_err(|_| busy())?;
+        let permit = self
+            .free
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| busy())?;
         let db = self
             .conns
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .pop()
             .ok_or_else(busy)?;
-        let lease = Lease(self.clone(), Some(db));
+        let lease = Lease(self.clone(), Some(db), permit);
         tokio::task::spawn_blocking(move || job(lease.1.as_ref().expect("leased")))
             .await
             .map_err(|e| {
@@ -103,7 +112,8 @@ impl Pool {
 }
 
 /// Gives the connection back even when the job panics, or the pool would shrink for good.
-struct Lease(Arc<Pool>, Option<Connection>);
+/// Holds the permit too: a request dropped mid-job must not free a slot whose connection is still out.
+struct Lease(Arc<Pool>, Option<Connection>, OwnedSemaphorePermit);
 
 impl Drop for Lease {
     fn drop(&mut self) {
@@ -230,12 +240,32 @@ fn body_limit(method: &Method, path: &str) -> usize {
     }
 }
 
-async fn read_body(req: Request<Incoming>) -> Result<Req, ApiError> {
+/// A score upload stays in memory until its check ends, so only a few are taken at once, as the old eight workers did.
+fn upload_slot(
+    uploads: &Arc<Semaphore>,
+    limit: usize,
+) -> Result<Option<OwnedSemaphorePermit>, ApiError> {
+    if limit <= MAX_JSON {
+        return Ok(None);
+    }
+    uploads
+        .clone()
+        .try_acquire_owned()
+        .map(Some)
+        .map_err(|_| ApiError::new(503, "server is busy"))
+}
+
+/// The permit, if any, must live as long as the body.
+async fn read_body(
+    req: Request<Incoming>,
+    uploads: &Arc<Semaphore>,
+) -> Result<(Req, Option<OwnedSemaphorePermit>), ApiError> {
     let limit = body_limit(req.method(), req.uri().path());
+    let permit = upload_slot(uploads, limit)?;
     let (head, body) = req.into_parts();
-    let body = Limited::new(body, limit)
-        .collect()
+    let body = tokio::time::timeout(BODY_TIMEOUT, Limited::new(body, limit).collect())
         .await
+        .map_err(|_| ApiError::new(408, "body too slow"))?
         .map_err(|e| {
             if e.is::<LengthLimitError>() {
                 ApiError::new(413, "body too large")
@@ -244,7 +274,7 @@ async fn read_body(req: Request<Incoming>) -> Result<Req, ApiError> {
             }
         })?
         .to_bytes();
-    Ok(Request::from_parts(head, body))
+    Ok((Request::from_parts(head, body), permit))
 }
 
 fn url_of<B>(req: &Request<B>) -> &str {
@@ -384,12 +414,15 @@ fn rename(req: &Req, db: &Connection) -> ApiResult {
     Ok(json!({"name": q.name}))
 }
 
-/// In the database, so a restart or a second instance does not reset the counts. The key is hashed to keep addresses out of backups.
+/// In the database, so a restart or a second instance does not reset the counts. An unsalted hash only fixes the key's
+/// size: an IPv4 address is easy to recover from it, so every try deletes the rows whose window has ended.
 fn throttle(db: &Connection, key: &str, window_secs: u64, limit: u32) -> Result<(), ApiError> {
     let now = now();
-    db.prepare_cached("DELETE FROM attempt WHERE expires<=?1")?
+    // One write transaction, not two: a login flood would otherwise hold the write lock twice per try.
+    let tx = db.unchecked_transaction()?;
+    tx.prepare_cached("DELETE FROM attempt WHERE expires<=?1")?
         .execute([now])?;
-    let count: u32 = db
+    let count: u32 = tx
         .prepare_cached(
             "INSERT INTO attempt(key,expires,count) VALUES(?1,?2,1)
              ON CONFLICT(key) DO UPDATE SET count=count+1 RETURNING count",
@@ -397,6 +430,7 @@ fn throttle(db: &Connection, key: &str, window_secs: u64, limit: u32) -> Result<
         .query_row(params![token_hash(key), now + window_secs as i64], |r| {
             r.get(0)
         })?;
+    tx.commit()?;
     if count > limit {
         return Err(ApiError::new(429, "too many attempts"));
     }
@@ -831,17 +865,16 @@ fn reply(result: ApiResult) -> Reply {
     out
 }
 
-/// Counts the connection before the upgrade, so the limits hold while it is being opened.
-fn admit(
-    head: &Request<()>,
-    db: &Connection,
-    ctx: &Ctx,
-) -> Result<(i64, play::Session, String), ApiError> {
+fn admit(head: &Request<()>, db: &Connection) -> Result<(i64, String, String), ApiError> {
     let user = auth(head, db)?;
     let key = header_of(head, "Sec-WebSocket-Key")
         .filter(|_| header_of(head, "Upgrade").is_some_and(|u| u.eq_ignore_ascii_case("websocket")))
         .ok_or(ApiError::new(400, "websocket required"))?;
-    let name = user_name(db, user)?;
+    Ok((user, user_name(db, user)?, key))
+}
+
+/// Counts the connection before the upgrade, so the limits hold while it is being opened.
+fn open_slot(ctx: &Ctx, user: i64) -> Result<(), ApiError> {
     let mut online = ctx.online.lock().unwrap_or_else(|e| e.into_inner());
     if online.values().sum::<usize>() >= MAX_PLAYERS_ONLINE {
         return Err(ApiError::new(503, "server is busy"));
@@ -851,7 +884,7 @@ fn admit(
         return Err(ApiError::new(429, "too many connections"));
     }
     *mine += 1;
-    Ok((user, play::Session::new(user, name), key))
+    Ok(())
 }
 
 fn close_play(ctx: &Ctx, user: i64) {
@@ -869,14 +902,16 @@ fn close_play(ctx: &Ctx, user: i64) {
 async fn open_play(mut req: Request<Incoming>, ctx: Arc<Ctx>, pool: Arc<Pool>) -> Reply {
     let upgrade = hyper::upgrade::on(&mut req);
     let head = Request::from_parts(req.into_parts().0, ());
-    let admitted = {
-        let ctx = ctx.clone();
-        pool.run(move |db| admit(&head, db, &ctx)).await
-    };
-    let (user, session, key) = match admitted.and_then(|got| got) {
+    let admitted = pool.run(move |db| admit(&head, db)).await;
+    // Counted here, with no await before the spawn below, so a client that drops now cannot leak the count.
+    let (user, name, key) = match admitted
+        .and_then(|got| got)
+        .and_then(|got| open_slot(&ctx, got.0).map(|_| got))
+    {
         Ok(got) => got,
         Err(e) => return reply(Err(e)),
     };
+    let session = play::Session::new(user, name);
     tokio::spawn(async move {
         match upgrade.await {
             Ok(stream) => play::serve(TokioIo::new(stream), &ctx.rooms, session).await,
@@ -902,9 +937,12 @@ async fn handle(mut req: Request<Incoming>, peer: IpAddr, ctx: Arc<Ctx>, pool: A
         return open_play(req, ctx, pool).await;
     }
     req.extensions_mut().insert(peer);
-    let result = match read_body(req).await {
-        Ok(req) => pool
-            .run(move |db| route(&req, db, &ctx))
+    let result = match read_body(req, &ctx.uploads).await {
+        Ok((req, permit)) => pool
+            .run(move |db| {
+                let _permit = permit;
+                route(&req, db, &ctx)
+            })
             .await
             .and_then(|r| r),
         Err(e) => Err(e),
@@ -1037,7 +1075,7 @@ fn main() {
     let db_path = data.join("ir.db");
     initialize(&open_db(&db_path).expect("open database")).expect("initialize database");
     let pool = Arc::new(Pool {
-        free: Semaphore::new(DB_CONNECTIONS),
+        free: Arc::new(Semaphore::new(DB_CONNECTIONS)),
         conns: Mutex::new(
             (0..DB_CONNECTIONS)
                 .map(|_| open_db(&db_path).expect("open database"))
@@ -1047,6 +1085,7 @@ fn main() {
     let ctx = Arc::new(Ctx {
         checks: Mutex::new(HashSet::new()),
         hashes: AtomicUsize::new(0),
+        uploads: Arc::new(Semaphore::new(MAX_UPLOADS)),
         rooms: Mutex::new(rooms::Rooms::default()),
         online: Mutex::new(HashMap::new()),
     });
@@ -1169,6 +1208,7 @@ mod tests {
         Ctx {
             checks: Mutex::new(HashSet::new()),
             hashes: AtomicUsize::new(0),
+            uploads: Arc::new(Semaphore::new(MAX_UPLOADS)),
             rooms: Mutex::default(),
             online: Mutex::new(HashMap::new()),
         }
@@ -1197,6 +1237,63 @@ mod tests {
         assert_eq!(HashSlot::take(&ctx).err().unwrap().0, 503);
         drop(held);
         assert!(HashSlot::take(&ctx).is_ok());
+    }
+
+    #[test]
+    fn large_bodies_are_capped_and_small_ones_are_not() {
+        let ctx = test_ctx();
+        let held: Vec<_> = (0..MAX_UPLOADS)
+            .map(|_| upload_slot(&ctx.uploads, MAX_CHART + MAX_REPLAY).unwrap())
+            .collect();
+        assert_eq!(
+            upload_slot(&ctx.uploads, MAX_CHART + MAX_REPLAY)
+                .err()
+                .unwrap()
+                .0,
+            503
+        );
+        assert!(upload_slot(&ctx.uploads, MAX_JSON).unwrap().is_none());
+        drop(held);
+        assert!(upload_slot(&ctx.uploads, MAX_CHART + MAX_REPLAY)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn a_dropped_request_holds_its_slot_until_its_job_ends() {
+        let pool = Arc::new(Pool {
+            free: Arc::new(Semaphore::new(1)),
+            conns: Mutex::new(vec![Connection::open_in_memory().unwrap()]),
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let slow = pool.run(|_| std::thread::sleep(Duration::from_millis(200)));
+            assert!(tokio::time::timeout(Duration::from_millis(20), slow)
+                .await
+                .is_err());
+            assert!(
+                pool.run(|_| ()).await.is_ok(),
+                "the next request waits for the connection"
+            );
+        });
+    }
+
+    #[test]
+    fn room_connections_are_capped_per_player() {
+        let ctx = test_ctx();
+        for _ in 0..MAX_CONNECTIONS_PER_PLAYER {
+            open_slot(&ctx, 1).unwrap();
+        }
+        assert_eq!(open_slot(&ctx, 1).unwrap_err().0, 429);
+        assert!(open_slot(&ctx, 2).is_ok());
+        close_play(&ctx, 1);
+        assert!(
+            open_slot(&ctx, 1).is_ok(),
+            "a closed connection frees its place"
+        );
     }
 
     #[test]
