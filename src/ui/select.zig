@@ -223,7 +223,7 @@ pub fn reload(a: *App) void {
     if (s.cursor >= s.rows.len) s.cursor = if (s.rows.len == 0) 0 else s.rows.len - 1;
 }
 
-/// In beatoraja's order; its skins number them differently. shortcut: folder and level counts still include hidden charts, count per mode if it misleads.
+/// In beatoraja's order; its skins number them differently.
 const mode_filters = [_]struct { mode: ?core.types.Mode, skin_index: i64, name: []const u8 }{
     .{ .mode = null, .skin_index = 0, .name = "ALL" },
     .{ .mode = .beat7, .skin_index = 2, .name = "7K" },
@@ -233,11 +233,17 @@ const mode_filters = [_]struct { mode: ?core.types.Mode, skin_index: i64, name: 
     .{ .mode = .beat10, .skin_index = 3, .name = "10K" },
 };
 
+/// -1 shows every mode, as the folder and level counts bind it.
+fn filteredMode(s: *const State) i64 {
+    return if (mode_filters[s.mode_filter].mode) |m| @backingInt(m) else -1;
+}
+
 fn keepFilteredMode(s: *State) void {
-    const want = mode_filters[s.mode_filter].mode orelse return;
+    const want = filteredMode(s);
+    if (want < 0) return;
     var kept: usize = 0;
     for (s.rows) |row| {
-        if (row.song) |song| if (song.mode != @backingInt(want)) continue;
+        if (row.song) |song| if (song.mode != want) continue;
         s.rows[kept] = row;
         kept += 1;
     }
@@ -433,9 +439,10 @@ fn rootName(root: []const u8) []const u8 {
 
 fn libraryRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
     const root = a.sel.library_root;
-    const st = try a.db.prepare("SELECT folder, MIN(title), COUNT(*) FROM song WHERE ?1='' OR folder=?1 OR folder LIKE ?2 ESCAPE '\\' GROUP BY folder ORDER BY MIN(title)");
+    const st = try a.db.prepare("SELECT folder, MIN(title), COUNT(*) FROM song WHERE (?1='' OR folder=?1 OR folder LIKE ?2 ESCAPE '\\') AND (?3<0 OR mode=?3) GROUP BY folder ORDER BY MIN(title)");
     defer st.deinit();
     st.bindText(1, root);
+    st.bindInt(3, filteredMode(&a.sel));
     // The separator keeps /mnt/bms from also listing /mnt/bms2.
     const under = if (root.len > 0 and std.fs.path.isSep(root[root.len - 1])) root else try std.fmt.allocPrint(al, "{s}{c}", .{ root, std.fs.path.sep });
     st.bindText(2, try db_mod.likePrefix(al, under));
@@ -473,9 +480,15 @@ fn favoriteRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void
 
 fn tableRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row)) !void {
     const s = &a.sel;
-    const st = try a.db.prepare("SELECT level, COUNT(*) FROM table_song WHERE url=?1 GROUP BY level ORDER BY MIN(ord)");
+    // A chart missing from the library has no mode, and the level list shows it under every filter.
+    const st = try a.db.prepare(
+        \\SELECT t.level, COUNT(*) FROM table_song t WHERE t.url=?1 AND (?2<0 OR COALESCE((SELECT s.mode FROM song s
+        \\ WHERE (s.md5=t.md5 AND t.md5<>'') OR (s.sha256=t.sha256 AND t.sha256<>'') LIMIT 1), ?2)=?2)
+        \\ GROUP BY t.level ORDER BY MIN(t.ord)
+    );
     defer st.deinit();
     st.bindText(1, s.table_url);
+    st.bindInt(2, filteredMode(s));
     var level_buf: [256]u8 = undefined;
     while (try st.step()) {
         try rows.append(al, .{
@@ -2004,18 +2017,43 @@ fn overlayKey(at: usize) ?u32 {
     };
 }
 
-/// True when used, so not also a menu key; Start and Select track on every screen, as their release may outlive it. shortcut: reads only the 1P 7 key layout, add the others if a controller needs them here.
+/// The button's index as if in `p1`, from whichever layout binds it; 1P 7 key wins a code bound twice.
+fn menuIndex(cfg: *const config.Config, code: u16) ?usize {
+    if (std.mem.indexOfScalar(u16, &cfg.p1, code)) |i| return i;
+    if (code < input.joy_base and screenKey(code)) return null;
+    for ([_][]const u16{ &cfg.p2, &cfg.pms }) |keys| if (std.mem.indexOfScalar(u16, keys, code)) |i| return i;
+    if (cfg.keys14) |keys| if (std.mem.indexOfScalar(u16, &keys, code)) |i| return i % 9;
+    if (cfg.keys5) |keys| if (std.mem.indexOfScalar(u16, &keys, code)) |i| return indexOf5(i);
+    if (cfg.keys10) |keys| if (std.mem.indexOfScalar(u16, &keys, code)) |i| return indexOf5(i % 7);
+    return null;
+}
+
+/// A keyboard key a menu screen reads itself, so another layout binding it must not take it; keep in step with select, result and versus keys.
+fn screenKey(code: u16) bool {
+    return switch (code) {
+        c.SDL_SCANCODE_L, c.SDL_SCANCODE_T, c.SDL_SCANCODE_F, c.SDL_SCANCODE_R, c.SDL_SCANCODE_V, c.SDL_SCANCODE_P => true,
+        c.SDL_SCANCODE_1...c.SDL_SCANCODE_SPACE, c.SDL_SCANCODE_F1...c.SDL_SCANCODE_UP => true,
+        else => false,
+    };
+}
+
+/// A 5 key side has its scratch at 5 and 6, where `p1` has it at 7 and 8.
+fn indexOf5(i: usize) usize {
+    return if (i < 5) i else i + 2;
+}
+
+/// True when used, so not also a menu key; Start and Select track on every screen, as their release may outlive it.
 pub fn pad(a: *App, code: u16, down: bool, repeat: bool) bool {
     if (!a.cfg.beatoraja_select) return false;
     if (a.practice.open) {
-        if (down) if (std.mem.indexOfScalar(u16, &a.cfg.p1, code)) |i| if (overlayKey(i)) |sc| practice.key(a, sc);
+        if (down) if (menuIndex(&a.cfg, code)) |i| if (overlayKey(i)) |sc| practice.key(a, sc);
         return true;
     }
     const s = &a.sel;
     const was = panelOf(s);
     const is_start = code == a.cfg.start_select[0];
     const is_select = code == a.cfg.start_select[1];
-    const at = std.mem.indexOfScalar(u16, &a.cfg.p1, code);
+    const at = menuIndex(&a.cfg, code);
     // Typing a search uses the same keys.
     if (is_start) s.start_held = down and !s.searching;
     if (is_select) s.select_held = down and !s.searching;
@@ -2395,6 +2433,37 @@ test "beatoraja select opens with odd keys, closes with even ones, and stays in 
     try std.testing.expect(!pad(a, c.SDL_SCANCODE_3, true, false));
 }
 
+test "menu keys come from every layout, in 1P, 2P and 9, 14, then 5 and 10 key order" {
+    const a = try testing.open();
+    defer testing.close(a);
+    a.cfg.beatoraja_select = true;
+    a.scene = .select;
+    const pad_b = input.joy_base;
+    a.cfg.p1[3] = pad_b + 3;
+    a.cfg.p2[2] = pad_b + 2;
+    a.cfg.pms[1] = pad_b + 1;
+    a.cfg.keys5 = .{ pad_b + 50, 0, pad_b + 70, pad_b + 1, 0, pad_b + 55, pad_b + 56 };
+    a.cfg.keys10 = @splat(0);
+    a.cfg.keys10.?[13] = pad_b + 63;
+    a.cfg.keys14 = @splat(0);
+    a.cfg.keys14.?[10] = pad_b + 70;
+    a.cfg.keys14.?[11] = pad_b + 3;
+    const want = [_]struct { u16, ?usize }{
+        .{ pad_b + 2, 2 },   .{ pad_b + 1, 1 },           .{ pad_b + 50, 0 }, .{ pad_b + 55, 7 },
+        .{ pad_b + 56, 8 },  .{ pad_b + 63, 8 },          .{ pad_b + 70, 1 }, .{ pad_b + 3, 3 },
+        // Another layout's keyboard keys join too, but not one a screen reads itself.
+        .{ a.cfg.p2[0], 0 }, .{ c.SDL_SCANCODE_L, null },
+    };
+    try std.testing.expectEqual(c.SDL_SCANCODE_L, a.cfg.p2[3]);
+    for (want) |w| try std.testing.expectEqual(w[1], menuIndex(&a.cfg, w[0]));
+    try std.testing.expect(pad(a, pad_b + 2, true, false));
+    try std.testing.expectEqual(.library, a.sel.view);
+    a.practice.open = true;
+    a.practice.row = 0;
+    try std.testing.expect(pad(a, a.cfg.p2[8], true, false));
+    try std.testing.expectEqual(1, a.practice.row);
+}
+
 test "a held scratch scrolls until it is let go" {
     const a = try testing.open();
     defer testing.close(a);
@@ -2545,6 +2614,29 @@ test "the 1 key filters by play mode and 8 lists the chart's folder" {
     key(a, c.SDL_SCANCODE_8);
     try std.testing.expectEqual(.folder, a.sel.view);
     try std.testing.expectEqualStrings("/b", a.sel.folder);
+}
+
+test "folder and level counts leave out charts the play mode filter hides" {
+    const a = try testing.open();
+    defer testing.close(a);
+    try a.db.exec("UPDATE song SET mode=" ++ std.fmt.comptimePrint("{d}", .{@backingInt(core.types.Mode.beat14)}) ++ " WHERE title IN ('Beta','Delta')");
+    try a.db.exec("UPDATE song SET mode=" ++ std.fmt.comptimePrint("{d}", .{@backingInt(core.types.Mode.beat7)}) ++ " WHERE title IN ('Alpha','Gamma')");
+    a.sel.view = .library;
+    reload(a);
+    try expectRows(a, &.{ "Alpha  (3)", "Delta  (1)" });
+    a.sel.mode_filter = 1;
+    reload(a);
+    try expectRows(a, &.{"Alpha  (2)"});
+    a.sel.mode_filter = 2;
+    reload(a);
+    try expectRows(a, &.{ "Beta  (1)", "Delta  (1)" });
+    a.sel.view = .table;
+    a.sel.table_url = "https://t.example/";
+    reload(a);
+    try expectRows(a, &.{"Level 3  (1)"});
+    a.sel.mode_filter = 1;
+    reload(a);
+    try expectRows(a, &.{"Level 3  (2)"});
 }
 
 test "replays load newest first, and a broken one is refused" {
