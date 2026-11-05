@@ -1234,6 +1234,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, opts: Options) !void {
     if (!ir.waitForThreads() or !update_ended) std.process.exit(0);
     skinconf.close(app);
     skinslots.close(app);
+    settings.freeDrop(&app.set);
     // Frees the room's chart before the allocator's shutdown check.
     versus.leave(app);
     var hb = std.heap.ArenaAllocator.init(gpa);

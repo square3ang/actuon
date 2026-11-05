@@ -377,10 +377,11 @@ test "search ignores case in accented Latin, Greek and Cyrillic" {
     try d.exec("INSERT INTO song(path,folder,sha256,md5,title,artist,subtitle,subartist,genre) VALUES" ++
         "('1','f','a','a','ÉCLAIR Ŷ','','','','')," ++
         "('2','f','b','b','МОСКВА','','','','')," ++
-        "('3','f','c','c','ΣΟΦΊΑ','','','','')");
+        "('3','f','c','c','ΣΟΦΊΑ','','','','')," ++
+        "('4','f','d','d','TIẾNG ƯỚC Ǎ','','','','')");
     const st = try d.prepare(try searchSql(al, 1, 0));
     defer st.deinit();
-    for ([_][2][]const u8{ .{ "éclair ŷ", "ÉCLAIR Ŷ" }, .{ "москва", "МОСКВА" }, .{ "σοφία", "ΣΟΦΊΑ" } }) |want| {
+    for ([_][2][]const u8{ .{ "éclair ŷ", "ÉCLAIR Ŷ" }, .{ "москва", "МОСКВА" }, .{ "σοφία", "ΣΟΦΊΑ" }, .{ "tiếng ước ǎ", "TIẾNG ƯỚC Ǎ" } }) |want| {
         defer st.reset();
         st.bindText(1, try likePattern(al, want[0], true));
         st.bindText(2, try likePattern(al, want[0], false));

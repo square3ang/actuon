@@ -281,7 +281,9 @@ fn drawHeadline(a: *App, ease: f32, ex: u32) void {
 fn gradeBox(list_bottom: ?f32) [2]f32 {
     const free_top = 214;
     const ex_panel_top = 494;
-    const top = @max(free_top, (list_bottom orelse 0) + 6);
+    // textPop starts at 1.6 around the centre, so the glyph first reaches 0.3 of its box above `top`.
+    const pop_rise = 0.3;
+    const top = @max(free_top, ((list_bottom orelse 0) + 6 + pop_rise * ex_panel_top) / (1 + pop_rise));
     return .{ top, (ex_panel_top - top) / (ex_panel_top - free_top) };
 }
 
@@ -289,7 +291,7 @@ test "a full versus room lists above the grade, which still fits over the EX pan
     try std.testing.expectEqual([2]f32{ 214, 1 }, gradeBox(null));
     const bottom = versus_mod.resultListBottom(@import("../net/room.zig").max_players);
     const box = gradeBox(bottom);
-    try std.testing.expect(box[0] > bottom);
+    try std.testing.expect(box[0] - 0.3 * (494 - box[0]) > bottom);
     try std.testing.expect(box[1] > 0.3);
 }
 

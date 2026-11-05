@@ -22,8 +22,11 @@ pub const State = struct {
     io: std.Io = undefined,
     thread: ?*c.SDL_Thread = null,
     done: std.atomic.Value(bool) = .init(false),
-    failed: ?anyerror = null,
+    stop: std.atomic.Value(bool) = .init(false),
+    failed: ?ListError = null,
 };
+
+const ListError = error{ OutOfMemory, NoPrefPath, Canceled };
 
 fn slotName(slot: Slot) []const u8 {
     return switch (slot) {
@@ -54,15 +57,16 @@ fn listChoices(ud: ?*anyopaque) callconv(.c) c_int {
     const s: *State = @ptrCast(@alignCast(ud));
     defer s.done.store(true, .release);
     fillChoices(s) catch |e| {
+        if (e == error.Canceled) return 0;
         std.log.err("skin list: {t}", .{e});
         s.failed = e;
     };
     return 0;
 }
 
-fn fillChoices(s: *State) !void {
+fn fillChoices(s: *State) ListError!void {
     const al = s.arena.?.allocator();
-    const files = try skin_mod.allFiles(al, s.io);
+    const files = try skin_mod.allFiles(al, s.io, try skin_mod.skinsDir(al), &s.stop);
     for (slots, &s.choices) |slot, *out| {
         var list: std.ArrayList([]const u8) = .empty;
         for (files) |f| if (f.type == skin_mod.slotType(slot)) try list.append(al, f.path);
@@ -75,6 +79,7 @@ fn loading(s: *const State) bool {
 }
 
 pub fn close(a: *App) void {
+    a.skinslots.stop.store(true, .release);
     if (a.skinslots.thread) |t| c.SDL_WaitThread(t, null);
     if (a.skinslots.arena) |*arena| arena.deinit();
     a.skinslots = .{};

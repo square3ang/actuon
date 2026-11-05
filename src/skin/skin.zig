@@ -128,25 +128,26 @@ fn holdsSkin(a: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
 
 pub const SkinFile = struct { path: []const u8, type: i32 };
 
-fn addFile(a: std.mem.Allocator, io: std.Io, out: *std.ArrayList(SkinFile), path: []const u8) !void {
+fn addFile(a: std.mem.Allocator, io: std.Io, out: *std.ArrayList(SkinFile), path: []const u8, stop: *const std.atomic.Value(bool)) !void {
+    // Each file may run a Lua header, so leaving waits for one file at most.
+    if (stop.load(.acquire)) return error.Canceled;
     if (osuskin.isIni(path)) {
         if (osuskin.hasMania(a, io, path)) for (osu_types) |t| try out.append(a, .{ .path = path, .type = t });
     } else if (typeOfFile(a, io, path)) |t| try out.append(a, .{ .path = path, .type = t });
 }
 
-pub fn allFiles(a: std.mem.Allocator, io: std.Io) ![]const SkinFile {
-    const root = try skinsDir(a);
+pub fn allFiles(a: std.mem.Allocator, io: std.Io, root: []const u8, stop: *const std.atomic.Value(bool)) ![]const SkinFile {
     var out: std.ArrayList(SkinFile) = .empty;
     for (try listSkins(a, io, root)) |name| {
         const dir = try std.fs.path.join(a, &.{ root, name });
         for (try fs.list(a, io, dir)) |e| {
             const p = try std.fs.path.join(a, &.{ dir, e.name });
             if (!e.is_dir) {
-                if (isSkinFile(e.name)) try addFile(a, io, &out, p);
+                if (isSkinFile(e.name)) try addFile(a, io, &out, p, stop);
                 continue;
             }
             for (fs.list(a, io, p) catch continue) |f| if (!f.is_dir and isSkinFile(f.name)) {
-                try addFile(a, io, &out, try std.fs.path.join(a, &.{ p, f.name }));
+                try addFile(a, io, &out, try std.fs.path.join(a, &.{ p, f.name }), stop);
             };
         }
     }
@@ -452,6 +453,22 @@ test "only folders holding a skin are listed, in name order" {
     try std.testing.expectEqual(@as(usize, 2), got.len);
     try std.testing.expectEqualStrings("A", got[0]);
     try std.testing.expectEqualStrings("b", got[1]);
+}
+
+test "listing every skin file stops when asked" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const io = std.testing.io;
+    try fs.mkdirs(io, try std.fs.path.join(a, &.{ dir, "osu" }));
+    try fs.write(io, try std.fs.path.join(a, &.{ dir, "osu/skin.ini" }), "[Mania]\nKeys: 7\n");
+    var stop: std.atomic.Value(bool) = .init(false);
+    try std.testing.expectEqual(osu_types.len, (try allFiles(a, io, dir, &stop)).len);
+    stop.store(true, .release);
+    try std.testing.expectError(error.Canceled, allFiles(a, io, dir, &stop));
 }
 
 test "a skin.ini stands for the 7, 6, 5 and 4 key screens only" {

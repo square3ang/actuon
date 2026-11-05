@@ -655,7 +655,7 @@ fn hasDrop(it: Item) bool {
     return it == .audio_frames or it == .audio_device or it == .skin or it == .bgm_set or it == .sound_set or it == .remove_root;
 }
 
-fn freeDrop(s: *State) void {
+pub fn freeDrop(s: *State) void {
     if (s.drop_arena) |*arena| arena.deinit();
     s.drop_arena = null;
     s.drop = .{};

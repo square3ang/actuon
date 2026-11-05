@@ -619,7 +619,7 @@ fn drawNotes(r: *const m.Renderer, s: *Session, view: *play.View, snap: *const S
     if (t < view.last_t) view.first_note = 0; // seeked backwards
     view.last_t = t;
     const aids = s.params.assist.picked;
-    const sc = play.scrollAt(view, chart, cfg, aids, t);
+    const sc = play.scrollAt(view, s.gpa, chart, cfg, aids, t);
     drawAssistLines(r, chart, sc, cfg, aids);
     view.first_note = play.skipPastNotes(chart, view.first_note, t);
     const base: m.Key = .{};
