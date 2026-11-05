@@ -162,7 +162,8 @@ pub const schema =
     \\  pg INTEGER DEFAULT 0, gr INTEGER DEFAULT 0, gd INTEGER DEFAULT 0, bd INTEGER DEFAULT 0, pr INTEGER DEFAULT 0, ms INTEGER DEFAULT 0,
     \\  max_combo INTEGER DEFAULT 0, min_bp INTEGER DEFAULT 2147483647, playcount INTEGER DEFAULT 0, clearcount INTEGER DEFAULT 0,
     \\  date INTEGER DEFAULT 0, source TEXT DEFAULT '', assist INTEGER DEFAULT 0, PRIMARY KEY(sha256, mode));
-    \\CREATE TABLE IF NOT EXISTS replay(id INTEGER PRIMARY KEY, sha256 TEXT, date INTEGER, ex INTEGER, clear INTEGER, data BLOB, ln_mode INTEGER NOT NULL DEFAULT 0);
+    \\CREATE TABLE IF NOT EXISTS replay(id INTEGER PRIMARY KEY, sha256 TEXT, date INTEGER, ex INTEGER, clear INTEGER, data BLOB, ln_mode INTEGER NOT NULL DEFAULT 0,
+    \\  max_combo INTEGER NOT NULL DEFAULT 0, miss INTEGER NOT NULL DEFAULT 2147483647);
     \\CREATE INDEX IF NOT EXISTS replay_sha ON replay(sha256);
     \\CREATE TABLE IF NOT EXISTS dir(path TEXT PRIMARY KEY, mtime INTEGER);
     \\CREATE TABLE IF NOT EXISTS unparsed(path TEXT PRIMARY KEY, mtime INTEGER, size INTEGER);
@@ -213,6 +214,8 @@ pub fn initSchema(d: Db) !void {
     try d.exec(schema);
     try migrateLnModes(d);
     if (!try hasColumn(d, "score", "assist")) try d.exec("ALTER TABLE score ADD COLUMN assist INTEGER DEFAULT 0");
+    // Older replays get the "no play" combo and BP, so IR sync never sends one for an improvement it cannot know.
+    if (!try hasColumn(d, "replay", "max_combo")) try d.exec("ALTER TABLE replay ADD COLUMN max_combo INTEGER NOT NULL DEFAULT 0; ALTER TABLE replay ADD COLUMN miss INTEGER NOT NULL DEFAULT 2147483647");
     try labelReplayModes(d);
     try dropUnusedColumns(d);
 }
@@ -664,13 +667,15 @@ pub fn toggleFavorite(d: Db, sha256: []const u8) !bool {
 /// Replays offered per chart, as beatoraja's slots.
 pub const max_replays = 4;
 
-/// Drops replays nothing can reach: the song select's newest ones, and the best EX and best lamp IR sync uploads.
+/// Drops replays nothing can reach: the song select's newest ones, and the best EX, lamp, combo and BP IR sync uploads.
 pub fn pruneReplays(d: Db, sha256: []const u8, ln_mode: u8) !void {
     const st = try d.prepare(
         \\DELETE FROM replay WHERE sha256=?1 AND ln_mode=?3
         \\ AND id NOT IN (SELECT id FROM replay WHERE sha256=?1 AND ln_mode=?3 ORDER BY date DESC, id DESC LIMIT ?2)
         \\ AND id NOT IN (SELECT id FROM replay WHERE sha256=?1 AND ln_mode=?3 ORDER BY ex DESC, clear DESC LIMIT 1)
         \\ AND id NOT IN (SELECT id FROM replay WHERE sha256=?1 AND ln_mode=?3 ORDER BY clear DESC, ex DESC LIMIT 1)
+        \\ AND id NOT IN (SELECT id FROM replay WHERE sha256=?1 AND ln_mode=?3 ORDER BY max_combo DESC, ex DESC LIMIT 1)
+        \\ AND id NOT IN (SELECT id FROM replay WHERE sha256=?1 AND ln_mode=?3 ORDER BY miss, ex DESC LIMIT 1)
     );
     defer st.deinit();
     st.bindText(1, sha256);
@@ -1059,11 +1064,13 @@ test "an old database's replays keep the LN mode written inside them" {
     }
     try d.exec("INSERT INTO replay(id) VALUES(4)");
     try initSchema(d);
-    const st = try d.prepare("SELECT ln_mode FROM replay ORDER BY id");
+    const st = try d.prepare("SELECT ln_mode, max_combo, miss FROM replay ORDER BY id");
     defer st.deinit();
     for ([_]i64{ 0, 1, 2, 0 }) |want| {
         try std.testing.expect(try st.step());
         try std.testing.expectEqual(want, st.int(0));
+        try std.testing.expectEqual(@as(i64, 0), st.int(1));
+        try std.testing.expectEqual(@as(i64, std.math.maxInt(i32)), st.int(2));
     }
 }
 
@@ -1150,13 +1157,14 @@ test "pruning keeps the newest replays and the best one" {
     const d = try Db.open(":memory:", std.testing.allocator, false);
     defer d.close();
     try initSchema(d);
-    // 1 holds the best lamp, 2 the best EX: IR sync wants either.
-    try d.exec("INSERT INTO replay(id,sha256,date,ex,clear) VALUES(1,'a',1,1,6),(2,'a',2,99,1),(3,'a',3,1,1),(4,'a',4,1,1),(5,'a',5,1,1),(6,'a',6,1,1),(7,'a',7,1,1),(8,'b',1,1,1)");
+    // 1 holds the best lamp, 2 the best EX, 3 the best combo, 4 the fewest BP: IR sync wants each.
+    try d.exec("INSERT INTO replay(id,sha256,date,ex,clear,max_combo,miss) VALUES(1,'a',1,1,6,1,9),(2,'a',2,99,1,1,9),(3,'a',3,1,1,50,9),(4,'a',4,1,1,1,0)," ++
+        "(5,'a',5,1,1,1,9),(6,'a',6,1,1,1,9),(7,'a',7,1,1,1,9),(8,'a',8,1,1,1,9),(9,'a',9,1,1,1,9),(10,'b',1,1,1,1,9)");
     try pruneReplays(d, "a", 0);
     const st = try d.prepare("SELECT group_concat(id) FROM (SELECT id FROM replay ORDER BY id)");
     defer st.deinit();
     try std.testing.expect(try st.step());
-    try std.testing.expectEqualStrings("1,2,4,5,6,7,8", st.text(0));
+    try std.testing.expectEqualStrings("1,2,3,4,6,7,8,9,10", st.text(0));
 }
 
 test "a play count past u32 still lists its chart" {
