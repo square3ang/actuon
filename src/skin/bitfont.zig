@@ -175,6 +175,68 @@ fn parseBm(a: std.mem.Allocator, io: std.Io, text: []const u8, dir: []const u8) 
     return font;
 }
 
+/// AngelCode's binary layout, version 3: blocks of a type byte and a little-endian length.
+fn parseBmBinary(a: std.mem.Allocator, io: std.Io, bytes: []const u8, dir: []const u8) !?*BitmapFont {
+    if (bytes.len < 4 or !std.mem.eql(u8, bytes[0..4], "BMF\x03")) return null;
+    const font = try a.create(BitmapFont);
+    font.* = .{};
+    var pages: std.ArrayList(?[]const u8) = .empty;
+    var chars: []const u8 = "";
+    var at: usize = 4;
+    while (bytes.len - at >= 5) {
+        const kind = bytes[at];
+        const len = std.mem.readInt(u32, bytes[at + 1 ..][0..4], .little);
+        at += 5;
+        if (len > bytes.len - at) return null;
+        const block = bytes[at..][0..len];
+        at += len;
+        switch (kind) {
+            1 => if (block.len >= 2) {
+                font.size = @floatFromInt(@abs(std.mem.readInt(i16, block[0..2], .little)));
+            },
+            3 => {
+                var names = std.mem.splitScalar(u8, block, 0);
+                var id: i64 = 0;
+                while (names.next()) |name| : (id += 1) {
+                    if (name.len > 0) try setPage(a, io, &pages, dir, id, name);
+                }
+            },
+            // Pages may come later, so glyphs are read after the loop.
+            4 => chars = block,
+            5 => {
+                var k: usize = 0;
+                while (block.len - k >= 10) : (k += 10) {
+                    const first = std.mem.readInt(u32, block[k..][0..4], .little);
+                    const second = std.mem.readInt(u32, block[k + 4 ..][0..4], .little);
+                    if (first > 0x10ffff or second > 0x10ffff) continue;
+                    try font.kerning.put(a, (@as(u64, first) << 32) | second, @floatFromInt(std.mem.readInt(i16, block[k + 8 ..][0..2], .little)));
+                }
+            },
+            else => {},
+        }
+    }
+    var k: usize = 0;
+    while (chars.len - k >= 20) : (k += 20) {
+        const ch = chars[k..][0..20];
+        const id = std.mem.readInt(u32, ch[0..4], .little);
+        const page = ch[18];
+        if (page >= pages.items.len or pages.items[page] == null or id > 0x10ffff) continue;
+        try font.glyphs.put(a, id, .{
+            .page = page,
+            .x = @floatFromInt(std.mem.readInt(u16, ch[4..6], .little)),
+            .y = @floatFromInt(std.mem.readInt(u16, ch[6..8], .little)),
+            .w = @floatFromInt(std.mem.readInt(u16, ch[8..10], .little)),
+            .h = @floatFromInt(std.mem.readInt(u16, ch[10..12], .little)),
+            .x_offset = @floatFromInt(std.mem.readInt(i16, ch[12..14], .little)),
+            .y_offset = @floatFromInt(std.mem.readInt(i16, ch[14..16], .little)),
+            .advance = @floatFromInt(std.mem.readInt(i16, ch[16..18], .little)),
+        });
+    }
+    if (font.size <= 0 or font.glyphs.count() == 0) return null;
+    font.pages = pages.items;
+    return font;
+}
+
 pub fn load(a: std.mem.Allocator, io: std.Io, path: []const u8) ?*BitmapFont {
     // Apart from `a`: the skin keeps what it parses, and a font's text would stay as long as the skin.
     var tmp = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
@@ -186,6 +248,7 @@ pub fn load(a: std.mem.Allocator, io: std.Io, path: []const u8) ?*BitmapFont {
         const text = if (std.unicode.utf8ValidateSlice(bytes)) bytes else core.encoding.toUtf8(tmp.allocator(), bytes, .sjis) catch return null;
         return parseLr2(a, io, text, dir) catch null;
     }
+    if (std.mem.startsWith(u8, bytes, "BMF")) return parseBmBinary(a, io, bytes, dir) catch null;
     return parseBm(a, io, bytes, dir) catch null;
 }
 
@@ -304,4 +367,27 @@ test "a font without a size is refused, and a BMFont reads its fields" {
     try std.testing.expectEqual(@as(f32, -1), g.x_offset);
     try std.testing.expectEqual(@as(f32, 6), g.advance);
     try std.testing.expect(font.glyphs.get('B') == null);
+}
+
+test "a binary BMFont reads its blocks, and a truncated or foreign one is refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try fs.write(std.testing.io, try std.fs.path.join(a, &.{ dir, "page.png" }), "");
+    const info = "\x01\x02\x00\x00\x00\xe0\xff";
+    const chars = "\x04\x28\x00\x00\x00" ++ "\x41\x00\x00\x00\x01\x00\x02\x00\x03\x00\x04\x00\xff\xff\x05\x00\x06\x00\x00\x0f" ++ "\x42\x00\x00\x00\x00\x00\x00\x00\x01\x00\x01\x00\x00\x00\x00\x00\x01\x00\x01\x0f";
+    const pages = "\x03\x12\x00\x00\x00page.png\x00../b.png\x00";
+    const kerning = "\x05\x0a\x00\x00\x00\x41\x00\x00\x00\x41\x00\x00\x00\xfe\xff";
+    const font = (try parseBmBinary(a, std.testing.io, "BMF\x03" ++ info ++ chars ++ pages ++ kerning, dir)).?;
+    try std.testing.expectEqual(@as(f32, 32), font.size);
+    try std.testing.expectEqual(@as(f32, 10), measure(font, "AA", 1));
+    const g = font.glyphs.get('A').?;
+    try std.testing.expectEqual(@as(f32, -1), g.x_offset);
+    try std.testing.expectEqual(@as(f32, 4), g.h);
+    try std.testing.expect(font.glyphs.get('B') == null);
+    try std.testing.expect((try parseBmBinary(a, std.testing.io, "BMF\x03\x01\xff\x00\x00\x00\xe0\xff" ++ chars ++ pages, dir)) == null);
+    try std.testing.expect((try parseBmBinary(a, std.testing.io, "BMF\x02" ++ info ++ chars ++ pages, dir)) == null);
 }

@@ -682,7 +682,7 @@ pub const App = struct {
     }
 
     fn dropSelectSkin(a: *App) void {
-        if (a.select_skin) |sk| skin_mod.destroy(a.gpa, sk);
+        if (a.select_skin) |sk| skin_mod.destroy(a.gpa, &a.g, sk);
         a.select_skin = null;
         if (a.select_skin_root.len > 0) a.gpa.free(a.select_skin_root);
         a.select_skin_root = "";
@@ -698,14 +698,14 @@ pub const App = struct {
         const p = skin_mod.find(al, a.io, root, skin_mod.type_result) orelse return;
         const load_ctx = a.skin_state.loadCtx();
         const fresh = skin_mod.load(a.gpa, a.io, &a.g, p, a.skin_mode, noOption, skin_mod.loadConf(al, a.io, root, skin_mod.type_result), a.luaEnv(&load_ctx, false)) catch return;
-        if (a.result_skin) |old| skin_mod.destroy(a.gpa, old);
+        if (a.result_skin) |old| skin_mod.destroy(a.gpa, &a.g, old);
         a.result_skin = fresh;
     }
 
     fn dropSkins(a: *App) void {
-        if (a.play_skin) |sk| skin_mod.destroy(a.gpa, sk);
-        if (a.result_skin) |sk| skin_mod.destroy(a.gpa, sk);
-        if (a.decide_skin) |sk| skin_mod.destroy(a.gpa, sk);
+        if (a.play_skin) |sk| skin_mod.destroy(a.gpa, &a.g, sk);
+        if (a.result_skin) |sk| skin_mod.destroy(a.gpa, &a.g, sk);
+        if (a.decide_skin) |sk| skin_mod.destroy(a.gpa, &a.g, sk);
         a.decide_skin = null;
         a.play_skin = null;
         a.result_skin = null;
@@ -993,21 +993,27 @@ pub const App = struct {
     }
 
     fn shot(a: *App) void {
-        if (!a.g.saveShot(a.shot_path.?.ptr)) std.log.warn("--shot saved nothing", .{});
+        if (!a.g.saveShot(a.shot_path.?) or !(a.g.shotResult(true) orelse false)) std.log.warn("--shot saved nothing", .{});
         a.running = false;
     }
 
     fn saveScreenshot(a: *App) void {
-        var ok = false;
-        defer a.showNotice(if (ok) tr("Screenshot saved") else tr("Screenshot failed"));
         const path = screenshotPath(a.gpa, a.io) catch |e| {
             std.log.err("screenshot failed: {t}", .{e});
             a.g.present();
-            return;
+            return a.showNotice(tr("Screenshot failed"));
         };
         defer a.gpa.free(path);
-        ok = a.g.saveShot(path.ptr);
-        if (!ok) std.log.err("screenshot failed: {s}", .{c.SDL_GetError()});
+        // saveShot waits for the shot before, so report it rather than lose its notice.
+        a.noticeScreenshot(true);
+        if (a.g.saveShot(path)) return;
+        std.log.err("screenshot failed: {s}", .{c.SDL_GetError()});
+        a.showNotice(tr("Screenshot failed"));
+    }
+
+    fn noticeScreenshot(a: *App, wait: bool) void {
+        const ok = a.g.shotResult(wait) orelse return;
+        a.showNotice(if (ok) tr("Screenshot saved") else tr("Screenshot failed"));
     }
 
     fn showNotice(a: *App, text: []const u8) void {
@@ -1096,6 +1102,7 @@ pub const App = struct {
                 a.shot_wanted = false;
                 a.saveScreenshot();
             } else {
+                a.noticeScreenshot(false);
                 a.drawNotice();
                 a.g.present();
             }
@@ -1128,7 +1135,7 @@ fn screenshotPath(gpa: std.mem.Allocator, io: std.Io) ![:0]u8 {
     var ns: c.SDL_Time = 0;
     var t: c.SDL_DateTime = undefined;
     if (!c.SDL_GetCurrentTime(&ns) or !c.SDL_TimeToDateTime(ns, &t, true)) return error.NoClock;
-    return std.fmt.allocPrintSentinel(gpa, "{s}/actuon-{d}{d:0>2}{d:0>2}-{d:0>2}{d:0>2}{d:0>2}-{d:0>3}.bmp", .{ folder, @as(u32, @intCast(t.year)), @as(u32, @intCast(t.month)), @as(u32, @intCast(t.day)), @as(u32, @intCast(t.hour)), @as(u32, @intCast(t.minute)), @as(u32, @intCast(t.second)), @as(u32, @intCast(@divTrunc(t.nanosecond, 1_000_000))) }, 0);
+    return std.fmt.allocPrintSentinel(gpa, "{s}/actuon-{d}{d:0>2}{d:0>2}-{d:0>2}{d:0>2}{d:0>2}-{d:0>3}.png", .{ folder, @as(u32, @intCast(t.year)), @as(u32, @intCast(t.month)), @as(u32, @intCast(t.day)), @as(u32, @intCast(t.hour)), @as(u32, @intCast(t.minute)), @as(u32, @intCast(t.second)), @as(u32, @intCast(@divTrunc(t.nanosecond, 1_000_000))) }, 0);
 }
 
 const shot_keys_start_ms = 2000;
@@ -1263,6 +1270,8 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, opts: Options) !void {
     // Captures stay offline, so every run draws the same version row.
     if (app.shot_path == null) app.set.update = update.start(gpa, io);
     app.run();
+    // The exit below skips Gfx.deinit, which would wait for a screenshot still being written.
+    _ = app.g.shotResult(true);
     const update_ended = if (app.set.update) |j| j.abandon() else true;
     // A thread stuck on a dead connection still allocates, and the allocator's shutdown check would crash it.
     if (!ir.waitForThreads() or !update_ended) std.process.exit(0);

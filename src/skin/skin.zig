@@ -378,7 +378,8 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, g: *gfx.Gfx, path: []const u8, m
     return skin;
 }
 
-pub fn destroy(gpa: std.mem.Allocator, s: *Skin) void {
+pub fn destroy(gpa: std.mem.Allocator, g: *gfx.Gfx, s: *Skin) void {
+    g.closeFileFonts();
     for (s.videos) |v| v.destroy(gpa);
     s.deinit();
     gpa.destroy(s);

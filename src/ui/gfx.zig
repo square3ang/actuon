@@ -283,9 +283,10 @@ pub const Gfx = struct {
     fonts: [font_sizes.len]?*c.TTF_Font = @splat(null),
     cjk_fonts: [font_sizes.len][max_cjk_fonts]?*c.TTF_Font = @splat(@splat(null)),
     text_font: ?[:0]const u8 = null,
-    /// Null remembers a file that would not open. shortcut: kept until exit and only TTF/OTF, bitmap .fnt files show in the built-in font.
+    /// Null remembers a file that would not open.
     file_fonts: std.AutoHashMapUnmanaged(u64, ?*c.TTF_Font) = .empty,
     text_cache: std.AutoHashMapUnmanaged(TextKey, TextEntry) = .empty,
+    shot: ?*Shot = null,
     frame: u64 = 0,
     backdrop_tex: ?*Texture = null,
     backdrop_started: bool = false,
@@ -464,9 +465,9 @@ pub const Gfx = struct {
         var it = g.text_cache.valueIterator();
         while (it.next()) |e| g.destroyTexture(e.tex);
         g.text_cache.deinit(g.gpa);
-        var opened = g.file_fonts.valueIterator();
-        while (opened.next()) |f| if (f.*) |font| c.TTF_CloseFont(font);
+        g.closeFileFonts();
         g.file_fonts.deinit(g.gpa);
+        _ = g.shotResult(true);
         for (g.fonts) |f| if (f != null) c.TTF_CloseFont(f);
         for (g.cjk_fonts) |set| for (set) |f| if (f != null) c.TTF_CloseFont(f);
         c.TTF_Quit();
@@ -1011,6 +1012,13 @@ pub const Gfx = struct {
         return gop.value_ptr.* orelse builtin;
     }
 
+    /// Skins that stay loaded open theirs again on their next new text.
+    pub fn closeFileFonts(g: *Gfx) void {
+        var opened = g.file_fonts.valueIterator();
+        while (opened.next()) |f| if (f.*) |font| c.TTF_CloseFont(font);
+        g.file_fonts.clearRetainingCapacity();
+    }
+
     pub const Size = struct { w: f32, h: f32 };
     const opaque_white: Color = .{ .r = 255, .g = 255, .b = 255 };
 
@@ -1126,22 +1134,78 @@ pub const Gfx = struct {
         c.rb_present();
     }
 
-    /// Replaces `present`; false when nothing was saved. shortcut: BMP needs no new library, encode PNG in a thread if the files or the hitch bother players.
-    pub fn saveShot(g: *Gfx, path: [*:0]const u8) bool {
+    /// Replaces `present`; false when nothing will be saved. The file is written on a thread, so the frame does not hitch; `shotResult` collects it.
+    pub fn saveShot(g: *Gfx, path: []const u8) bool {
+        _ = g.shotResult(true);
         defer g.reapTextures();
         g.record(true);
         var w: c_int = 0;
         var h: c_int = 0;
         c.rb_frame_size(&w, &h);
-        const px = g.gpa.alloc(u8, @intCast(@max(w, 1) * @max(h, 1) * 4)) catch {
+        const owned = g.gpa.dupeSentinel(u8, path, 0) catch {
             c.rb_present();
             return false;
         };
-        defer g.gpa.free(px);
-        if (!c.rb_read_pixels(w, h, px.ptr)) return false;
-        const surf = c.SDL_CreateSurfaceFrom(w, h, c.SDL_PIXELFORMAT_RGBA32, px.ptr, w * 4) orelse return false;
-        defer c.SDL_DestroySurface(surf);
-        return c.SDL_SaveBMP(surf, path);
+        const surf = c.SDL_CreateSurface(@max(w, 1), @max(h, 1), c.SDL_PIXELFORMAT_RGBA32) orelse {
+            g.gpa.free(owned);
+            c.rb_present();
+            return false;
+        };
+        if (surf.*.pitch != @max(w, 1) * 4 or !c.rb_read_pixels(w, h, surf.*.pixels)) {
+            c.SDL_DestroySurface(surf);
+            g.gpa.free(owned);
+            return false;
+        }
+        g.shot = Shot.start(g.gpa, surf, owned) orelse return false;
+        return true;
+    }
+
+    /// Null while none is pending, or while one is still being written and `wait` is false.
+    pub fn shotResult(g: *Gfx, wait: bool) ?bool {
+        const ok = (g.shot orelse return null).finish(g.gpa, wait) orelse return null;
+        g.shot = null;
+        return ok;
+    }
+};
+
+const Shot = struct {
+    surf: *c.SDL_Surface,
+    path: [:0]u8,
+    thread: ?*c.SDL_Thread = null,
+    ok: bool = false,
+
+    /// Owns `surf` and `path` from here, even when it fails.
+    fn start(gpa: std.mem.Allocator, surf: *c.SDL_Surface, path: [:0]u8) ?*Shot {
+        const s = gpa.create(Shot) catch {
+            c.SDL_DestroySurface(surf);
+            gpa.free(path);
+            return null;
+        };
+        s.* = .{ .surf = surf, .path = path };
+        s.thread = c.SDL_CreateThread(write, "screenshot", s);
+        if (s.thread == null) _ = write(s);
+        return s;
+    }
+
+    fn write(ctx: ?*anyopaque) callconv(.c) c_int {
+        const s: *Shot = @ptrCast(@alignCast(ctx));
+        // BMP stays for `--shot`: tests/ui_shots.py reads its pixels raw.
+        s.ok = if (std.ascii.endsWithIgnoreCase(s.path, ".bmp")) c.SDL_SaveBMP(s.surf, s.path) else c.SDL_SavePNG(s.surf, s.path);
+        if (!s.ok) std.log.warn("screenshot failed: {s}", .{c.SDL_GetError()});
+        return 0;
+    }
+
+    /// Frees the shot unless it returns null.
+    fn finish(s: *Shot, gpa: std.mem.Allocator, wait: bool) ?bool {
+        if (s.thread) |t| {
+            if (!wait and c.SDL_GetThreadState(t) != c.SDL_THREAD_COMPLETE) return null;
+            c.SDL_WaitThread(t, null);
+        }
+        const ok = s.ok;
+        c.SDL_DestroySurface(s.surf);
+        gpa.free(s.path);
+        gpa.destroy(s);
+        return ok;
     }
 };
 
@@ -1278,4 +1342,20 @@ test "sprite flips by swapping texture coordinates and turns about its pivot" {
     const turned = spriteVerts(10, 10, src, dst, .{ .angle = 90, .pivot = .{ 0, 0 } });
     try std.testing.expectApproxEqAbs(@as(f32, 100), turned[1].x, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 110), turned[1].y, 0.001);
+}
+
+test "a screenshot is written as PNG on its thread, and BMP when the name asks" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{ "a.png", "a.bmp" }, [_][]const u8{ "\x89PNG", "BM" }) |name, magic| {
+        const surf = c.SDL_CreateSurface(2, 1, c.SDL_PIXELFORMAT_RGBA32).?;
+        const path = try std.fmt.allocPrintSentinel(gpa, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, name }, 0);
+        try std.testing.expectEqual(@as(?bool, true), Shot.start(gpa, surf, path).?.finish(gpa, true));
+        var buf: [4]u8 = undefined;
+        const head = try tmp.dir.readFile(std.testing.io, name, &buf);
+        try std.testing.expect(std.mem.startsWith(u8, head, magic));
+    }
+    const bad = try gpa.dupeSentinel(u8, ".zig-cache/tmp/no/such/dir/a.png", 0);
+    try std.testing.expectEqual(@as(?bool, false), Shot.start(gpa, c.SDL_CreateSurface(1, 1, c.SDL_PIXELFORMAT_RGBA32).?, bad).?.finish(gpa, true));
 }
