@@ -76,6 +76,7 @@ pub const Engine = struct {
     slew: i64 = 0,
     slew_carry: u32 = 0,
     skip_frames: i64 = 0,
+    hold_frames: i64 = 0,
     song_buf: [song_max * 2]f32 = undefined,
     host: HostInfo = .{},
     feed_thread: ?*c.SDL_Thread = null,
@@ -489,9 +490,15 @@ pub const Engine = struct {
             e.mixSong(n);
             e.skip_frames -= @intCast(n);
         }
-        const n: usize = @intCast(@as(i64, @intCast(frames)) + e.slew);
-        e.mixSong(n);
-        e.addSong(out, frames, n);
+        const hold: usize = @intCast(@min(e.hold_frames, frames));
+        e.hold_frames -= @intCast(hold);
+        const heard = frames - hold;
+        if (heard > 0) {
+            // steerAudio keeps slew at 0 while holding, so a short tail never stretches.
+            const n: usize = @intCast(@as(i64, @intCast(heard)) + e.slew);
+            e.mixSong(n);
+            e.addSong(out + hold * 2, heard, n);
+        }
         for (out[0 .. frames * 2]) |*s| {
             const x = s.*;
             if (x > 1 or x < -1) s.* = std.math.clamp(x, -1.5, 1.5) * (1 - std.math.clamp(x, -1.5, 1.5) * std.math.clamp(x, -1.5, 1.5) / 6.75);
@@ -551,6 +558,7 @@ pub const Engine = struct {
             e.audio_err_us = 0;
             e.slew = 0;
             e.skip_frames = 0;
+            e.hold_frames = 0;
             e.clock_valid.store(true, .release);
             return;
         }
@@ -564,11 +572,13 @@ pub const Engine = struct {
         e.steerAudio(raw - prev, frames);
     }
 
-    /// shortcut: audio far ahead only slews, as a stalled device stalls our writes too; add a hold if that proves wrong.
     fn steerAudio(e: *Engine, err_us: i64, frames: u32) void {
+        // Readings taken mid-hold drift by design, as the song stands still while the clock runs.
+        if (e.hold_frames > 0) return;
         e.audio_err_us += @divTrunc(err_us - e.audio_err_us, 32);
-        if (e.audio_err_us < -sync_skip_us) {
-            e.skip_frames = @max(e.usToFrame(-err_us), 0);
+        if (@abs(e.audio_err_us) > sync_skip_us) {
+            // Sized from the smoothed error, so one glitched reading cannot skip or hold for seconds.
+            if (e.audio_err_us < 0) e.skip_frames = e.usToFrame(-e.audio_err_us) else e.hold_frames = e.usToFrame(e.audio_err_us);
             e.audio_err_us = 0;
             e.slew = 0;
             return;
@@ -666,13 +676,44 @@ test "tick clock stays fixed after settling and audio follows it" {
     e.samples = &samples;
     e.startVoice(0, 0, 0, 0);
     e.slew = 0;
-    e.audio_err_us = -sync_skip_us - 1;
+    e.audio_err_us = -100_000;
     e.steerAudio(-100_000, 128);
     try std.testing.expectEqual(@as(i64, 4800), e.skip_frames);
     const f1 = e.frame.load(.monotonic);
     e.mix(&out, 128);
     try std.testing.expectEqual(f1 + 4928, e.frame.load(.monotonic));
     try std.testing.expectEqual(@as(usize, 4928 * 2), e.voices[0].pos);
+}
+
+test "audio far ahead holds the song until the clock catches up" {
+    const e = try Engine.create(std.testing.allocator);
+    defer e.destroy();
+    const data: [96000]f32 = @splat(0.25);
+    const samples = [_]decode.Sample{.{ .data = @constCast(&data) }};
+    e.samples = &samples;
+    e.startVoice(0, 0, 0, 0);
+    e.audio_err_us = 60_000;
+    e.steerAudio(60_000, 128);
+    try std.testing.expectEqual(@as(i64, 2880), e.hold_frames);
+    try std.testing.expectEqual(@as(i64, 0), e.slew);
+    e.steerAudio(-100_000, 128);
+    try std.testing.expectEqual(@as(i64, 0), e.skip_frames);
+
+    e.hold_frames = 0;
+    e.audio_err_us = 49_000;
+    e.steerAudio(5_000_000, 128);
+    try std.testing.expectEqual(@as(i64, 9778), e.hold_frames);
+
+    e.hold_frames = 240;
+    var out: [256]f32 = undefined;
+    e.mix(&out, 128);
+    try std.testing.expectEqual(@as(i64, 0), e.frame.load(.monotonic));
+    try std.testing.expectEqual(@as(f32, 0), out[255]);
+    e.mix(&out, 128);
+    try std.testing.expectEqual(@as(i64, 16), e.frame.load(.monotonic));
+    try std.testing.expectEqual(@as(f32, 0), out[2 * 111]);
+    try std.testing.expectEqual(@as(f32, 0.25), out[2 * 112]);
+    try std.testing.expectEqual(@as(i64, 0), e.hold_frames);
 }
 
 test "slew stretches without clicks at the buffer ends" {
