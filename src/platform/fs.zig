@@ -25,9 +25,24 @@ pub fn writeAtomic(gpa: std.mem.Allocator, io: Io, path: []const u8, data: []con
     try rename(tmp, path);
 }
 
+/// Windows flushes only a handle opened for writing.
+pub fn sync(io: Io, path: []const u8) !void {
+    const f = try Dir.cwd().openFile(io, path, .{ .mode = .read_write });
+    defer f.close(io);
+    try f.sync(io);
+}
+
 pub fn exists(io: Io, path: []const u8) bool {
     Dir.cwd().access(io, path, .{}) catch return false;
     return true;
+}
+
+/// Null while another process holds it. The file stays behind: deleting it would let a later opener lock a different file.
+pub fn lock(io: Io, path: []const u8) !?Io.File {
+    return Dir.cwd().createFile(io, path, .{ .truncate = false, .lock = .exclusive, .lock_nonblocking = true }) catch |err| switch (err) {
+        error.WouldBlock => null,
+        else => err,
+    };
 }
 
 pub fn mkdirs(io: Io, path: []const u8) !void {
