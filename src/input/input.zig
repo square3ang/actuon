@@ -65,14 +65,13 @@ pub var direct_keyboard: std.atomic.Value(bool) = .init(false);
 /// Direct paths see input system-wide, so they only deliver while our window has focus.
 pub var focused: std.atomic.Value(bool) = .init(false);
 
+fn row(table: *[128]u16, start: usize, codes: []const u16) void {
+    for (codes, 0..) |code, i| table[start + i] = code;
+}
+
 // PS/2 set 1 make codes (equal to Linux KEY_* below 84) to SDL scancodes.
 const set1_to_sdl = blk: {
     var t: [128]u16 = @splat(0);
-    const row = struct {
-        fn f(table: *[128]u16, start: usize, codes: []const u16) void {
-            for (codes, 0..) |code, i| table[start + i] = code;
-        }
-    }.f;
     row(&t, 1, &.{ 41, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 45, 46, 42, 43 }); // esc,1-0,-,=,bs,tab
     row(&t, 16, &.{ 20, 26, 8, 21, 23, 28, 24, 12, 18, 19, 47, 48, 40, 224 }); // qwertyuiop[] enter lctrl
     row(&t, 30, &.{ 4, 22, 7, 9, 10, 11, 13, 14, 15, 51, 52, 53, 225, 49 }); // asdfghjkl;'` lshift \
@@ -96,6 +95,25 @@ const set1_to_sdl = blk: {
     break :blk t;
 };
 
+// The same codes to macOS virtual key codes (kVK_* in Carbon's Events.h); kVK_ANSI_A is 0, so set1_to_sdl says which are used.
+const set1_to_mac = blk: {
+    var t: [128]u16 = @splat(0);
+    row(&t, 1, &.{ 0x35, 0x12, 0x13, 0x14, 0x15, 0x17, 0x16, 0x1A, 0x1C, 0x19, 0x1D, 0x1B, 0x18, 0x33, 0x30 });
+    row(&t, 16, &.{ 0x0C, 0x0D, 0x0E, 0x0F, 0x11, 0x10, 0x20, 0x22, 0x1F, 0x23, 0x21, 0x1E, 0x24, 0x3B });
+    row(&t, 30, &.{ 0x00, 0x01, 0x02, 0x03, 0x05, 0x04, 0x26, 0x28, 0x25, 0x29, 0x27, 0x32, 0x38, 0x2A });
+    row(&t, 44, &.{ 0x06, 0x07, 0x08, 0x09, 0x0B, 0x2D, 0x2E, 0x2B, 0x2F, 0x2C, 0x3C, 0x43, 0x3A, 0x31, 0x39 });
+    row(&t, 59, &.{ 0x7A, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6D });
+    row(&t, 71, &.{ 0x59, 0x5B, 0x5C, 0x4E, 0x56, 0x57, 0x58, 0x45, 0x53, 0x54, 0x55, 0x52, 0x41 });
+    row(&t, 96, &.{ 0x4C, 0x3E, 0x4B, 0, 0x3D, 0, 0x73, 0x7E, 0x74, 0x7B, 0x7C, 0x77, 0x7D, 0x79, 0x72, 0x75 }); // insert is Help
+    break :blk t;
+};
+
+const sampled = blk: {
+    var s: std.StaticBitSet(joy_base) = .empty;
+    for (set1_to_sdl) |sc| if (sc != 0) s.set(sc);
+    break :blk s;
+};
+
 /// Called from src/input/rawinput_win.c with a Linux-style key code (extended keys already folded).
 export fn actuon_input_push_set1(code: u32, down: c_int) callconv(.c) void {
     if (!focused.load(.acquire) or code >= set1_to_sdl.len or poll_hz.load(.acquire) != 0) return;
@@ -106,6 +124,8 @@ export fn actuon_input_push_set1(code: u32, down: c_int) callconv(.c) void {
 /// Called from src/input/hid_macos.c: HID usage IDs are exactly SDL scancodes.
 export fn actuon_input_push_hid(usage: u32, down: c_int) callconv(.c) void {
     if (!focused.load(.acquire) or usage == 0 or usage >= joy_base) return;
+    // The sampler owns the keys it reads while it runs; HID still brings the rest, such as F11.
+    if (poll_hz.load(.acquire) != 0 and sampled.isSet(usage)) return;
     push(.{ .mono_ns = c.SDL_GetTicksNS(), .code = @intCast(usage), .down = down != 0 });
 }
 
@@ -130,8 +150,7 @@ pub fn startDirect() bool {
         .macos => if (actuon_hid_start() != 0) direct_keyboard.store(true, .release),
         else => return false,
     }
-    // shortcut: macOS has no key state sampler and stays on HID events, add CGEventSourceKeyState with a keycode table when it can be tested there.
-    if (builtin.os.tag == .windows and direct_keyboard.load(.acquire)) startSampler();
+    if (builtin.os.tag != .linux and direct_keyboard.load(.acquire)) startSampler();
     return builtin.os.tag == .linux or direct_keyboard.load(.acquire);
 }
 
@@ -147,7 +166,17 @@ fn sample(bits: *KeyBits) void {
     switch (builtin.os.tag) {
         .linux => evdev.sample(bits),
         .windows => actuon_rawinput_sample(bits),
+        .macos => sampleMac(bits),
         else => {},
+    }
+}
+
+// kCGEventSourceStateHIDSystemState = 1: the keyboard as it is, not as events delivered so far report it.
+extern fn CGEventSourceKeyState(state: i32, key: u16) bool;
+
+fn sampleMac(bits: *KeyBits) void {
+    for (set1_to_mac, set1_to_sdl, 0..) |key, sc, i| {
+        if (sc != 0 and CGEventSourceKeyState(1, key)) bits[i / 8] |= @as(u8, 1) << @intCast(i % 8);
     }
 }
 
@@ -413,4 +442,54 @@ test "scancode table" {
     try std.testing.expectEqual(@as(u16, 44), set1_to_sdl[57]); // SPACE
     try std.testing.expectEqual(@as(u16, 22), set1_to_sdl[31]); // S
     try std.testing.expectEqual(@as(u16, 224), set1_to_sdl[29]); // LCTRL
+}
+
+test "every sampled key has its own macOS key code" {
+    var seen: std.StaticBitSet(128) = .empty;
+    for (set1_to_mac, set1_to_sdl) |key, sc| {
+        if (sc == 0) continue;
+        try std.testing.expect(key < 128 and !seen.isSet(key));
+        seen.set(key);
+    }
+    try std.testing.expectEqual(@as(u16, 0x06), set1_to_mac[44]); // Z
+    try std.testing.expectEqual(@as(u16, 0x59), set1_to_mac[71]); // KP7
+    try std.testing.expectEqual(@as(u16, 0x73), set1_to_mac[102]); // HOME
+    if (builtin.os.tag == .macos) {
+        var bits: KeyBits = @splat(0);
+        sampleMac(&bits);
+    }
+}
+
+test "while polling, HID events only bring keys the sampler cannot read" {
+    io = std.testing.io;
+    clear();
+    focused.store(true, .release);
+    defer focused.store(false, .release);
+    setPollRate(1000);
+    actuon_input_push_hid(29, 1); // Z
+    try std.testing.expect(pop() == null);
+    actuon_input_push_hid(68, 1); // F11
+    try std.testing.expectEqual(@as(u16, 68), pop().?.code);
+    setPollRate(0);
+    actuon_input_push_hid(29, 1);
+    try std.testing.expectEqual(@as(u16, 29), pop().?.code);
+}
+
+extern fn actuon_rawinput_key(make: c_uint, flags: c_uint) void;
+
+test "keypad keys and their navigation twins sample apart" {
+    if (builtin.os.tag != .windows) return;
+    if (actuon_rawinput_start() == 0) return error.SkipZigTest;
+    const e0 = 2; // RI_KEY_E0
+    const @"break" = 1; // RI_KEY_BREAK
+    var bits: KeyBits = @splat(0);
+    actuon_rawinput_key(0x47, 0); // KP7
+    actuon_rawinput_sample(&bits);
+    try std.testing.expect(bits[71 / 8] >> 71 % 8 & 1 == 1 and bits[102 / 8] >> 102 % 8 & 1 == 0);
+    actuon_rawinput_key(0x47, @"break");
+    actuon_rawinput_key(0x47, e0); // HOME
+    bits = @splat(0);
+    actuon_rawinput_sample(&bits);
+    try std.testing.expect(bits[71 / 8] >> 71 % 8 & 1 == 0 and bits[102 / 8] >> 102 % 8 & 1 == 1);
+    actuon_rawinput_key(0x47, e0 | @"break");
 }
