@@ -6,8 +6,17 @@ const build_options = @import("build_options");
 const download = @import("download.zig");
 const http = @import("../platform/http.zig");
 const fs = @import("../platform/fs.zig");
+const release_sig = @import("release_sig.zig");
+const Ed25519 = release_sig.Ed25519;
 
 pub const current_version = build_options.version;
+/// Null without -Dupdate-key: such a build never installs anything, since only the key stops a hijacked repository; it opens the releases page.
+const release_key: ?[32]u8 = if (build_options.update_key.len == 0) null else blk: {
+    var key: [32]u8 = undefined;
+    if (build_options.update_key.len != 64) @compileError("update-key must be 64 hex digits");
+    _ = std.fmt.hexToBytes(&key, build_options.update_key) catch @compileError("update-key must be 64 hex digits");
+    break :blk key;
+};
 pub const releases_page = "https://github.com/square3ang/actuon/releases/latest";
 
 const latest_api = "https://api.github.com/repos/square3ang/actuon/releases/latest";
@@ -17,6 +26,10 @@ const windows_asset = "actuon-windows.zip";
 /// The folder inside windows_asset, as packaging/windows/package.sh names it.
 const windows_folder = "actuon-windows";
 const windows_exe = "actuon.exe";
+const macos_asset = "actuon-macos.zip";
+/// The bundle inside macos_asset, as packaging/macos/package.sh names it.
+const macos_bundle = "actuon.app";
+const macos_exe = "Contents/MacOS/actuon";
 const staged_name = ".actuon-update";
 const old_suffix = ".actuon-old";
 
@@ -24,14 +37,12 @@ pub const Release = struct {
     version: []const u8,
     /// Null when this release has nothing this install can apply; the player gets the releases page.
     url: ?[]const u8 = null,
-    sha256: [32]u8 = undefined,
 };
 
-/// shortcut: the digest comes from GitHub beside the file, so this catches damage and a foreign host but not a hijacked repository; sign releases offline if that becomes a concern.
 pub fn parseRelease(a: std.mem.Allocator, json: []const u8, current: []const u8, asset: ?[]const u8) !?Release {
     const Answer = struct {
         tag_name: []const u8,
-        assets: []const struct { name: []const u8, browser_download_url: []const u8, digest: ?[]const u8 = null },
+        assets: []const struct { name: []const u8, browser_download_url: []const u8 },
     };
     const answer = std.json.parseFromSliceLeaky(Answer, a, json, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return error.BadRelease;
     const version = if (std.mem.startsWith(u8, answer.tag_name, "v")) answer.tag_name[1..] else answer.tag_name;
@@ -39,44 +50,68 @@ pub fn parseRelease(a: std.mem.Allocator, json: []const u8, current: []const u8,
     if (theirs.order(try std.SemanticVersion.parse(current)) != .gt) return null;
     var release: Release = .{ .version = version };
     const wanted = asset orelse return release;
+    const url = try std.fmt.allocPrint(a, download_base ++ "{s}/{s}", .{ answer.tag_name, wanted });
+    const sig_url = try std.fmt.allocPrint(a, "{s}.sig", .{url});
+    var listed = false;
+    var signed = false;
     for (answer.assets) |f| {
-        if (!std.mem.eql(u8, f.name, wanted)) continue;
-        const expected_url = try std.fmt.allocPrint(a, download_base ++ "{s}/{s}", .{ answer.tag_name, wanted });
-        if (!std.mem.eql(u8, f.browser_download_url, expected_url)) return error.BadRelease;
-        const digest = f.digest orelse return error.BadRelease;
-        if (!std.mem.startsWith(u8, digest, "sha256:") or digest.len != "sha256:".len + 64) return error.BadRelease;
-        _ = std.fmt.hexToBytes(&release.sha256, digest["sha256:".len..]) catch return error.BadRelease;
-        release.url = expected_url;
-        return release;
+        if (std.mem.eql(u8, f.browser_download_url, url)) listed = true;
+        if (std.mem.eql(u8, f.browser_download_url, sig_url)) signed = true;
     }
+    if (listed and signed) release.url = url;
     return release;
 }
 
-fn fetchVerified(gpa: std.mem.Allocator, io: std.Io, url: []const u8, sha256: [32]u8, path: []const u8, progress: *http.Progress) !void {
+const Proof = struct { key: [32]u8, signature: [64]u8, name: []const u8 };
+
+fn fetchVerified(gpa: std.mem.Allocator, io: std.Io, url: []const u8, proof: Proof, path: []const u8, progress: *http.Progress) !void {
     errdefer fs.remove(io, path);
     try http.download(gpa, io, url, path, progress);
-    if (!std.mem.eql(u8, &(try fs.sha256(io, path)), &sha256)) return error.ChecksumMismatch;
+    const message = try release_sig.message(gpa, proof.name, try fs.sha256(io, path));
+    defer gpa.free(message);
+    const key = Ed25519.PublicKey.fromBytes(proof.key) catch return error.BadSignature;
+    Ed25519.Signature.fromBytes(proof.signature).verify(message, key) catch return error.BadSignature;
 }
 
 /// The rename is atomic, so a failure at any point leaves the old AppImage whole.
-fn replaceFile(gpa: std.mem.Allocator, io: std.Io, url: []const u8, sha256: [32]u8, target: []const u8, progress: *http.Progress) !void {
+fn replaceFile(gpa: std.mem.Allocator, io: std.Io, url: []const u8, proof: Proof, target: []const u8, progress: *http.Progress) !void {
     const tmp = try std.fmt.allocPrint(gpa, "{s}.update", .{target});
     defer gpa.free(tmp);
     errdefer fs.remove(io, tmp);
-    try fetchVerified(gpa, io, url, sha256, tmp, progress);
+    try fetchVerified(gpa, io, url, proof, tmp, progress);
     try fs.setExecutable(io, tmp);
     try fs.rename(tmp, target);
 }
 
-fn replaceFolder(a: std.mem.Allocator, io: std.Io, url: []const u8, sha256: [32]u8, dir: []const u8, progress: *http.Progress) !void {
+/// The .sig sits beside the asset at `url`, which starts with `base`; the rest names the asset.
+fn fetchProof(gpa: std.mem.Allocator, io: std.Io, base: []const u8, url: []const u8, key: [32]u8) !Proof {
+    const sig_url = try std.fmt.allocPrint(gpa, "{s}.sig", .{url});
+    defer gpa.free(sig_url);
+    const signature = try http.get(gpa, io, sig_url);
+    defer gpa.free(signature);
+    if (signature.len != 64) return error.BadSignature;
+    return .{ .key = key, .signature = signature[0..64].*, .name = url[base.len..] };
+}
+
+/// Stages in `dir`, beside the game, so the final renames stay on one volume; `swap` moves `inner` of the package onto `to`.
+fn replacePackage(a: std.mem.Allocator, io: std.Io, url: []const u8, proof: Proof, dir: []const u8, inner: []const u8, comptime swap: anytype, to: []const u8, progress: *http.Progress) !void {
     const archive = try std.fs.path.join(a, &.{ dir, staged_name ++ ".zip" });
     const staged = try std.fs.path.join(a, &.{ dir, staged_name });
     defer fs.remove(io, archive);
     defer fs.removeTree(io, staged);
     fs.removeTree(io, staged);
-    try fetchVerified(a, io, url, sha256, archive, progress);
+    try fetchVerified(a, io, url, proof, archive, progress);
     _ = try download.extract(a, io, archive, staged);
-    try swapFiles(a, io, try std.fs.path.join(a, &.{ staged, windows_folder }), dir);
+    try swap(a, io, try std.fs.path.join(a, &.{ staged, inner }), to);
+}
+
+/// The swap is atomic, so the old bundle stays whole until it lands in the staging folder, which the caller removes.
+fn swapBundle(a: std.mem.Allocator, io: std.Io, from: []const u8, to: []const u8) !void {
+    const exe = try std.fs.path.join(a, &.{ from, macos_exe });
+    if (!fs.exists(io, exe)) return error.BadPackage;
+    // The archive reader keeps no permissions.
+    try fs.setExecutable(io, exe);
+    try fs.swap(from, to);
 }
 
 /// Windows can rename a running exe but not overwrite it. shortcut: a power cut mid-swap leaves old and new files mixed, reinstall by hand; add a journal if that is ever reported.
@@ -124,12 +159,26 @@ fn removeLeftovers(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
         if (std.mem.endsWith(u8, e.name, old_suffix)) fs.remove(io, try std.fs.path.join(a, &.{ dir, e.name }));
     }
     fs.removeTree(io, try std.fs.path.join(a, &.{ dir, staged_name }));
+    fs.remove(io, try std.fs.path.join(a, &.{ dir, staged_name ++ ".zip" }));
 }
 
-const Target = union(enum) { appimage: []const u8, folder: []const u8 };
+const Bundle = struct { app: []const u8, dir: []const u8 };
+const Target = union(enum) { appimage: []const u8, folder: []const u8, bundle: Bundle };
 
-/// shortcut: dev builds, Flatpak and macOS (signed bundle untested) get the releases page; add macOS once a signed build exists.
+/// A bundle's base path is its Contents/Resources/; zig-out/bin is not inside a .app.
+fn bundleOf(io: std.Io, base: []const u8) ?Bundle {
+    const contents = std.fs.path.dirname(base) orelse return null;
+    const app = std.fs.path.dirname(contents) orelse return null;
+    if (!std.mem.endsWith(u8, app, ".app")) return null;
+    const dir = std.fs.path.dirname(app) orelse return null;
+    // A translocated copy sits on a read-only mount, and a standard user cannot replace an admin's bundle; both get the releases page.
+    if (!fs.writable(io, app) or !fs.writable(io, dir)) return null;
+    return .{ .app = app, .dir = dir };
+}
+
+/// Dev builds and Flatpak find nothing and get the releases page.
 fn findTarget(a: std.mem.Allocator, io: std.Io) !?Target {
+    if (release_key == null) return null;
     switch (builtin.os.tag) {
         .linux => {
             if (builtin.cpu.arch != .x86_64) return null;
@@ -142,6 +191,10 @@ fn findTarget(a: std.mem.Allocator, io: std.Io) !?Target {
             // Only a package has LICENSE beside the exe, which spares zig-out/bin.
             if (!fs.exists(io, try std.fs.path.join(a, &.{ dir, "LICENSE" }))) return null;
             return .{ .folder = dir };
+        },
+        .macos => {
+            const base = c.SDL_GetBasePath() orelse return null;
+            return .{ .bundle = bundleOf(io, try a.dupe(u8, std.mem.span(base))) orelse return null };
         },
         else => return null,
     }
@@ -228,8 +281,13 @@ fn runCheck(j: *Job) !void {
     const asset: ?[]const u8 = if (j.target) |t| switch (t) {
         .appimage => appimage_asset,
         .folder => windows_asset,
+        .bundle => macos_asset,
     } else null;
-    if (j.target) |t| if (t == .folder) try removeLeftovers(a, j.io, t.folder);
+    if (j.target) |t| switch (t) {
+        .appimage => {},
+        .folder => |dir| try removeLeftovers(a, j.io, dir),
+        .bundle => |b| try removeLeftovers(a, j.io, b.dir),
+    };
     const json = try http.get(j.gpa, j.io, latest_api);
     defer j.gpa.free(json);
     j.release = try parseRelease(a, json, current_version, asset);
@@ -247,32 +305,33 @@ fn installThread(ud: ?*anyopaque) callconv(.c) c_int {
 }
 
 fn runInstall(j: *Job) !void {
-    const release = j.release.?;
+    const a = j.arena.allocator();
+    const url = j.release.?.url.?;
+    const proof = try fetchProof(a, j.io, download_base, url, release_key.?);
     switch (j.target.?) {
-        .appimage => |path| try replaceFile(j.gpa, j.io, release.url.?, release.sha256, path, &j.progress),
-        .folder => |dir| try replaceFolder(j.arena.allocator(), j.io, release.url.?, release.sha256, dir, &j.progress),
+        .appimage => |path| try replaceFile(j.gpa, j.io, url, proof, path, &j.progress),
+        .folder => |dir| try replacePackage(a, j.io, url, proof, dir, windows_folder, swapFiles, dir, &j.progress),
+        .bundle => |b| try replacePackage(a, j.io, url, proof, b.dir, macos_bundle, swapBundle, b.app, &j.progress),
     }
 }
 
-const test_sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-fn fakeAnswer(a: std.mem.Allocator, tag: []const u8, url: []const u8, digest: []const u8) ![]u8 {
+fn fakeAnswer(a: std.mem.Allocator, tag: []const u8, url: []const u8, sig_url: []const u8) ![]u8 {
     return std.fmt.allocPrint(a,
         \\{{"tag_name":"{s}","html_url":"x","assets":[
-        \\{{"name":"other.zip","browser_download_url":"https://evil.example/o","digest":"sha256:{s}"}},
-        \\{{"name":"a.zip","browser_download_url":"{s}","digest":"{s}"}}]}}
-    , .{ tag, test_sha, url, digest });
+        \\{{"name":"other.zip","browser_download_url":"https://evil.example/o"}},
+        \\{{"name":"a.zip","browser_download_url":"{s}"}},
+        \\{{"name":"a.zip.sig","browser_download_url":"{s}"}}]}}
+    , .{ tag, url, sig_url });
 }
 
 test "only a newer release is offered, and its numbers compare as numbers" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const json = try fakeAnswer(a, "v0.10.0", download_base ++ "v0.10.0/a.zip", "sha256:" ++ test_sha);
+    const json = try fakeAnswer(a, "v0.10.0", download_base ++ "v0.10.0/a.zip", download_base ++ "v0.10.0/a.zip.sig");
     const newer = (try parseRelease(a, json, "0.9.0", "a.zip")).?;
     try std.testing.expectEqualStrings("0.10.0", newer.version);
     try std.testing.expectEqualStrings(download_base ++ "v0.10.0/a.zip", newer.url.?);
-    try std.testing.expectEqual(@as(u8, 0x01), newer.sha256[0]);
     try std.testing.expectEqual(@as(?Release, null), try parseRelease(a, json, "0.10.0", "a.zip"));
     try std.testing.expectEqual(@as(?Release, null), try parseRelease(a, json, "0.11.0", "a.zip"));
 }
@@ -281,19 +340,36 @@ test "a parsed release outlives the answer it came from" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const json = try fakeAnswer(a, "v1.2.3", download_base ++ "v1.2.3/a.zip", "sha256:" ++ test_sha);
+    const json = try fakeAnswer(a, "v1.2.3", download_base ++ "v1.2.3/a.zip", download_base ++ "v1.2.3/a.zip.sig");
     const release = (try parseRelease(a, json, "0.1.0", "a.zip")).?;
     @memset(json, 'x');
     try std.testing.expectEqualStrings("1.2.3", release.version);
+    try std.testing.expectEqualStrings(download_base ++ "v1.2.3/a.zip", release.url.?);
 }
 
-test "a release with nothing for this install still reaches the player" {
+test "an unsigned or foreign asset gets the releases page, never an install" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const json = try fakeAnswer(a, "v1.0.0", "https://evil.example/a.zip", "bad");
-    try std.testing.expectEqual(@as(?[]const u8, null), (try parseRelease(a, json, "0.1.0", null)).?.url);
-    try std.testing.expectEqual(@as(?[]const u8, null), (try parseRelease(a, json, "0.1.0", "missing.zip")).?.url);
+    const good_url = download_base ++ "v1.0.0/a.zip";
+    const good_sig = good_url ++ ".sig";
+    try std.testing.expectEqual(@as(?[]const u8, null), (try parseRelease(a, try fakeAnswer(a, "v1.0.0", good_url, good_sig), "0.1.0", null)).?.url);
+    const cases = [_][]const u8{
+        try fakeAnswer(a, "v1.0.0", good_url, "https://evil.example/a.zip.sig"),
+        try fakeAnswer(a, "v1.0.0", good_url, download_base ++ "v0.9.0/a.zip.sig"),
+        try fakeAnswer(a, "v1.0.0", "https://evil.example/a.zip", good_sig),
+        try fakeAnswer(a, "v1.0.0", "http://github.com/square3ang/actuon/releases/download/v1.0.0/a.zip", good_sig),
+    };
+    for (cases) |json| try std.testing.expectEqual(@as(?[]const u8, null), (try parseRelease(a, json, "0.1.0", "a.zip")).?.url);
+    try std.testing.expectEqual(@as(?[]const u8, null), (try parseRelease(a, try fakeAnswer(a, "v1.0.0", good_url, good_sig), "0.1.0", "missing.zip")).?.url);
+}
+
+test "a build without an update key never installs, even as an AppImage" {
+    if (release_key != null) return error.SkipZigTest;
+    const env = c.SDL_GetEnvironment();
+    try std.testing.expect(c.SDL_SetEnvironmentVariable(env, "APPIMAGE", "/tmp/actuon.AppImage", true));
+    defer _ = c.SDL_UnsetEnvironmentVariable(env, "APPIMAGE");
+    try std.testing.expectEqual(@as(?Target, null), try findTarget(std.testing.allocator, std.testing.io));
 }
 
 test "a bad release answer is rejected" {
@@ -301,16 +377,7 @@ test "a bad release answer is rejected" {
     defer arena.deinit();
     const a = arena.allocator();
     const good_url = download_base ++ "v1.0.0/a.zip";
-    const good_digest = "sha256:" ++ test_sha;
-    const cases = [_][]const u8{
-        "not json",
-        try fakeAnswer(a, "nightly", good_url, good_digest),
-        try fakeAnswer(a, "v1.0.0", "https://evil.example/a.zip", good_digest),
-        try fakeAnswer(a, "v1.0.0", "http://github.com/square3ang/actuon/releases/download/v1.0.0/a.zip", good_digest),
-        try fakeAnswer(a, "v1.0.0", good_url, "md5:" ++ test_sha),
-        try fakeAnswer(a, "v1.0.0", good_url, "sha256:abc"),
-        try fakeAnswer(a, "v1.0.0", good_url, "sha256:zz" ++ test_sha[2..]),
-    };
+    const cases = [_][]const u8{ "not json", try fakeAnswer(a, "nightly", good_url, good_url ++ ".sig") };
     for (cases) |json| try std.testing.expectError(error.BadRelease, parseRelease(a, json, "0.1.0", "a.zip"));
 }
 
@@ -348,17 +415,22 @@ const TestServer = struct {
     }
 };
 
-fn sumOf(data: []const u8) [32]u8 {
-    var out: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(data, &out, .{});
-    return out;
+/// Signs `data` as asset `name` with the key a seed of `seed_byte` makes; the proof checks against seed 1.
+fn proofFor(data: []const u8, name: []const u8, seed_byte: u8) !Proof {
+    var sum: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(data, &sum, .{});
+    const message = try release_sig.message(std.testing.allocator, name, sum);
+    defer std.testing.allocator.free(message);
+    const signer = try Ed25519.KeyPair.generateDeterministic(@splat(seed_byte));
+    const trusted = try Ed25519.KeyPair.generateDeterministic(@splat(1));
+    return .{ .key = trusted.public_key.toBytes(), .signature = (try signer.sign(message, null)).toBytes(), .name = "v1.0.0/a.zip" };
 }
 
 fn tmpPath(a: std.mem.Allocator, tmp: *const std.testing.TmpDir, name: []const u8) ![]u8 {
     return std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, name });
 }
 
-test "a download that fails its checksum never replaces the game" {
+test "a download without a good signature never replaces the game" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -366,19 +438,26 @@ test "a download that fails its checksum never replaces the game" {
     defer tmp.cleanup();
     const target = try tmpPath(a, &tmp, "actuon.AppImage");
     try fs.write(std.testing.io, target, "old");
-
-    var bad: TestServer = .{ .server = undefined, .thread = undefined };
-    const bad_url = try bad.start("tampered");
     var progress: http.Progress = .{};
-    const refused = replaceFile(a, std.testing.io, bad_url, sumOf("new"), target, &progress);
-    bad.stop();
-    try std.testing.expectError(error.ChecksumMismatch, refused);
-    try std.testing.expectEqualStrings("old", try fs.readAlloc(a, std.testing.io, target, 16));
-    try std.testing.expect(!fs.exists(std.testing.io, try tmpPath(a, &tmp, "actuon.AppImage.update")));
+
+    const refusals = [_]struct { body: []const u8, proof: Proof }{
+        .{ .body = "tampered", .proof = try proofFor("new", "v1.0.0/a.zip", 1) },
+        .{ .body = "new", .proof = try proofFor("new", "v1.0.0/a.zip", 2) },
+        .{ .body = "new", .proof = try proofFor("new", "v0.9.0/a.zip", 1) },
+    };
+    for (refusals) |k| {
+        var bad: TestServer = .{ .server = undefined, .thread = undefined };
+        const bad_url = try bad.start(k.body);
+        const refused = replaceFile(a, std.testing.io, bad_url, k.proof, target, &progress);
+        bad.stop();
+        try std.testing.expectError(error.BadSignature, refused);
+        try std.testing.expectEqualStrings("old", try fs.readAlloc(a, std.testing.io, target, 16));
+        try std.testing.expect(!fs.exists(std.testing.io, try tmpPath(a, &tmp, "actuon.AppImage.update")));
+    }
 
     var good: TestServer = .{ .server = undefined, .thread = undefined };
     const good_url = try good.start("new");
-    const applied = replaceFile(a, std.testing.io, good_url, sumOf("new"), target, &progress);
+    const applied = replaceFile(a, std.testing.io, good_url, try proofFor("new", "v1.0.0/a.zip", 1), target, &progress);
     good.stop();
     try applied;
     try std.testing.expectEqualStrings("new", try fs.readAlloc(a, std.testing.io, target, 16));
@@ -431,7 +510,7 @@ test "a verified package replaces the folder, and the next launch clears what it
     var server: TestServer = .{ .server = undefined, .thread = undefined };
     const url = try server.start(zip);
     var progress: http.Progress = .{};
-    const applied = replaceFolder(a, std.testing.io, url, sumOf(zip), dir, &progress);
+    const applied = replacePackage(a, std.testing.io, url, try proofFor(zip, "v1.0.0/a.zip", 1), dir, windows_folder, swapFiles, dir, &progress);
     server.stop();
     try applied;
     try std.testing.expectEqualStrings("new", try fs.readAlloc(a, std.testing.io, exe, 16));
@@ -440,12 +519,16 @@ test "a verified package replaces the folder, and the next launch clears what it
     try std.testing.expectEqualStrings("old", try fs.readAlloc(a, std.testing.io, old, 16));
     try std.testing.expect(!fs.exists(std.testing.io, try std.fs.path.join(a, &.{ dir, staged_name })));
 
+    // As a download cut short leaves it.
+    const archive = try std.fs.path.join(a, &.{ dir, staged_name ++ ".zip" });
+    try fs.write(std.testing.io, archive, "part");
     try removeLeftovers(a, std.testing.io, dir);
     try std.testing.expect(!fs.exists(std.testing.io, old));
+    try std.testing.expect(!fs.exists(std.testing.io, archive));
     try std.testing.expectEqualStrings("mine", try fs.readAlloc(a, std.testing.io, save, 16));
 }
 
-test "a package with the wrong checksum or without the game changes nothing" {
+test "a package with a bad signature or without the game changes nothing" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -457,14 +540,14 @@ test "a package with the wrong checksum or without the game changes nothing" {
     try fs.write(std.testing.io, exe, "old");
     var progress: http.Progress = .{};
     const no_game = try zipBytes(a, &tmp, &.{windows_folder ++ "/evil.dll"});
-    const cases = [_]struct { zip: []const u8, sum: [32]u8, want: anyerror }{
-        .{ .zip = "tampered", .sum = sumOf("something else"), .want = error.ChecksumMismatch },
-        .{ .zip = no_game, .sum = sumOf(no_game), .want = error.BadPackage },
+    const cases = [_]struct { zip: []const u8, proof: Proof, want: anyerror }{
+        .{ .zip = "tampered", .proof = try proofFor("something else", "v1.0.0/a.zip", 1), .want = error.BadSignature },
+        .{ .zip = no_game, .proof = try proofFor(no_game, "v1.0.0/a.zip", 1), .want = error.BadPackage },
     };
     for (cases) |k| {
         var server: TestServer = .{ .server = undefined, .thread = undefined };
         const url = try server.start(k.zip);
-        const r = replaceFolder(a, std.testing.io, url, k.sum, dir, &progress);
+        const r = replacePackage(a, std.testing.io, url, k.proof, dir, windows_folder, swapFiles, dir, &progress);
         server.stop();
         try std.testing.expectError(k.want, r);
         try std.testing.expectEqualStrings("old", try fs.readAlloc(a, std.testing.io, exe, 16));
@@ -494,4 +577,73 @@ test "a swap that fails partway puts every file back" {
 
     try std.testing.expect(std.meta.isError(swapFiles(a, std.testing.io, from, to)));
     for (names) |n| try std.testing.expectEqualStrings("old", try fs.readAlloc(a, std.testing.io, try std.fs.path.join(a, &.{ to, n }), 16));
+}
+
+test "a signature must be 64 bytes, and it vouches for the tag and asset in the url" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const key: [32]u8 = @splat(7);
+    for ([_][]const u8{ &@as([63]u8, @splat(1)), &@as([65]u8, @splat(1)) }) |body| {
+        var server: TestServer = .{ .server = undefined, .thread = undefined };
+        const base = try a.dupe(u8, try server.start(body));
+        const r = fetchProof(std.testing.allocator, std.testing.io, base, try std.fmt.allocPrint(a, "{s}v1.0.0/a.zip", .{base}), key);
+        server.stop();
+        try std.testing.expectError(error.BadSignature, r);
+    }
+    var server: TestServer = .{ .server = undefined, .thread = undefined };
+    const base = try a.dupe(u8, try server.start(&@as([64]u8, @splat(2))));
+    const r = fetchProof(std.testing.allocator, std.testing.io, base, try std.fmt.allocPrint(a, "{s}v1.0.0/a.zip", .{base}), key);
+    server.stop();
+    const proof = try r;
+    try std.testing.expectEqualStrings("v1.0.0/a.zip", proof.name);
+    try std.testing.expectEqual(@as([64]u8, @splat(2)), proof.signature);
+    try std.testing.expectEqual(key, proof.key);
+}
+
+test "only a writable bundle is a target" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try fs.mkdirs(std.testing.io, try tmpPath(a, &tmp, "apps/x.app/Contents/Resources"));
+    try fs.mkdirs(std.testing.io, try tmpPath(a, &tmp, "bin/Contents/Resources"));
+    const bundle = bundleOf(std.testing.io, try tmpPath(a, &tmp, "apps/x.app/Contents/Resources/")).?;
+    try std.testing.expectEqualStrings(try tmpPath(a, &tmp, "apps/x.app"), bundle.app);
+    try std.testing.expectEqualStrings(try tmpPath(a, &tmp, "apps"), bundle.dir);
+    try std.testing.expectEqual(@as(?Bundle, null), bundleOf(std.testing.io, try tmpPath(a, &tmp, "bin/Contents/Resources/")));
+    // Root writes anywhere, and Windows ignores the mode.
+    if (builtin.os.tag == .windows or std.c.geteuid() == 0) return;
+    try tmp.dir.setFilePermissions(std.testing.io, "apps", .fromMode(0o555), .{});
+    defer tmp.dir.setFilePermissions(std.testing.io, "apps", .fromMode(0o755), .{}) catch {};
+    try std.testing.expectEqual(@as(?Bundle, null), bundleOf(std.testing.io, try tmpPath(a, &tmp, "apps/x.app/Contents/Resources/")));
+}
+
+test "a verified bundle swaps in whole, and the old one leaves with the staging folder" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmpPath(a, &tmp, "apps");
+    const app = try std.fs.path.join(a, &.{ dir, "renamed.app" });
+    try fs.mkdirs(std.testing.io, app);
+    try fs.write(std.testing.io, try std.fs.path.join(a, &.{ app, "old.txt" }), "old");
+    const zip = try zipBytes(a, &tmp, &.{ macos_bundle ++ "/" ++ macos_exe, macos_bundle ++ "/Contents/Info.plist" });
+
+    var server: TestServer = .{ .server = undefined, .thread = undefined };
+    const url = try server.start(zip);
+    var progress: http.Progress = .{};
+    const applied = replacePackage(a, std.testing.io, url, try proofFor(zip, "v1.0.0/a.zip", 1), dir, macos_bundle, swapBundle, app, &progress);
+    server.stop();
+    try applied;
+    const exe = try std.fs.path.join(a, &.{ app, macos_exe });
+    try std.testing.expectEqualStrings("new", try fs.readAlloc(a, std.testing.io, exe, 16));
+    try std.testing.expect(!fs.exists(std.testing.io, try std.fs.path.join(a, &.{ app, "old.txt" })));
+    try std.testing.expect(!fs.exists(std.testing.io, try std.fs.path.join(a, &.{ dir, staged_name })));
+    const file = try std.Io.Dir.cwd().openFile(std.testing.io, exe, .{});
+    defer file.close(std.testing.io);
+    try std.testing.expect((try file.stat(std.testing.io)).permissions.toMode() & 0o111 != 0);
 }

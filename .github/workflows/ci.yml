@@ -4,7 +4,8 @@ on:
     tags: ['*']
   workflow_dispatch:
 # Building naga takes minutes, longest on Windows, so each OS caches the binary under .naga.
-env: { NAGA_VERSION: 30.0.1 }
+# The public half of the release signing key; the packaging scripts build it in.
+env: { NAGA_VERSION: 30.0.1, ACTUON_UPDATE_KEY: "${{ vars.ACTUON_UPDATE_KEY }}" }
 jobs:
   linux:
     runs-on: ubuntu-latest
@@ -15,6 +16,9 @@ jobs:
       # A tag the binary does not report would offer the same update forever.
       - if: github.ref_type == 'tag'
         run: grep -qF ".version = \"${GITHUB_REF_NAME#v}\"" build.zig.zon
+      # A release built without the key could never update itself.
+      - if: github.ref_type == 'tag'
+        run: test -n "$ACTUON_UPDATE_KEY"
       - id: naga
         uses: actions/cache@v4
         with: { path: .naga, key: "naga-${{ env.NAGA_VERSION }}-${{ runner.os }}" }
@@ -68,7 +72,7 @@ jobs:
       - run: zig build test
       - run: packaging/macos/package.sh
       - uses: actions/upload-artifact@v4
-        with: { name: macos, path: zig-out/package/actuon.dmg, if-no-files-found: error }
+        with: { name: macos, path: "zig-out/package/actuon.dmg\nzig-out/package/actuon-macos.zip", if-no-files-found: error }
   windows:
     runs-on: windows-latest
     defaults: { run: { shell: 'msys2 {0}' } }
@@ -105,5 +109,6 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with: { path: assets, merge-multiple: true }
-      - run: gh release create "$GITHUB_REF_NAME" assets/* --repo "$GITHUB_REPOSITORY" --generate-notes
+      # A draft until the maintainer uploads the .sig files signed offline and publishes it.
+      - run: gh release create "$GITHUB_REF_NAME" assets/* --repo "$GITHUB_REPOSITORY" --generate-notes --draft
         env: { GH_TOKEN: "${{ github.token }}" }

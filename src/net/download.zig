@@ -54,10 +54,16 @@ fn extractWithin(a: std.mem.Allocator, io: std.Io, archive_path: []const u8, des
         const name = std.mem.span(raw);
         if (!safeEntry(name)) continue;
         const ty = c.archive_entry_filetype(entry);
-        if (ty != 0o100000) continue; // AE_IFREG: its macro does not translate
+        // AE_IFREG and AE_IFDIR: their macros do not translate.
+        if (ty != 0o100000 and ty != 0o040000) continue;
         const clean = try a.dupe(u8, name);
         std.mem.replaceScalar(u8, clean, '\\', '/');
         const out_path = try std.fs.path.join(a, &.{ dest, clean });
+        // An empty folder can still matter, such as a macOS bundle's Contents/Resources.
+        if (ty == 0o040000) {
+            try fs.mkdirs(io, out_path);
+            continue;
+        }
         if (std.fs.path.dirname(out_path)) |d| try fs.mkdirs(io, d);
         const file = try std.Io.Dir.cwd().createFile(io, out_path, .{});
         defer file.close(io);
@@ -252,7 +258,7 @@ test "extract keeps files and drops escapes and links" {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const al = arena.allocator();
-    // A tar built by hand: one good file, one traversal, one symlink.
+    // A tar built by hand: one good file, one traversal, one symlink, one empty folder.
     const tar_path = "actuon_test.tar";
     const dest = "actuon_test_out";
     defer fs.remove(io, tar_path);
@@ -278,6 +284,7 @@ test "extract keeps files and drops escapes and links" {
     try add(&tar, al, "song/good.bms", '0', "#TITLE ok\n");
     try add(&tar, al, "../evil.bms", '0', "bad");
     try add(&tar, al, "link", '2', "");
+    try add(&tar, al, "song/empty/", '5', "");
     try tar.appendNTimes(al, 0, 1024);
     try fs.write(io, tar_path, tar.items);
     const limited = dest ++ "_limits";
@@ -294,5 +301,6 @@ test "extract keeps files and drops escapes and links" {
     try std.testing.expect(fs.exists(io, dest ++ "/song/good.bms"));
     try std.testing.expect(!fs.exists(io, "evil.bms"));
     try std.testing.expect(!fs.exists(io, dest ++ "/link"));
+    try std.testing.expect(fs.stat(io, dest ++ "/song/empty").?.is_dir);
     try std.Io.Dir.cwd().deleteTree(io, dest);
 }
