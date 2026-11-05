@@ -39,6 +39,38 @@ pub const Pending = struct {
     record: bool,
 };
 
+/// The chart's own images decode beside loading and decide, which don't wait for them; the upload stays on the main thread.
+const ChartImages = struct {
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    /// Only the decode thread allocates from it until it is done.
+    arena: std.heap.ArenaAllocator,
+    dir: []const u8 = "",
+    /// Stagefile, backbmp, banner.
+    names: [3][]const u8 = @splat(""),
+    px: [3]?[*]u8 = @splat(null),
+    w: [3]c_int = @splat(0),
+    h: [3]c_int = @splat(0),
+    thread: ?*c.SDL_Thread = null,
+    done: std.atomic.Value(bool) = .init(false),
+    cancel: std.atomic.Value(bool) = .init(false),
+
+    fn run(ud: ?*anyopaque) callconv(.c) c_int {
+        const j: *ChartImages = @ptrCast(@alignCast(ud));
+        defer j.done.store(true, .release);
+        for (j.names, &j.px, &j.w, &j.h) |name, *px, *w, *h| {
+            if (name.len == 0 or j.cancel.load(.acquire)) continue;
+            const path = (fs.resolveAsset(j.arena.allocator(), j.io, j.dir, name, &.{ "png", "jpg", "jpeg", "bmp", "gif", "tga" }) catch null) orelse continue;
+            const bytes = fs.readAlloc(j.gpa, j.io, path, 1 << 26) catch continue;
+            defer j.gpa.free(bytes);
+            if (!gfx.imageFits(bytes, gfx.max_chart_image_px)) continue;
+            var n: c_int = 0;
+            px.* = c.stbi_load_from_memory(bytes.ptr, @intCast(bytes.len), w, h, &n, 4);
+        }
+        return 0;
+    }
+};
+
 pub const App = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -124,13 +156,7 @@ pub const App = struct {
     select_seen: u64 = 0,
     select_row: usize = 0,
     kept: std.heap.ArenaAllocator = undefined,
-    /// The banner decode runs beside decide, which doesn't wait for it.
-    stagefile_thread: ?*c.SDL_Thread = null,
-    stagefile_path: []const u8 = "",
-    stagefile_px: ?[*]u8 = null,
-    stagefile_w: c_int = 0,
-    stagefile_h: c_int = 0,
-    stagefile_done: std.atomic.Value(bool) = .init(false),
+    chart_images: ?*ChartImages = null,
     want_decide: bool = false,
     decide_at: u64 = 0,
     decide_fade_at: u64 = 0,
@@ -153,9 +179,13 @@ pub const App = struct {
 
     pub fn startText(a: *App, initial: []const u8) void {
         a.text.clearRetainingCapacity();
-        a.text.appendSlice(a.gpa, initial) catch {};
+        a.typeText(initial);
         a.text_active = true;
         _ = c.SDL_StartTextInput(a.g.win);
+    }
+
+    fn typeText(a: *App, s: []const u8) void {
+        a.text.appendSlice(a.gpa, s) catch |e| std.log.warn("typed text dropped: {t}", .{e});
     }
 
     pub fn stopText(a: *App) void {
@@ -326,6 +356,7 @@ pub const App = struct {
         a.load_done.store(false, .release);
         a.load_err = false;
         a.load_parsed.ready.store(false, .release);
+        a.load_parsed.cancel.store(false, .release);
         a.load_skin_at = 0;
         a.load_at = c.SDL_GetTicks();
         a.want_decide = false;
@@ -333,7 +364,7 @@ pub const App = struct {
         a.decide_fade_at = 0;
         a.decide_cancel = false;
         // Held until now: the skin draws the chart's images through play and the result.
-        a.dropStagefile();
+        a.dropChartImages();
         a.skin_state = .{};
         a.scene = .loading;
         a.load_thread = c.SDL_CreateThread(loadThread, "loader", a);
@@ -352,6 +383,16 @@ pub const App = struct {
         };
         a.load_done.store(true, .release);
         return 0;
+    }
+
+    /// A load backed out of runs on until its decode sees the cancel, so it is collected once done.
+    fn reapCanceledLoad(a: *App) void {
+        const t = a.load_thread orelse return;
+        if (!a.load_parsed.cancel.load(.acquire) or !a.load_done.load(.acquire)) return;
+        c.SDL_WaitThread(t, null);
+        a.load_thread = null;
+        if (a.load_result) |s| s.destroy();
+        a.load_result = null;
     }
 
     pub fn startPreview(a: *App, file: []const u8, measure: i32) void {
@@ -433,52 +474,39 @@ pub const App = struct {
             a.startDecideBgm();
         }
         if (a.play_skin == null and !show_decide) return;
-        a.loadChartImages(ch);
-        if (ch.stagefile.len == 0) return;
-        var tmp = std.heap.ArenaAllocator.init(a.gpa);
-        defer tmp.deinit();
-        const al = tmp.allocator();
-        const dir = std.fs.path.dirname(a.load_params.path) orelse ".";
-        const path = (fs.resolveAsset(al, a.io, dir, ch.stagefile, &.{ "png", "jpg", "jpeg", "bmp", "gif", "tga" }) catch null) orelse return;
-        a.stagefile_path = a.gpa.dupe(u8, path) catch return;
-        a.stagefile_done.store(false, .release);
-        a.stagefile_thread = c.SDL_CreateThread(stagefileThread, "stagefile", a);
+        a.startChartImages(ch) catch |e| std.log.warn("chart images not shown: {t}", .{e});
     }
 
-    /// shortcut: read on the main thread under the loading screen, one short hitch; share the stagefile's thread if it shows.
-    fn loadChartImages(a: *App, ch: *const core.types.Chart) void {
-        var tmp = std.heap.ArenaAllocator.init(a.gpa);
-        defer tmp.deinit();
-        const al = tmp.allocator();
-        const dir = std.fs.path.dirname(a.load_params.path) orelse ".";
-        for ([_]struct { []const u8, *?*gfx.Texture }{ .{ ch.backbmp, &a.skin_state.backbmp }, .{ ch.banner, &a.skin_state.banner } }) |img| {
-            if (img[0].len == 0) continue;
-            const path = (fs.resolveAsset(al, a.io, dir, img[0], &.{ "png", "jpg", "jpeg", "bmp", "gif", "tga" }) catch null) orelse continue;
-            const bytes = fs.readAlloc(al, a.io, path, 1 << 26) catch continue;
-            if (!gfx.imageFits(bytes, gfx.max_chart_image_px)) continue;
-            img[1].* = gfx.loadTexture(&a.g, path, bytes);
-        }
+    fn startChartImages(a: *App, ch: *const core.types.Chart) !void {
+        const j = try a.gpa.create(ChartImages);
+        errdefer a.gpa.destroy(j);
+        j.* = .{ .gpa = a.gpa, .io = a.io, .arena = .init(a.gpa) };
+        errdefer j.arena.deinit();
+        const al = j.arena.allocator();
+        j.dir = try al.dupe(u8, std.fs.path.dirname(a.load_params.path) orelse ".");
+        for ([_][]const u8{ ch.stagefile, ch.backbmp, ch.banner }, &j.names) |name, *out| out.* = try al.dupe(u8, name);
+        j.thread = c.SDL_CreateThread(ChartImages.run, "chart images", j);
+        if (j.thread == null) _ = ChartImages.run(j);
+        a.chart_images = j;
     }
 
-    fn stagefileThread(ud: ?*anyopaque) callconv(.c) c_int {
-        const a: *App = @ptrCast(@alignCast(ud));
-        defer a.stagefile_done.store(true, .release);
-        const bytes = fs.readAlloc(a.gpa, a.io, a.stagefile_path, 1 << 26) catch return 0;
-        defer a.gpa.free(bytes);
-        if (!gfx.imageFits(bytes, gfx.max_chart_image_px)) return 0;
-        var n: c_int = 0;
-        a.stagefile_px = c.stbi_load_from_memory(bytes.ptr, @intCast(bytes.len), &a.stagefile_w, &a.stagefile_h, &n, 4);
-        return 0;
+    /// In `ChartImages.names` order.
+    fn chartImageSlots(a: *App) [3]*?*gfx.Texture {
+        return .{ &a.skin_state.stagefile, &a.skin_state.backbmp, &a.skin_state.banner };
     }
 
-    fn finishStagefile(a: *App, show: bool) void {
-        c.SDL_WaitThread(a.stagefile_thread, null);
-        a.stagefile_thread = null;
-        a.gpa.free(a.stagefile_path);
-        const px = a.stagefile_px orelse return;
-        a.stagefile_px = null;
-        defer c.stbi_image_free(px);
-        if (show) a.skin_state.stagefile = a.g.textureFromPixels(px, a.stagefile_w, a.stagefile_h, @intCast(a.stagefile_w * 4));
+    fn finishChartImages(a: *App, show: bool) void {
+        const j = a.chart_images orelse return;
+        a.chart_images = null;
+        // Images nobody will see are skipped, so backing out waits on one decode at most.
+        if (!show) j.cancel.store(true, .release);
+        c.SDL_WaitThread(j.thread, null);
+        for (j.px, j.w, j.h, a.chartImageSlots()) |px, w, h, slot| if (px) |p| {
+            if (show) slot.* = gfx.textureFitted(&a.g, p, w, h);
+            c.stbi_image_free(p);
+        };
+        j.arena.deinit();
+        a.gpa.destroy(j);
     }
 
     fn decideLeave(a: *App, cancel: bool) void {
@@ -506,13 +534,8 @@ pub const App = struct {
             return true;
         }
         if (a.decide_cancel) {
-            // shortcut: backing out waits for the decode on a black screen, until the loader can be aborted.
-            if (!a.load_done.load(.acquire)) return true;
-            c.SDL_WaitThread(a.load_thread, null);
-            a.load_thread = null;
-            if (a.load_result) |s| s.destroy();
-            a.load_result = null;
-            a.dropStagefile();
+            a.load_parsed.cancel.store(true, .release);
+            a.dropChartImages();
             a.decide_at = 0;
             a.scene = .select;
             return true;
@@ -529,7 +552,7 @@ pub const App = struct {
         const frac: f32 = if (t > 0) @min(@as(f32, @floatFromInt(a.load_progress.load(.acquire))) / @as(f32, @floatFromInt(t)), 1) else 0;
         const finished = a.load_done.load(.acquire);
         if (a.load_skin_at == 0 and a.load_parsed.ready.load(.acquire) and (!finished or a.load_result != null)) a.startLoadingSkin();
-        if (a.stagefile_thread != null and a.stagefile_done.load(.acquire)) a.finishStagefile(true);
+        if (a.chart_images) |j| if (j.done.load(.acquire)) a.finishChartImages(true);
         if (a.decide_at != 0 and a.tickDecide()) return;
         const elapsed: i64 = @intCast(c.SDL_GetTicks() - a.load_at);
         if (a.load_skin_at != 0 and a.play_skin != null and !a.play_skin.?.plain_loading) {
@@ -563,7 +586,7 @@ pub const App = struct {
                 r.arena.deinit();
                 a.course = null;
             }
-            a.dropStagefile();
+            a.dropChartImages();
             return;
         };
         a.load_result = null;
@@ -592,6 +615,8 @@ pub const App = struct {
         if (a.load_skin_at != 0 and a.play_skin != null) a.skin_state.load_ms = elapsed;
         a.skin_state.fromSession(s, &a.cfg);
         if (a.load_skin_at == 0) a.reloadSkins(s.chart.mode);
+        // Play and the result draw these too, and nothing polls the job after this.
+        a.finishChartImages(true);
         a.scene = .play;
         // As beatoraja, the load's end is heard; a preview jumping in partway stays quiet.
         if (a.load_params.start_us == 0) if (a.sfx_play_ready) |e| if (e.ready.load(.acquire) and e.data.len > 0) {
@@ -601,11 +626,9 @@ pub const App = struct {
         s.start(versus.lateUs(&a.versus, c.SDL_GetTicks()));
     }
 
-    fn dropStagefile(a: *App) void {
-        if (a.stagefile_thread != null) a.finishStagefile(false);
-        if (a.skin_state.stagefile) |tex| a.g.destroyTexture(tex);
-        a.skin_state.stagefile = null;
-        for ([_]*?*gfx.Texture{ &a.skin_state.backbmp, &a.skin_state.banner }) |img| {
+    fn dropChartImages(a: *App) void {
+        a.finishChartImages(false);
+        for (a.chartImageSlots()) |img| {
             if (img.*) |tex| a.g.destroyTexture(tex);
             img.* = null;
         }
@@ -878,7 +901,7 @@ pub const App = struct {
                         settings.captured(a, @intCast(ev.key.scancode));
                     } else a.sdlKey(ev.key.scancode, ev.key.timestamp, down, ev.key.repeat);
                 },
-                c.SDL_EVENT_TEXT_INPUT => if (a.text_active) a.text.appendSlice(a.gpa, std.mem.span(ev.text.text)) catch {},
+                c.SDL_EVENT_TEXT_INPUT => if (a.text_active) a.typeText(std.mem.span(ev.text.text)),
                 c.SDL_EVENT_MOUSE_MOTION => {
                     a.g.mx = ev.motion.x * a.g.pixelDensity();
                     a.g.my = ev.motion.y * a.g.pixelDensity();
@@ -1017,6 +1040,7 @@ pub const App = struct {
                 a.pump();
             }
             a.tickBgm();
+            a.reapCanceledLoad();
             a.pollEditor();
             settings.pollUpdate(a);
             a.g.beginFrame();
@@ -1243,10 +1267,11 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, opts: Options) !void {
     var hb = std.heap.ArenaAllocator.init(gpa);
     defer hb.deinit();
     editor.clearHeartbeat(hb.allocator(), io);
+    app.load_parsed.cancel.store(true, .release);
     if (app.load_thread) |t| c.SDL_WaitThread(t, null);
     // Quit during decide or loading: nothing took what the loader made.
     if (app.load_result) |loaded| loaded.destroy();
-    app.dropStagefile();
+    app.dropChartImages();
 }
 
 test "a chart image claiming to be huge is refused before decoding" {
@@ -1263,4 +1288,27 @@ test "a chart image claiming to be huge is refused before decoding" {
     tga[15] = 0;
     try std.testing.expect(gfx.imageFits(&tga, gfx.max_chart_image_px));
     try std.testing.expect(!gfx.imageFits("not an image", gfx.max_chart_image_px));
+}
+
+test "a canceled chart image job decodes nothing more" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [128]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var tga: [19]u8 = @splat(0);
+    tga[2] = 3;
+    tga[12] = 1;
+    tga[14] = 1;
+    tga[16] = 8;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.tga", .data = &tga });
+    for ([_]bool{ false, true }) |cancel| {
+        var j: ChartImages = .{ .gpa = gpa, .io = std.testing.io, .arena = .init(gpa), .dir = dir };
+        defer j.arena.deinit();
+        j.names[0] = "a.tga";
+        j.cancel.store(cancel, .release);
+        _ = ChartImages.run(&j);
+        try std.testing.expectEqual(cancel, j.px[0] == null);
+        if (j.px[0]) |p| c.stbi_image_free(p);
+    }
 }

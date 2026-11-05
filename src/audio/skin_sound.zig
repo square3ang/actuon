@@ -69,7 +69,7 @@ pub const Entry = struct {
         defer e.ready.store(true, .release);
         const bytes = fs.readAlloc(e.gpa, e.io, e.path, 1 << 28) catch return;
         defer e.gpa.free(bytes);
-        e.data = (decode.decode(e.gpa, bytes, e.path, e.rate) catch return).data;
+        e.data = (decode.decode(e.gpa, bytes, e.path, e.rate, null) catch return).data;
     }
 };
 
