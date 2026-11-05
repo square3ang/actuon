@@ -62,6 +62,8 @@ pub const State = struct {
     // A running scan may already have passed files added since it started.
     scan_again: bool = false,
     last_scan_ms: u64 = 0,
+    /// Only the scan thread touches it.
+    scan_watch: ?db_mod.Watch = null,
     download: ?*download.Job = null,
     download_buf: [64]u8 = undefined,
     download_seen: u64 = 0,
@@ -136,6 +138,7 @@ pub fn deinit(a: *App) void {
     dropBoard(a);
     if (s.replay_arena) |*r| r.deinit();
     if (s.scan_thread) |t| c.SDL_WaitThread(t, null);
+    if (s.scan_watch) |*w| w.deinit();
     if (s.table_thread) |t| c.SDL_WaitThread(t, null);
     if (s.jacket_job) |j| j.destroy();
     if (s.jacket) |t| a.g.destroyTexture(t);
@@ -155,7 +158,8 @@ fn scanThread(ud: ?*anyopaque) callconv(.c) c_int {
     defer a.sel.scan_done.store(true, .release);
     const d = db_mod.openMain(a.gpa) catch return 1;
     defer d.close();
-    a.sel.stats = db_mod.scan(a.gpa, a.io, d, a.cfg.roots, &a.sel.scan_progress) catch |e| {
+    if (a.sel.scan_watch == null) a.sel.scan_watch = .init(a.gpa);
+    a.sel.stats = db_mod.scan(a.gpa, a.io, d, a.cfg.roots, &a.sel.scan_progress, &a.sel.scan_watch.?) catch |e| {
         std.log.err("scan failed: {t}", .{e});
         return 1;
     };

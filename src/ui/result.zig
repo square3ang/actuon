@@ -87,15 +87,17 @@ pub fn dropBoard(a: *App) void {
 }
 
 /// A score and its replay land together, or the IR would be asked to verify a score with nothing behind it.
-fn saveLocal(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, bytes: []const u8) !void {
+fn saveLocal(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, bytes: ?[]const u8) !void {
     const r = &a.res;
     const ln_mode = @backingInt(s.params.rec.ln_mode);
     try a.db.exec("BEGIN IMMEDIATE");
+    // As asked, not as played: the list files a #RANDOM chart by its scanned branch.
+    const mode = try db_mod.scoreMode(a.db, &s.chart.sha256, @backingInt(a.load_params.rec.ln_mode));
     {
-        const look = try a.db.prepare("SELECT ex, clear FROM score WHERE sha256=?1 AND mode=?2");
+        const look = try a.db.prepare("SELECT ex, MAX(clear,assist) FROM score WHERE sha256=?1 AND mode=?2");
         defer look.deinit();
         look.bindText(1, &s.chart.sha256);
-        look.bindInt(2, ln_mode);
+        look.bindInt(2, mode);
         if (try look.step()) {
             r.prev_ex = @intCast(look.int(0));
             r.prev_clear = @intCast(look.int(1));
@@ -106,9 +108,9 @@ fn saveLocal(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, bytes
     var counts: [6]u32 = undefined;
     for (&counts, sc.counts) |*d, v| d.* = v[0] + v[1];
     const date = wallClock();
-    try db_mod.recordScore(a.db, .{
+    var score: db_mod.ScoreIn = .{
         .sha256 = &s.chart.sha256,
-        .mode = ln_mode,
+        .mode = mode,
         .clear = @backingInt(r.clear),
         .ex = sc.exScore(),
         .counts = counts,
@@ -116,19 +118,22 @@ fn saveLocal(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, bytes
         .miss = sc.missCount() + (s.chart.total_notes -| sc.passed),
         .cleared = @intFromBool(cleared),
         .date = date,
-    });
-    {
+    };
+    // An assisted play keeps its lamp alone; min_bp's own "no play" value lets the MIN keep the best.
+    if (bytes == null) score = .{ .sha256 = &s.chart.sha256, .mode = mode, .clear = 0, .assist = @backingInt(r.clear), .ex = 0, .counts = @splat(0), .max_combo = 0, .miss = std.math.maxInt(i32), .cleared = @intFromBool(cleared), .date = date };
+    try db_mod.recordScore(a.db, score);
+    if (bytes) |data| {
         const ins = try a.db.prepare("INSERT INTO replay(sha256,date,ex,clear,data,ln_mode) VALUES(?1,?2,?3,?4,?5,?6)");
         defer ins.deinit();
         ins.bindText(1, &s.chart.sha256);
         ins.bindInt(2, date);
         ins.bindInt(3, sc.exScore());
         ins.bindInt(4, @backingInt(r.clear));
-        ins.bindBlob(5, bytes);
+        ins.bindBlob(5, data);
         ins.bindInt(6, ln_mode);
         _ = try ins.step();
+        try db_mod.pruneReplays(a.db, &s.chart.sha256, ln_mode);
     }
-    try db_mod.pruneReplays(a.db, &s.chart.sha256, ln_mode);
     try a.db.exec("COMMIT");
     r.recorded = true;
 }
@@ -164,15 +169,14 @@ pub fn capture(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, nat
     r.skin_fresh = false;
     r.music_slot = a.sfx_slot;
     a.sfx(if (r.clear == .failed) .fail else .clear);
-    // shortcut: an assisted play keeps no lamp or replay, as a replay cannot carry assists; record them if players want assist lamps.
-    if (!a.record or s.was_paused or r.assisted) return;
+    if (!a.record or s.was_paused) return;
 
-    const bytes = s.replayBytes() catch |e| {
+    const bytes: ?[]u8 = if (r.assisted) null else s.replayBytes() catch |e| {
         std.log.err("replay encoding failed: {t}", .{e});
         r.save_failed = true;
         return;
     };
-    defer s.gpa.free(bytes);
+    defer if (bytes) |b| s.gpa.free(b);
     saveLocal(a, s, snap, bytes) catch |e| {
         std.log.err("score save failed: {t}", .{e});
         a.db.exec("ROLLBACK") catch {};
@@ -180,9 +184,11 @@ pub fn capture(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, nat
         r.save_failed = true;
         return;
     };
+    // An assisted play has no replay, so it never reaches the IR.
+    const replay = bytes orelse return;
     // A play left early would rank on the server as if it had reached the end. The server ranks LN plays only.
     if (natural and s.params.rec.ln_mode == .ln and a.cfg.ir_url.len > 0 and a.cfg.ir_token.len > 0 and
-        irSends(a.cfg.ir_send_failed, r.clear, a.versus.in_round)) r.board = ir.startUpload(a.gpa, a.io, a.cfg.ir_url, a.cfg.ir_token, &s.chart.sha256, s.params.path, bytes, if (a.versus.in_round) &a.versus.view.code else "");
+        irSends(a.cfg.ir_send_failed, r.clear, a.versus.in_round)) r.board = ir.startUpload(a.gpa, a.io, a.cfg.ir_url, a.cfg.ir_token, &s.chart.sha256, s.params.path, replay, if (a.versus.in_round) &a.versus.view.code else "");
     r.ir_used = r.board != null;
 }
 
@@ -285,14 +291,14 @@ fn drawExPanel(a: *App, ease: f32, ex: u32) void {
     const shown_ex: u64 = @intFromFloat(@as(f32, @floatFromInt(ex)) * ease);
     g.digits(g.w * 0.48 - 30 * u, 527 * u, g.scaled(48), 5, shown_ex, gfx.white);
     g.fmt(44 * u, 536 * u, g.scaled(24), gfx.cyan, "{d:.2}%", .{rate});
-    if (r.recorded) {
+    if (r.recorded and r.assisted) {
+        _ = g.text(tr("ASSIST: LAMP ONLY"), 44 * u, 574 * u, g.scaled(14), gfx.amber);
+    } else if (r.recorded) {
         const delta = @as(i64, ex) - @as(i64, r.prev_ex);
         const mag: u64 = @intCast(if (delta >= 0) delta else -delta);
         g.fmt(44 * u, 574 * u, g.scaled(14), if (delta >= 0) gfx.cyan else gfx.dim, "BEST {d}  {s}{d}", .{ r.prev_ex, if (delta >= 0) "+" else "-", mag });
     } else if (r.paused) {
         _ = g.text(tr("NOT RECORDED: PAUSED"), 44 * u, 574 * u, g.scaled(14), gfx.amber);
-    } else if (r.assisted) {
-        _ = g.text(tr("NOT RECORDED: ASSIST"), 44 * u, 574 * u, g.scaled(14), gfx.amber);
     } else if (r.save_failed) {
         _ = g.text(tr("NOT RECORDED: SAVE FAILED"), 44 * u, 574 * u, g.scaled(14), gfx.amber);
     } else _ = g.text(tr("NOT RECORDED"), 44 * u, 574 * u, g.scaled(14), gfx.dim);
@@ -437,7 +443,7 @@ test "a failed play stays off the IR when asked, except in versus" {
     try std.testing.expect(irSends(false, .failed, true));
 }
 
-test "an assisted clear gets an assist lamp and saves nothing" {
+test "an assisted clear keeps its assist lamp apart, with no score or replay" {
     const a = try testing.open();
     defer testing.close(a);
     const gpa = std.testing.allocator;
@@ -454,10 +460,13 @@ test "an assisted clear gets an assist lamp and saves nothing" {
     s.sim.advance(s.chart.last_note_us + 1_000_000);
     capture(a, &s, .{}, true);
     try std.testing.expectEqual(core.types.Clear.assist_easy, a.res.clear);
-    const rows = try a.db.prepare("SELECT (SELECT COUNT(*) FROM score) + (SELECT COUNT(*) FROM replay)");
+    try std.testing.expect(a.res.recorded);
+    try std.testing.expect(a.res.board == null);
+    const rows = try a.db.prepare("SELECT clear, assist, ex, playcount, (SELECT COUNT(*) FROM replay) FROM score");
     defer rows.deinit();
     try std.testing.expect(try rows.step());
-    try std.testing.expectEqual(@as(i64, 0), rows.int(0));
+    const want = [_]i64{ 0, @backingInt(core.types.Clear.assist_easy), 0, 1, 0 };
+    for (want, 0..) |v, i| try std.testing.expectEqual(v, rows.int(@intCast(i)));
 }
 
 test "leaving waits for a skin's fade and a built-in screen goes at once" {

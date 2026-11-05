@@ -77,7 +77,7 @@ Packaging scripts for each OS are in [`packaging/`](packaging). To release, set 
 | --- | --- |
 | <kbd>F4</kbd> <kbd>F5</kbd> | Sort, autoplay |
 | <kbd>F6</kbd> <kbd>F7</kbd> <kbd>F8</kbd> | Search, rescan, update difficulty tables |
-| <kbd>F9</kbd> <kbd>F10</kbd> | IR ranking and rivals, settings. Random, gauge and its auto shift, HS fix, LN mode, judge algorithm, score target and the assists are under Settings, Play and Assist (CN and HCN plays have their own scores and replays, and stay off the IR; an assisted play is not saved) |
+| <kbd>F9</kbd> <kbd>F10</kbd> | IR ranking and rivals, settings. Random, gauge and its auto shift, HS fix, LN mode, judge algorithm, score target and the assists are under Settings, Play and Assist (CN and HCN plays have their own scores and replays, and stay off the IR; an assisted play keeps only an assist lamp, which stays off the IR) |
 | <kbd>1</kbd> <kbd>2</kbd> | Key mode filter, sort |
 | <kbd>4</kbd> <kbd>R</kbd> | Replay slot, play that replay |
 | <kbd>F</kbd> <kbd>P</kbd> | Favorite the chart, practice a section of the chart |
