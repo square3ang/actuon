@@ -42,6 +42,10 @@ pub const Score = struct {
     pub fn missCount(s: *const Score) u32 {
         return s.count(.bd) + s.count(.pr) + s.count(.ms);
     }
+    /// A failed play stops judging, so the notes it never reached count as BP too, as beatoraja does.
+    pub fn bp(s: *const Score, total_notes: u32) u32 {
+        return s.missCount() + (total_notes -| s.passed);
+    }
 };
 
 const LaneState = struct {

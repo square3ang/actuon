@@ -215,7 +215,8 @@ pub fn initSchema(d: Db) !void {
     try migrateLnModes(d);
     if (!try hasColumn(d, "score", "assist")) try d.exec("ALTER TABLE score ADD COLUMN assist INTEGER DEFAULT 0");
     // Older replays get the "no play" combo and BP, so IR sync never sends one for an improvement it cannot know.
-    if (!try hasColumn(d, "replay", "max_combo")) try d.exec("ALTER TABLE replay ADD COLUMN max_combo INTEGER NOT NULL DEFAULT 0; ALTER TABLE replay ADD COLUMN miss INTEGER NOT NULL DEFAULT 2147483647");
+    if (!try hasColumn(d, "replay", "max_combo")) try d.exec("ALTER TABLE replay ADD COLUMN max_combo INTEGER NOT NULL DEFAULT 0");
+    if (!try hasColumn(d, "replay", "miss")) try d.exec("ALTER TABLE replay ADD COLUMN miss INTEGER NOT NULL DEFAULT 2147483647");
     try labelReplayModes(d);
     try dropUnusedColumns(d);
 }
@@ -1072,6 +1073,14 @@ test "an old database's replays keep the LN mode written inside them" {
         try std.testing.expectEqual(@as(i64, 0), st.int(1));
         try std.testing.expectEqual(@as(i64, std.math.maxInt(i32)), st.int(2));
     }
+}
+
+test "a replay table that got only its combo column still gets its BP column" {
+    const d = try Db.open(":memory:", std.testing.allocator, false);
+    defer d.close();
+    try d.exec("CREATE TABLE replay(id INTEGER PRIMARY KEY, sha256 TEXT, date INTEGER, ex INTEGER, clear INTEGER, data BLOB, ln_mode INTEGER NOT NULL DEFAULT 0, max_combo INTEGER NOT NULL DEFAULT 0)");
+    try initSchema(d);
+    try std.testing.expect(try hasColumn(d, "replay", "miss"));
 }
 
 test "a database a beta already migrated gets its replays relabelled, once" {

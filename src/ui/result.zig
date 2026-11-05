@@ -115,7 +115,7 @@ fn saveLocal(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, bytes
         .ex = sc.exScore(),
         .counts = counts,
         .max_combo = sc.max_combo,
-        .miss = sc.missCount() + (s.chart.total_notes -| sc.passed),
+        .miss = sc.bp(s.chart.total_notes),
         .cleared = @intFromBool(cleared),
         .date = date,
     };

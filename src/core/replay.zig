@@ -178,7 +178,7 @@ pub fn summarize(s: *const sim_mod.Sim, total: u32) Result {
         .gauge_type = @backingInt(s.gauge_type),
         .ex_score = s.score.exScore(),
         .max_combo = s.score.max_combo,
-        .miss = s.score.missCount(),
+        .miss = s.score.bp(total),
         .total_notes = total,
         .gauge_value = s.gauge().value,
     };
@@ -236,6 +236,19 @@ test "round trip and resimulate" {
     try std.testing.expect(res.ok);
     try std.testing.expectEqual(@as(u32, 3 * 2 + 1), res.ex_score); // 0,7,14 ms PG; 21 ms at NORMAL=GR
     try std.testing.expectError(error.Truncated, decode(arena.allocator(), bytes[0 .. bytes.len - 1]));
+}
+
+test "a failed replay counts the notes it never reached as BP" {
+    const parser = @import("../bms/parser.zig");
+    const gpa = std.testing.allocator;
+    const bar = "0101010101010101010101010101010101010101010101010101010101010101\n";
+    var c = try parser.parse(gpa, "#BPM 120\n#WAV01 a.wav\n#00111:" ++ bar ++ "#00211:" ++ bar ++ "#00311:" ++ bar, .{});
+    defer c.deinit();
+    const res = try resimulate(gpa, &c, .{ .gauge = .hard });
+    var judged: u32 = 0;
+    for (res.counts) |n| judged += n;
+    try std.testing.expect(judged < c.total_notes);
+    try std.testing.expectEqual(c.total_notes, res.miss);
 }
 
 test "the LN mode survives the round trip and a bad one is rejected" {

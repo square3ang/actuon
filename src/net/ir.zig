@@ -605,7 +605,10 @@ fn pendingReplays(a: std.mem.Allocator, d: db_mod.Db, mine: []const MyScore) ![]
 fn pendingClaims(a: std.mem.Allocator, d: db_mod.Db, mine: []const MyScore) ![]MyScore {
     var best: std.StringHashMapUnmanaged(Best) = .empty;
     for (mine) |s| {
-        _ = try raise(a, &best, s.sha256, .of(s));
+        var b: Best = .of(s);
+        // The ranking hides a claim behind a verified score, so only a new EX or lamp is worth a slot of the claim limit there.
+        if (s.verified) b = .{ .ex = s.ex, .clear = s.clear, .max_combo = std.math.maxInt(u32), .miss = 0 };
+        _ = try raise(a, &best, s.sha256, b);
     }
     const st = try d.prepare("SELECT sha256,ex,clear,min_bp,max_combo,date FROM score WHERE mode=0 AND (ex>0 OR clear>0)");
     defer st.deinit();
@@ -1032,14 +1035,21 @@ test "a score that only improves combo or BP is sent" {
     const sha: [64]u8 = @splat('a');
     try d.exec("INSERT INTO replay(id,sha256,ex,clear,max_combo,miss) VALUES" ++
         "(1,'" ++ sha ++ "',90,4,60,9),(2,'" ++ sha ++ "',80,4,55,9),(3,'" ++ sha ++ "',70,4,10,3),(4,'" ++ sha ++ "',60,4,10,4)");
+    const claimed: [64]u8 = @splat('b');
     try db_mod.recordScore(d, .{ .sha256 = &sha, .clear = 4, .ex = 90, .counts = @splat(0), .max_combo = 9, .miss = 2, .date = 7 });
-    const mine = [_]MyScore{.{ .sha256 = &sha, .ex = 100, .clear = 4, .miss = 5, .max_combo = 50, .date = 0 }};
+    try db_mod.recordScore(d, .{ .sha256 = &claimed, .clear = 4, .ex = 90, .counts = @splat(0), .max_combo = 9, .miss = 2, .date = 7 });
+    const mine = [_]MyScore{
+        .{ .sha256 = &sha, .ex = 100, .clear = 4, .miss = 5, .max_combo = 50, .date = 0 },
+        .{ .sha256 = &claimed, .ex = 100, .clear = 4, .miss = 5, .max_combo = 50, .date = 0, .verified = false },
+    };
     const p = try pendingReplays(arena.allocator(), d, &mine);
     try std.testing.expectEqual(@as(usize, 2), p.len);
     try std.testing.expectEqual(@as(i64, 1), p[0].id); // more combo
     try std.testing.expectEqual(@as(i64, 3), p[1].id); // fewer BP
+    // A verified score hides any claim, so only the claimed chart's fewer BP goes up.
     const claims = try pendingClaims(arena.allocator(), d, &mine);
     try std.testing.expectEqual(@as(usize, 1), claims.len);
+    try std.testing.expectEqualStrings(&claimed, claims[0].sha256);
     try std.testing.expectEqual(@as(u32, 2), claims[0].miss);
 }
 
