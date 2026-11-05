@@ -271,8 +271,11 @@ pub const Gfx = struct {
     white: *Texture = undefined,
     batch: Batch = .{},
     state: State = .{},
-    /// Textures released once the frame that may draw them is sent.
+    /// Textures released once the frame that may draw them is sent. Room for every live texture is kept, so freeing never fails.
     dead: std.ArrayList(*Texture) = .empty,
+    live_textures: usize = 0,
+    /// Widest side the device takes.
+    max_texture: c_int,
     vbuf: c.sg_buffer = .{ .id = 0 },
     ibuf: c.sg_buffer = .{ .id = 0 },
     vbuf_size: usize = 0,
@@ -285,7 +288,12 @@ pub const Gfx = struct {
     text_cache: std.AutoHashMapUnmanaged(TextKey, TextEntry) = .empty,
     frame: u64 = 0,
     backdrop_tex: ?*Texture = null,
-    backdrop_tried: bool = false,
+    backdrop_started: bool = false,
+    backdrop_thread: ?*c.SDL_Thread = null,
+    backdrop_done: std.atomic.Value(bool) = .init(false),
+    backdrop_px: ?[*]u8 = null,
+    backdrop_w: c_int = 0,
+    backdrop_h: c_int = 0,
     w: f32 = 1280,
     h: f32 = 720,
 
@@ -305,7 +313,7 @@ pub const Gfx = struct {
             std.log.err("no graphics device: {s}", .{c.SDL_GetError()});
             return error.GpuDevice;
         }
-        var g: Gfx = .{ .gpa = gpa, .win = win };
+        var g: Gfx = .{ .gpa = gpa, .win = win, .max_texture = c.sg_query_limits().max_image_size_2d };
         const sh = c.sg_make_shader(&shaderDesc());
         g.pipelines = .{ pipeline(sh, false), pipeline(sh, true) };
         for ([_]c_uint{ c.SG_FILTER_LINEAR, c.SG_FILTER_NEAREST }, &g.samplers) |filter, *out| {
@@ -462,6 +470,7 @@ pub const Gfx = struct {
         for (g.fonts) |f| if (f != null) c.TTF_CloseFont(f);
         for (g.cjk_fonts) |set| for (set) |f| if (f != null) c.TTF_CloseFont(f);
         c.TTF_Quit();
+        g.collectBackdrop(false);
         if (g.backdrop_tex) |t| g.destroyTexture(t);
         g.destroyTexture(g.white);
         g.reapTextures();
@@ -544,7 +553,9 @@ pub const Gfx = struct {
 
     pub fn createTexture(g: *Gfx, w: c_int, h: c_int) ?*Texture {
         if (w <= 0 or h <= 0) return null;
+        g.dead.ensureTotalCapacity(g.gpa, g.live_textures + 1) catch return null;
         const t = g.gpa.create(Texture) catch return null;
+        g.live_textures += 1;
         t.* = .{ .w = @floatFromInt(w), .h = @floatFromInt(h) };
         return t;
     }
@@ -737,15 +748,17 @@ pub const Gfx = struct {
         const t = g.createTexture(w, h) orelse return null;
         g.updateTexture(t, px, pitch);
         if (t.view.id != 0) return t;
+        g.live_textures -= 1;
         g.gpa.destroy(t);
         return null;
     }
 
     pub fn destroyTexture(g: *Gfx, t: *Texture) void {
-        g.dead.append(g.gpa, t) catch {};
+        g.dead.appendAssumeCapacity(t);
     }
 
     fn reapTextures(g: *Gfx) void {
+        g.live_textures -= g.dead.items.len;
         for (g.dead.items) |t| {
             releaseGpu(t);
             g.gpa.destroy(t);
@@ -833,21 +846,34 @@ pub const Gfx = struct {
     }
 
     pub fn backdrop(g: *Gfx) void {
-        if (!g.backdrop_tried) {
-            g.backdrop_tried = true;
-            var w: c_int = 0;
-            var h: c_int = 0;
-            var n: c_int = 0;
-            // shortcut: decodes on the main thread at first use, one short hitch; a thread if it shows.
-            if (c.stbi_load_from_memory(backdrop_jpg.ptr, @intCast(backdrop_jpg.len), &w, &h, &n, 4)) |px| {
-                defer c.stbi_image_free(px);
-                g.backdrop_tex = g.textureFromPixels(px, w, h, @intCast(w * 4));
-            }
+        if (!g.backdrop_started) {
+            g.backdrop_started = true;
+            g.backdrop_thread = c.SDL_CreateThread(decodeBackdrop, "backdrop", g);
+            if (g.backdrop_thread == null) _ = decodeBackdrop(g);
         }
+        if (g.backdrop_done.load(.acquire)) g.collectBackdrop(true);
         const tex = g.backdrop_tex orelse return g.vgrad(0, 0, g.w, g.h, .{ .r = 22, .g = 36, .b = 78 }, well);
         const k = @min(tex.w / g.w, tex.h / g.h);
         g.sprite(tex, .{ .x = (tex.w - g.w * k) / 2, .y = (tex.h - g.h * k) / 2, .w = g.w * k, .h = g.h * k }, .{ .x = 0, .y = 0, .w = g.w, .h = g.h }, .{});
         g.rect(0, 0, g.w, g.h, .{ .r = 0, .g = 0, .b = 0, .a = 215 });
+    }
+
+    fn decodeBackdrop(ud: ?*anyopaque) callconv(.c) c_int {
+        const g: *Gfx = @ptrCast(@alignCast(ud));
+        defer g.backdrop_done.store(true, .release);
+        var n: c_int = 0;
+        g.backdrop_px = c.stbi_load_from_memory(backdrop_jpg.ptr, @intCast(backdrop_jpg.len), &g.backdrop_w, &g.backdrop_h, &n, 4);
+        return 0;
+    }
+
+    fn collectBackdrop(g: *Gfx, upload: bool) void {
+        c.SDL_WaitThread(g.backdrop_thread, null);
+        g.backdrop_thread = null;
+        g.backdrop_done.store(false, .release);
+        const px = g.backdrop_px orelse return;
+        g.backdrop_px = null;
+        defer c.stbi_image_free(px);
+        if (upload) g.backdrop_tex = g.textureFromPixels(px, g.backdrop_w, g.backdrop_h, @intCast(g.backdrop_w * 4));
     }
 
     pub fn vgrad(g: *Gfx, x: f32, y: f32, w: f32, h: f32, top: Color, bottom: Color) void {
@@ -1139,31 +1165,30 @@ pub fn loadTexture(g: *Gfx, path: []const u8, bytes: []const u8) ?*Texture {
     var w: c_int = 0;
     var h: c_int = 0;
     var n: c_int = 0;
-    const px = c.stbi_load_from_memory(bytes.ptr, @intCast(bytes.len), &w, &h, &n, 4);
-    if (px == null) return null;
+    const px = c.stbi_load_from_memory(bytes.ptr, @intCast(bytes.len), &w, &h, &n, 4) orelse return null;
     defer c.stbi_image_free(px);
-    const size = fitTexture(w, h);
+    return textureFitted(g, px, w, h);
+}
+
+/// An image past the GPU's limit loads squeezed along that axis, not at all otherwise. Sources are fractions, so they hold.
+pub fn textureFitted(g: *Gfx, px: [*]const u8, w: c_int, h: c_int) ?*Texture {
+    const size = fitTexture(w, h, g.max_texture);
     if (size[0] == w and size[1] == h) return g.textureFromPixels(px, w, h, @intCast(w * 4));
     const small = g.gpa.alloc(u8, @intCast(size[0] * size[1] * 4)) catch return null;
     defer g.gpa.free(small);
-    const from: [*]const u8 = @ptrCast(px);
     for (0..@intCast(size[1])) |y| {
         const sy = y * @as(usize, @intCast(h)) / @as(usize, @intCast(size[1]));
         for (0..@intCast(size[0])) |x| {
             const sx = x * @as(usize, @intCast(w)) / @as(usize, @intCast(size[0]));
             const at = (sy * @as(usize, @intCast(w)) + sx) * 4;
-            @memcpy(small[(y * @as(usize, @intCast(size[0])) + x) * 4 ..][0..4], from[at..][0..4]);
+            @memcpy(small[(y * @as(usize, @intCast(size[0])) + x) * 4 ..][0..4], px[at..][0..4]);
         }
     }
     return g.textureFromPixels(small.ptr, size[0], size[1], @intCast(size[0] * 4));
 }
 
-/// shortcut: 16384 is what desktop GPUs take; ask the device if a smaller one turns up.
-const max_texture = 16384;
-
-/// An image past the GPU's limit loads squeezed along that axis, not at all otherwise. Sources are fractions, so they hold.
-fn fitTexture(w: c_int, h: c_int) [2]c_int {
-    return .{ @min(w, max_texture), @min(h, max_texture) };
+fn fitTexture(w: c_int, h: c_int, max: c_int) [2]c_int {
+    return .{ @min(w, max), @min(h, max) };
 }
 
 const GlyphFont = struct {
@@ -1206,8 +1231,21 @@ test "runs split where the font changes and survive broken UTF-8" {
 }
 
 test "only an axis past the limit is squeezed" {
-    try std.testing.expectEqual([2]c_int{ 128, 16384 }, fitTexture(128, 40000));
-    try std.testing.expectEqual([2]c_int{ 150, 150 }, fitTexture(150, 150));
+    try std.testing.expectEqual([2]c_int{ 128, 8192 }, fitTexture(128, 40000, 8192));
+    try std.testing.expectEqual([2]c_int{ 150, 150 }, fitTexture(150, 150, 8192));
+}
+
+test "a texture is freed even when memory has run out" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var g: Gfx = .{ .gpa = failing.allocator(), .win = undefined, .max_texture = 8192 };
+    defer g.dead.deinit(failing.allocator());
+    var made: [5]*Texture = undefined;
+    for (&made) |*t| t.* = g.createTexture(1, 1).?;
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectEqual(null, g.createTexture(1, 1));
+    for (made) |t| g.destroyTexture(t);
+    g.reapTextures();
+    try std.testing.expectEqual(@as(usize, 0), g.live_textures);
 }
 
 test "batch keeps one draw while only shapes and one texture alternate" {

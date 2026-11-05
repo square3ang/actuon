@@ -26,6 +26,8 @@ pub const TimedHit = struct { fast_us: i32, judge: u8 };
 pub const Parsed = struct {
     chart: Chart = undefined,
     ready: std.atomic.Value(bool) = .init(false),
+    /// Set by whoever stopped waiting; the loader then frees what it made and fails.
+    cancel: std.atomic.Value(bool) = .init(false),
 };
 
 pub const Snapshot = struct {
@@ -220,6 +222,7 @@ pub const Session = struct {
         next: *std.atomic.Value(usize),
         progress: *std.atomic.Value(usize),
         failed: *std.atomic.Value(u32),
+        cancel: *const std.atomic.Value(bool),
     };
 
     fn loadWorker(ud: ?*anyopaque) callconv(.c) c_int {
@@ -230,7 +233,7 @@ pub const Session = struct {
         while (true) {
             _ = arena.reset(.retain_capacity);
             const i = job.next.fetchAdd(1, .monotonic);
-            if (i >= job.chart.wavs.len) return 0;
+            if (i >= job.chart.wavs.len or job.cancel.load(.monotonic)) return 0;
             defer _ = job.progress.fetchAdd(1, .monotonic);
             const p = fs.resolveAsset(arena.allocator(), job.io, job.dir, job.chart.wavs[i], audio_exts) catch null;
             if (p) |path| {
@@ -276,19 +279,23 @@ pub const Session = struct {
         parsed.ready.store(true, .release);
 
         const samples = try gpa.alloc(decode.Sample, chart.wavs.len);
-        errdefer gpa.free(samples);
         @memset(samples, .{});
+        errdefer {
+            for (samples) |sm| if (sm.data.len > 0) gpa.free(sm.data);
+            gpa.free(samples);
+        }
         const dir = try gpa.dupe(u8, std.fs.path.dirname(params.path) orelse ".");
         errdefer gpa.free(dir);
 
         var next: std.atomic.Value(usize) = .init(0);
         var failed: std.atomic.Value(u32) = .init(0);
-        var job: LoadJob = .{ .gpa = gpa, .io = io, .dir = dir, .chart = &chart, .samples = samples, .rate = decodeRate(engine.rate, params), .next = &next, .progress = progress, .failed = &failed };
+        var job: LoadJob = .{ .gpa = gpa, .io = io, .dir = dir, .chart = &chart, .samples = samples, .rate = decodeRate(engine.rate, params), .next = &next, .progress = progress, .failed = &failed, .cancel = &parsed.cancel };
         var threads: [31]?*c.SDL_Thread = @splat(null);
         const extra: usize = @intCast(std.math.clamp(c.SDL_GetNumLogicalCPUCores() - 1, 0, threads.len));
         for (threads[0..extra]) |*t| t.* = c.SDL_CreateThread(loadWorker, "load", &job);
         _ = loadWorker(&job);
         for (threads) |t| if (t != null) c.SDL_WaitThread(t, null);
+        if (parsed.cancel.load(.acquire)) return error.Canceled;
 
         chart.last_time_us = playEnd(&chart, samples, engine.rate, params.practice != null);
         const sched = try buildSchedule(gpa, &chart, engine);
@@ -657,4 +664,17 @@ test "sound end honours slices and missing samples" {
     try std.testing.expectEqual(@as(i64, 5_250_000), soundEnd(5_000_000, 0, 500_000, 250_000, &samples, 4000));
     try std.testing.expectEqual(@as(i64, 5_500_000), soundEnd(5_000_000, 0, 500_000, 9_000_000, &samples, 4000));
     try std.testing.expectEqual(@as(i64, 5_000_000), soundEnd(5_000_000, -1, 0, 0, &samples, 4000));
+}
+
+test "a canceled load fails and frees what it made" {
+    const gpa = std.testing.allocator;
+    const engine = try engine_mod.Engine.create(gpa);
+    defer engine.destroy();
+    const cfg: config.Config = .{};
+    var progress: std.atomic.Value(usize) = .init(0);
+    var total: std.atomic.Value(usize) = .init(0);
+    var parsed: Parsed = .{};
+    parsed.cancel.store(true, .release);
+    try std.testing.expectError(error.Canceled, Session.create(gpa, std.testing.io, engine, &cfg, .{ .path = "tests/charts/stop.bms" }, &progress, &total, &parsed));
+    try std.testing.expectEqual(@as(usize, 0), progress.load(.acquire));
 }
