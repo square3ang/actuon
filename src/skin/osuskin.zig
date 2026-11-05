@@ -151,6 +151,8 @@ const white: [4]f32 = @splat(255);
 
 const Build = struct {
     a: std.mem.Allocator,
+    /// For image reads: the arena would keep every outgrown read buffer.
+    scratch: std.mem.Allocator,
     io: std.Io,
     dir: []const u8,
     mania: []const u8,
@@ -161,7 +163,7 @@ const Build = struct {
 
     fn file(b: *Build, name: []const u8, animated: bool) !?Image {
         const f = findImage(b.a, b.io, b.dir, name, animated) orelse return null;
-        const size = pixelSize(b.a, b.io, f.path) orelse return null;
+        const size = pixelSize(b.scratch, b.io, f.path) orelse return null;
         try b.paths.append(b.a, f.path);
         return .{ .tex = @intCast(b.paths.items.len - 1), .w = size[0] / f.scale, .h = size[1] / f.scale };
     }
@@ -270,13 +272,14 @@ fn addNotes(b: *Build, skin: *m.Skin, general: []const u8, mode: core.types.Mode
         const head = try b.noteImage(i, "H", kind) orelse note;
         const tail = try b.noteImage(i, "T", kind) orelse head;
         const body = try b.noteImage(i, "L", kind);
-        // A missing image takes the built-in play screen's colour for the lane.
+        // A missing image takes the built-in play screen's colour for the lane; a body is darker so the head and tail stand out.
         const col = play.noteColor(mode, lane);
         const blank: m.Src = .{ .solid = .{ col.r, col.g, col.b } };
+        const dim = gfx.mix(col, gfx.well, 0.5);
         n.note[lane] = if (note) |x| x.src() else blank;
         n.ln_start[lane] = if (head) |x| x.src() else blank;
         n.ln_end[lane] = if (tail) |x| x.src() else blank;
-        n.ln_body[lane] = if (body) |x| x.src() else blank;
+        n.ln_body[lane] = if (body) |x| x.src() else .{ .solid = .{ dim.r, dim.g, dim.b } };
         // osu! has no mines; these must still show.
         n.mine[lane] = .{ .solid = .{ gfx.danger.r, gfx.danger.g, gfx.danger.b } };
         const h = if (note orelse head) |x| x.h * scale_w / x.w else l.ws[i] / 3;
@@ -540,15 +543,20 @@ fn build(b: *Build, skin: *m.Skin, general: []const u8, fonts: []const u8, mode:
     try addGauge(b, conf);
 }
 
-/// A key count the ini has no section for takes every default, as in lazer. `aspect` is the window's width over height.
+/// `aspect` is the window's width over height. Narrower than 4:3 squashes instead, as the stage is placed from the left and would fall off the right.
+pub fn canvasWidth(aspect: f32) f32 {
+    return stage_h * @max(aspect, 4.0 / 3.0);
+}
+
+/// A key count the ini has no section for takes every default, as in lazer.
 pub fn load(skin: *m.Skin, io: std.Io, path: []const u8, mode: core.types.Mode, conf: jsonskin.Conf, aspect: f32) ![]const ?[]const u8 {
     const a = skin.arena.allocator();
     const text = try fs.readAlloc(a, io, path, 1 << 22);
     const body = if (std.mem.startsWith(u8, text, "\xef\xbb\xbf")) text[3..] else text;
-    skin.w = stage_h * aspect;
+    skin.w = canvasWidth(aspect);
     skin.h = stage_h;
     skin.plain_loading = true;
-    var b: Build = .{ .a = a, .io = io, .dir = std.fs.path.dirname(path) orelse ".", .mania = section(body, "Mania", mode.keys()), .w = skin.w };
+    var b: Build = .{ .a = a, .scratch = skin.arena.child_allocator, .io = io, .dir = std.fs.path.dirname(path) orelse ".", .mania = section(body, "Mania", mode.keys()), .w = skin.w };
     try build(&b, skin, section(body, "General", null), section(body, "Fonts", null), mode, conf);
     skin.objects = b.objects.items;
     return b.paths.items;
@@ -624,16 +632,23 @@ test "a 7+1 chart takes the 8 key section, scratch first, @2x and frame 0 prefer
     // Mines have no art in osu!, nor does a missing column image stop a note showing.
     const mine = skin.notes.mine[0].solid.?;
     try std.testing.expectEqual(gfx.danger.r, mine[0]);
-    // A missing body takes the built-in screen's lane colour, scratch red included.
-    const body = skin.notes.ln_body[0].solid.?;
-    try std.testing.expectEqual(play.noteColor(.beat7, 0).b, body[2]);
-    try std.testing.expectEqual(play.noteColor(.beat7, 7).r, skin.notes.ln_body[7].solid.?[0]);
+    // A missing body takes a darker lane colour than a missing note would, scratch red included.
+    try std.testing.expect(skin.notes.ln_body[0].solid.?[2] < play.noteColor(.beat7, 0).b);
+    try std.testing.expect(skin.notes.ln_body[7].solid.?[0] < play.noteColor(.beat7, 7).r);
+    try std.testing.expect(skin.notes.ln_body[7].solid.?[0] > skin.notes.ln_body[7].solid.?[2]);
 
     var wide: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
     defer wide.arena.deinit();
     _ = try load(&wide, std.testing.io, path, .beat7, .{}, 2);
     try std.testing.expectEqual(@as(f32, 960), wide.w);
     try std.testing.expectEqual(@as(f32, 100), wide.notes.lane[7].?[0]);
+
+    // A portrait window squashes the 4:3 canvas, so the last lane stays on it.
+    var narrow: m.Skin = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
+    defer narrow.arena.deinit();
+    _ = try load(&narrow, std.testing.io, path, .beat7, .{}, 0.6);
+    const last = narrow.notes.lane[6].?;
+    try std.testing.expect(last[0] + last[2] <= narrow.w);
 }
 
 test "an ini for other modes only is not a mania skin" {

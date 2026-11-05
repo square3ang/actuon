@@ -387,7 +387,7 @@ pub fn destroy(gpa: std.mem.Allocator, s: *Skin) void {
 
 pub fn changed(s: *const Skin, io: std.Io, aspect: f32) bool {
     // An osu! skin is laid out for one window shape.
-    if (osuskin.isIni(s.path) and @abs(s.w / s.h - aspect) > 0.01) return true;
+    if (osuskin.isIni(s.path) and @abs(s.w - osuskin.canvasWidth(aspect)) / s.h > 0.01) return true;
     const st = fs.stat(io, s.path) orelse return false;
     return st.mtime != s.mtime;
 }
@@ -529,6 +529,8 @@ test "an osu! skin reloads when the window changes shape" {
     defer s.arena.deinit();
     try std.testing.expect(!changed(&s, std.testing.io, 4.0 / 3.0));
     try std.testing.expect(changed(&s, std.testing.io, 16.0 / 9.0));
+    // Any window narrower than 4:3 gets the same canvas, so it must not reload every poll.
+    try std.testing.expect(!changed(&s, std.testing.io, 0.6));
     s.path = "missing/skin.json";
     try std.testing.expect(!changed(&s, std.testing.io, 16.0 / 9.0));
 }
