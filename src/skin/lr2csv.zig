@@ -16,7 +16,7 @@ const Parser = struct {
     fonts: std.ArrayList(?*bitfont.BitmapFont) = .empty,
     fonts_loaded: u32 = 0,
     objects: std.ArrayList(m.Object) = .empty,
-    keys: std.ArrayList(std.ArrayList(m.Key)) = .empty,
+    keys: std.ArrayList(Dst) = .empty,
     current: ?usize = null,
     judge_obj: ?usize = null,
     judge_cur: [6]?usize = @splat(null),
@@ -31,10 +31,16 @@ const Parser = struct {
     offsets: std.AutoHashMapUnmanaged(i32, jsonskin.Offset) = .empty,
     judge_imgs: [6]m.Object = @splat(.{}),
     judge_nums: [6]m.Object = @splat(.{}),
-    judge_keys: [12]std.ArrayList(m.Key) = @splat(.empty),
+    judge_keys: [12]Dst = @splat(.{}),
     has_judge: bool = false,
     has_notes: bool = false,
     judge_shift: bool = true,
+};
+
+const Dst = struct {
+    keys: std.ArrayList(m.Key) = .empty,
+    /// DST fields 21 to 23 of the object's first line; 0 names no offset.
+    offset_ids: [3]i32 = @splat(0),
 };
 
 fn int(s: []const u8) i32 {
@@ -148,7 +154,7 @@ fn runtimeImage(gr: i32) ?m.Object {
 
 fn begin(p: *Parser, o: m.Object) !void {
     try p.objects.append(p.a, o);
-    try p.keys.append(p.a, .empty);
+    try p.keys.append(p.a, .{});
     p.current = p.objects.items.len - 1;
 }
 
@@ -180,8 +186,8 @@ fn keyOf(v: [24]i32) m.Key {
     };
 }
 
-fn applyDst(p: *Parser, o: *m.Object, list: *std.ArrayList(m.Key), v: [24]i32) !void {
-    if (list.items.len == 0) {
+fn applyDst(p: *Parser, o: *m.Object, dst: *Dst, v: [24]i32) !void {
+    if (dst.keys.items.len == 0) {
         o.blend = @intCast(std.math.clamp(v[12], 0, 255));
         o.center = @intCast(std.math.clamp(v[15], 0, 9));
         o.loop = v[16];
@@ -191,19 +197,18 @@ fn applyDst(p: *Parser, o: *m.Object, list: *std.ArrayList(m.Key), v: [24]i32) !
         ops[1] = v[19];
         ops[2] = v[20];
         o.ops = ops;
+        dst.offset_ids = v[21..24].*;
     }
     var k = keyOf(v);
-    // As beatoraja's LR2 loader: fields from 21 name offsets, which move the rect bottom-up.
-    for (v[21..]) |id| {
+    // As beatoraja's LR2 loader: the first line's fields from 21 name offsets for every key.
+    for (dst.offset_ids) |id| {
         const off = p.offsets.get(id) orelse continue;
-        k.x += @floatFromInt(off.x);
-        k.w += @floatFromInt(off.w);
-        k.h += @floatFromInt(off.h);
-        k.y -= @as(f32, @floatFromInt(off.y)) + @as(f32, @floatFromInt(off.h));
-        k.angle += @floatFromInt(off.r);
-        k.a += @floatFromInt(off.a);
+        // Offsets move the rect bottom-up: flip y around 0 and back.
+        k.y = -(k.y + k.h);
+        off.apply(&k);
+        k.y = -(k.y + k.h);
     }
-    try list.append(p.a, k);
+    try dst.keys.append(p.a, k);
 }
 
 fn condition(p: *Parser, str: []const []const u8) bool {
@@ -447,10 +452,10 @@ pub fn load(skin: *m.Skin, io: std.Io, path: []const u8, mode: core.types.Mode, 
     const a = skin.arena.allocator();
     var p: Parser = .{ .a = a, .io = io, .skin = skin, .mode = mode, .root = skinRoot(path), .resolver = resolver, .conf = conf };
     try runFile(&p, path);
-    for (p.objects.items, p.keys.items) |*o, k| o.keys = k.items;
+    for (p.objects.items, p.keys.items) |*o, d| o.keys = d.keys.items;
     if (p.has_judge) {
-        for (&p.judge_imgs, 0..) |*o, i| o.keys = p.judge_keys[i].items;
-        for (&p.judge_nums, 0..) |*o, i| o.keys = p.judge_keys[i + 6].items;
+        for (&p.judge_imgs, 0..) |*o, i| o.keys = p.judge_keys[i].keys.items;
+        for (&p.judge_nums, 0..) |*o, i| o.keys = p.judge_keys[i + 6].keys.items;
         try p.objects.append(a, .{ .kind = .judge, .judge_images = &p.judge_imgs, .judge_numbers = &p.judge_nums, .shift = p.judge_shift });
         // the arrays above live on this stack frame
         const last = &p.objects.items[p.objects.items.len - 1];
@@ -521,6 +526,7 @@ test "#CUSTOMFILE and #CUSTOMOFFSET are offered, and a saved pick moves the imag
         \\#IMAGE,LR2files\Theme\x\frame\*.png
         \\#SRC_IMAGE,0,0,0,0,10,10,1,1,0,0
         \\#DST_IMAGE,0,0,5,6,10,10,0,255,255,255,255,0,0,0,0,0,0,0,0,0,40
+        \\#DST_IMAGE,0,100,8,6,10,10
     );
 
     const got = try customOptions(a, io, path);
@@ -545,6 +551,9 @@ test "#CUSTOMFILE and #CUSTOMOFFSET are offered, and a saved pick moves the imag
     try std.testing.expect(std.mem.endsWith(u8, images[0].?, "c.png"));
     try std.testing.expectEqual(@as(f32, 7), picked.objects[0].keys[0].x);
     try std.testing.expectEqual(@as(f32, 3), picked.objects[0].keys[0].y);
+    // The second line names no offset; the first line's moves it too.
+    try std.testing.expectEqual(@as(f32, 10), picked.objects[0].keys[1].x);
+    try std.testing.expectEqual(@as(f32, 3), picked.objects[0].keys[1].y);
 }
 
 test "runtime images become the chart's images and plain colors" {

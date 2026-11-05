@@ -7,6 +7,9 @@ pub const Member = struct { name: []const u8, data: []const u8 };
 /// From 0x0005 DxLib keys file data by its size, not its offset, which this reader does not do.
 const max_version = 4;
 const max_member = 1 << 24;
+/// Heads may share one packed block, so the sum is bounded too; WMIX's title font unpacks to 105 MB in 102 files.
+const max_total = 1 << 28;
+const max_count = 4096;
 const dir_attribute = 0x10;
 /// DxLib's MIN_COMPRESS: the encoder subtracts it from every copy length.
 const min_copy = 4;
@@ -46,6 +49,7 @@ pub fn members(a: std.mem.Allocator, bytes: []u8) Error![]const Member {
     const key = for ([_][12]u8{ default_key, old_key }) |k| {
         if (bytes[0] ^ k[0] == 'D' and bytes[1] ^ k[1] == 'X') break k;
     } else return error.BadArchive;
+    // As DxLib's DxArchive_.cpp before 0x0005: the whole image is keyed by file position.
     for (bytes, 0..) |*b, i| b.* ^= key[i % key.len];
 
     const version = std.mem.readInt(u16, bytes[2..4], .little);
@@ -56,14 +60,17 @@ pub fn members(a: std.mem.Allocator, bytes: []u8) Error![]const Member {
     const root = try word(bytes, 20);
     const head_len: u64 = if (version >= 2) 44 else 40;
     const count = try word(table, @as(u64, root) + 8);
+    if (count > max_count) return error.BadArchive;
     const first = @as(u64, file_table) + try word(table, @as(u64, root) + 12);
 
     var out: std.ArrayList(Member) = .empty;
+    var total: u64 = 0;
     for (0..count) |i| {
         const head = try slice(table, first + i * head_len, head_len);
         if (try word(head, 4) & dir_attribute != 0) continue;
         const size = try word(head, 36);
-        if (size > max_member) return error.BadArchive;
+        total += size;
+        if (size > max_member or total > max_total) return error.BadArchive;
         const at = @as(u64, data_start) + try word(head, 32);
         const press: u32 = if (version >= 2) try word(head, 40) else 0xffff_ffff;
         const data = if (press == 0xffff_ffff) try slice(bytes, at, size) else try decode(a, try slice(bytes, at, press), size);
@@ -204,4 +211,35 @@ test "bad headers, names, sizes and copies are refused" {
     // A length that would write past the size it claims.
     const too_long = "\x03\x00\x00\x00\x0d\x00\x00\x00\xff" ++ "a\xff\x20\x00";
     try std.testing.expectError(error.BadArchive, members(a, try testArchive(a, &.{ .{ .name = "a", .data = plain }, .{ .name = "b", .data = "aaa" } }, &.{too_long})));
+}
+
+/// A test archive of `n` copies of `data` whose heads all point at the first file's stored bytes.
+fn sharedArchive(a: std.mem.Allocator, n: usize, data: []const u8) ![]u8 {
+    const files = try a.alloc(Member, n);
+    @memset(files, .{ .name = "a", .data = data });
+    const bodies = try a.alloc([]const u8, n - 1);
+    @memset(bodies, "");
+    const bytes = try testArchive(a, files, bodies);
+    for (bytes, 0..) |*b, i| b.* ^= default_key[i % default_key.len];
+    const heads = try word(bytes, 12) + try word(bytes, 16);
+    for (0..n) |i| {
+        const head = bytes[heads + i * 44 ..][0..44];
+        std.mem.writeInt(u32, head[32..36], 0, .little);
+        std.mem.writeInt(u32, head[40..44], 0xffff_ffff, .little);
+    }
+    for (bytes, 0..) |*b, i| b.* ^= default_key[i % default_key.len];
+    return bytes;
+}
+
+test "heads sharing one block are bounded in count and total size" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const big = try a.alloc(u8, max_member);
+    @memset(big, 0);
+    const fits = max_total / max_member;
+    try std.testing.expectEqual(@as(usize, fits), (try members(a, try sharedArchive(a, fits, big))).len);
+    try std.testing.expectError(error.BadArchive, members(a, try sharedArchive(a, fits + 1, big)));
+    try std.testing.expectEqual(@as(usize, max_count), (try members(a, try sharedArchive(a, max_count, ""))).len);
+    try std.testing.expectError(error.BadArchive, members(a, try sharedArchive(a, max_count + 1, "")));
 }

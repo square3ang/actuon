@@ -126,6 +126,16 @@ pub const Offset = struct {
             else => &o.a,
         };
     }
+
+    /// `k` is bottom-up.
+    pub fn apply(o: Offset, k: *m.Key) void {
+        k.x += @floatFromInt(o.x);
+        k.y += @floatFromInt(o.y);
+        k.w += @floatFromInt(o.w);
+        k.h += @floatFromInt(o.h);
+        k.angle += @floatFromInt(o.r);
+        k.a += @floatFromInt(o.a);
+    }
 };
 
 pub const Option = struct {
@@ -362,14 +372,7 @@ const Loader = struct {
         for (ids.items) |id| {
             if (int(id, 0) == 3) out.lifted = true;
             const o = l.offsets.get(int(id, 0)) orelse continue;
-            for (keys.items) |*k| {
-                k.x += @floatFromInt(o.x);
-                k.y += @floatFromInt(o.y);
-                k.w += @floatFromInt(o.w);
-                k.h += @floatFromInt(o.h);
-                k.angle += @floatFromInt(o.r);
-                k.a += @floatFromInt(o.a);
-            }
+            for (keys.items) |*k| o.apply(k);
         }
         for (keys.items) |*k| k.y = l.skin.h - (k.y + k.h);
         out.keys = keys.items;
