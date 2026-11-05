@@ -10,6 +10,51 @@ const sqlite_transient: isize = -1;
 extern fn sqlite3_bind_text(*c.sqlite3_stmt, c_int, [*]const u8, c_int, isize) c_int;
 extern fn sqlite3_bind_blob(*c.sqlite3_stmt, c_int, [*]const u8, c_int, isize) c_int;
 
+/// SQLite's LIKE folds ASCII only, so search compares `fold(column) LIKE fold(pattern)`.
+fn foldSql(ctx: ?*c.sqlite3_context, _: c_int, argv: [*c]?*c.sqlite3_value) callconv(.c) void {
+    const p = c.sqlite3_value_text(argv[0]);
+    if (p == null) return c.sqlite3_result_null(ctx);
+    const text = p[0..@intCast(c.sqlite3_value_bytes(argv[0]))];
+    // One spare byte, as sqlite3_malloc64(0) may answer null.
+    const out: [*]u8 = @ptrCast(c.sqlite3_malloc64(text.len + 1) orelse return c.sqlite3_result_error_nomem(ctx));
+    foldCase(text, out[0..text.len]);
+    c.sqlite3_result_text64(ctx, out, text.len, c.sqlite3_free, c.SQLITE_UTF8);
+}
+
+/// Every mapping keeps the UTF-8 length, so `out` is as long as `text`; bytes that are not UTF-8 pass through.
+fn foldCase(text: []const u8, out: []u8) void {
+    var i: usize = 0;
+    while (i < text.len) {
+        const n = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+        const r = if (i + n <= text.len) std.unicode.utf8Decode(text[i .. i + n]) catch null else null;
+        if (r) |cp| {
+            _ = std.unicode.utf8Encode(foldRune(cp), out[i .. i + n]) catch unreachable;
+            i += n;
+        } else {
+            out[i] = text[i];
+            i += 1;
+        }
+    }
+}
+
+/// Latin with accents, Greek, Cyrillic and full-width Latin; no ICU, so other scripts compare as written.
+fn foldRune(r: u21) u21 {
+    return switch (r) {
+        'A'...'Z', 0xC0...0xD6, 0xD8...0xDE, 0x391...0x3A1, 0x3A3...0x3AB, 0x410...0x42F, 0xFF21...0xFF3A => r + 32,
+        0x400...0x40F => r + 80,
+        0x386 => 0x3AC,
+        0x388...0x38A => r + 37,
+        0x38C => 0x3CC,
+        0x38E, 0x38F => r + 63,
+        0x3C2 => 0x3C3,
+        0x178 => 0xFF,
+        0x4C0 => 0x4CF,
+        0x100...0x12F, 0x132...0x137, 0x14A...0x177, 0x460...0x481, 0x48A...0x4BF, 0x4D0...0x52F => r | 1,
+        0x139...0x148, 0x179...0x17E, 0x4C1...0x4CE => r + (r & 1),
+        else => r,
+    };
+}
+
 pub const Stmt = struct {
     s: *c.sqlite3_stmt,
 
@@ -68,6 +113,11 @@ pub const Db = struct {
             return error.Sqlite;
         }
         _ = c.sqlite3_busy_timeout(h, 5000);
+        const fn_flags = c.SQLITE_UTF8 | c.SQLITE_DETERMINISTIC | c.SQLITE_INNOCUOUS;
+        if (c.sqlite3_create_function_v2(h, "fold", 1, fn_flags, null, foldSql, null, null, null) != c.SQLITE_OK) {
+            _ = c.sqlite3_close(h);
+            return error.Sqlite;
+        }
         return .{ .h = h.? };
     }
 

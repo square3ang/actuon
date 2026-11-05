@@ -321,6 +321,7 @@ pub const State = struct {
     drop: Drop = .{},
     drop_for: Item = .skin,
     drop_values: []const []const u8 = &.{},
+    drop_arena: ?std.heap.ArenaAllocator = null,
     sync: ?*ir.Sync = null,
     account: ?*ir.Account = null,
     account_name: ?[]const u8 = null,
@@ -654,11 +655,19 @@ fn hasDrop(it: Item) bool {
     return it == .audio_frames or it == .audio_device or it == .skin or it == .bgm_set or it == .sound_set or it == .remove_root;
 }
 
+fn freeDrop(s: *State) void {
+    if (s.drop_arena) |*arena| arena.deinit();
+    s.drop_arena = null;
+    s.drop = .{};
+    s.drop_values = &.{};
+}
+
 fn openDrop(a: *App, it: Item) void {
     const s = &a.set;
     if (s.picker_for != null) return;
-    // shortcut: lists stay in the app arena until exit, free them if settings ever stays open for long.
-    const al = a.arena.allocator();
+    freeDrop(s);
+    s.drop_arena = .init(a.gpa);
+    const al = s.drop_arena.?.allocator();
     var labels: std.ArrayList([]const u8) = .empty;
     var values: std.ArrayList([]const u8) = .empty;
     var now: []const u8 = "";
@@ -730,7 +739,8 @@ fn chooseDrop(a: *App, i: usize) void {
     const s = &a.set;
     const it = s.drop_for;
     if (i >= s.drop_values.len) return openPicker(a, it);
-    const v = s.drop_values[i];
+    // The list is freed with the next one or when settings closes; config keeps the value for good.
+    const v = a.arena.allocator().dupe(u8, s.drop_values[i]) catch return say(a, "Out of memory, nothing changed", .{});
     switch (it) {
         .audio_frames => {
             a.cfg.audio_frames = std.fmt.parseInt(u32, v, 10) catch return;
@@ -1492,7 +1502,7 @@ fn keyEditing(a: *App, it: Item, sc: u32) void {
         c.SDL_SCANCODE_V => if (c.SDL_GetModState() & c.SDL_KMOD_CTRL != 0) {
             const clip = c.SDL_GetClipboardText();
             defer c.SDL_free(clip);
-            if (clip != null) a.text.appendSlice(a.gpa, std.mem.span(clip)) catch {};
+            if (clip != null) a.text.appendSlice(a.gpa, std.mem.span(clip)) catch say(a, "Out of memory, nothing pasted", .{});
         },
         else => {},
     }
@@ -1520,6 +1530,7 @@ fn keyTabs(a: *App, it: Item, sc: u32) void {
             a.saveConfig();
             // Left/Right steps the buffer without reopening the driver on every press.
             a.engine.reopen(a.cfg.audio_frames, a.cfg.audio_device);
+            freeDrop(s);
             a.scene = .select;
         },
         else => {},
@@ -1663,8 +1674,12 @@ test "tabs wrap, enter goes in and escape comes out, then leaves" {
     key(a, c.SDL_SCANCODE_ESCAPE);
     try std.testing.expect(!a.set.inside);
     try std.testing.expectEqual(.settings, a.scene);
+    // A dropdown's list is freed on leaving; the testing allocator reports it otherwise.
+    a.set.drop_arena = .init(a.gpa);
+    _ = try a.set.drop_arena.?.allocator().alloc(u8, 64);
     key(a, c.SDL_SCANCODE_ESCAPE);
     try std.testing.expectEqual(.select, a.scene);
+    try std.testing.expect(a.set.drop_arena == null);
 }
 
 test "up and down stay inside a tab" {

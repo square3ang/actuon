@@ -7,6 +7,7 @@ const i18n = @import("i18n.zig");
 const tr = i18n.tr;
 const app_mod = @import("app.zig");
 const play = @import("play.zig");
+const versus_mod = @import("versus.zig");
 const db_mod = @import("../db/db.zig");
 const skin_scene = @import("../skin/scene.zig");
 const ir = @import("../net/ir.zig");
@@ -265,7 +266,7 @@ fn drawHeadline(a: *App, ease: f32, ex: u32) void {
     const u = g.h / 720;
     const failed = r.clear == .failed;
     const rcx = g.w * 0.24;
-    const rcy = 300 * u;
+    const grade = gradeBox(if (a.versus.in_round) versus_mod.resultListBottom(a.versus.view.count) else null);
     g.textClip(r.title, 34 * u, 18 * u, g.w * 0.8, g.scaled(24), gfx.white);
     const banner_w = 360 * u;
     const bx = -banner_w + (banner_w + 30 * u) * ease;
@@ -273,7 +274,23 @@ fn drawHeadline(a: *App, ease: f32, ex: u32) void {
     _ = g.text(clear_names[@backingInt(r.clear)], bx + 44 * u, 72 * u, g.scaled(32), gfx.white);
 
     const pop = 1.6 - 0.6 * ease;
-    g.textPop(rankOf(ex, r.notes), rcx, rcy - 86 * u, g.scaled(144), gfx.white, pop);
+    g.textPop(rankOf(ex, r.notes), rcx, grade[0] * u, g.scaled(144 * grade[1]), gfx.white, pop);
+}
+
+/// Top and share of the full size, in 720p units: a versus room's list sits above, and the grade shrinks into what is left over the EX panel.
+fn gradeBox(list_bottom: ?f32) [2]f32 {
+    const free_top = 214;
+    const ex_panel_top = 494;
+    const top = @max(free_top, (list_bottom orelse 0) + 6);
+    return .{ top, (ex_panel_top - top) / (ex_panel_top - free_top) };
+}
+
+test "a full versus room lists above the grade, which still fits over the EX panel" {
+    try std.testing.expectEqual([2]f32{ 214, 1 }, gradeBox(null));
+    const bottom = versus_mod.resultListBottom(@import("../net/room.zig").max_players);
+    const box = gradeBox(bottom);
+    try std.testing.expect(box[0] > bottom);
+    try std.testing.expect(box[1] > 0.3);
 }
 
 fn drawExPanel(a: *App, ease: f32, ex: u32) void {

@@ -112,23 +112,22 @@ pub fn bpmChanges(chart: *const core.types.Chart, i: usize) bool {
 }
 
 pub fn mainBpm(chart: *const core.types.Chart) f64 {
-    // shortcut: tempos past the 256th distinct one are ignored, use a map if a chart needs more
-    var bpms: [256]f64 = undefined;
-    var totals: [256]i64 = @splat(0);
-    var n: usize = 0;
+    const gpa = std.heap.smp_allocator;
+    // Keyed by bit pattern, as floats do not hash; insertion order keeps the first tempo heard on a tie.
+    var totals: std.array_hash_map.Auto(u64, i64) = .empty;
+    defer totals.deinit(gpa);
     const tl = chart.timelines;
     for (tl, 0..) |t, j| {
-        const i = std.mem.indexOfScalar(f64, bpms[0..n], t.bpm) orelse blk: {
-            if (n == bpms.len) continue;
-            bpms[n] = t.bpm;
-            n += 1;
-            break :blk n - 1;
+        const slot = totals.getOrPut(gpa, @bitCast(t.bpm)) catch |e| {
+            std.log.err("main BPM: {t}, using the chart's", .{e});
+            return chart.bpm;
         };
+        if (!slot.found_existing) slot.value_ptr.* = 0;
         const end = if (j + 1 < tl.len) tl[j + 1].time_us else chart.last_time_us;
-        totals[i] += @max(end - t.time_us - t.stop_us, 0);
+        slot.value_ptr.* += @max(end - t.time_us - t.stop_us, 0);
     }
-    if (n == 0) return chart.bpm;
-    return bpms[std.mem.indexOfMax(i64, totals[0..n])];
+    if (totals.count() == 0) return chart.bpm;
+    return @bitCast(totals.keys()[std.mem.indexOfMax(i64, totals.values())]);
 }
 
 pub fn visibleY(green_ms: u32, ref_bpm: f64) f64 {
@@ -759,13 +758,15 @@ test "scroll takes CONSTANT from the play, not from the settings" {
     try std.testing.expect(scrollAt(&v, &chart, &cfg, .{ .constant = true }, 0).per_us != null);
 }
 
-test "main BPM finds a tempo that only starts late in the chart" {
+test "main BPM finds a tempo that only starts late in the chart, past hundreds of others" {
     const base: core.types.Timeline = .{ .time_us = 0, .y = 0, .section = 0, .bpm = 100, .stop_us = 0, .scroll = 1, .speed = 1, .bar = false };
     var tl: [600]core.types.Timeline = @splat(base);
-    for (&tl, 0..) |*t, i| t.time_us = @intCast(i * 1000);
-    tl[599].bpm = 200;
+    for (&tl, 0..) |*t, i| {
+        t.time_us = @intCast(i * 1000);
+        t.bpm = @floatFromInt(100 + i);
+    }
     const chart: core.types.Chart = .{ .arena = undefined, .bpm = 100, .timelines = &tl, .last_time_us = 60_000_000 };
-    try std.testing.expectEqual(@as(f64, 200), mainBpm(&chart));
+    try std.testing.expectEqual(@as(f64, 699), mainBpm(&chart));
 }
 
 test "a long note outlasting the margin is not skipped" {

@@ -311,6 +311,14 @@ fn drawBoard(a: *App, x: f32, y: f32) void {
     }
 }
 
+const result_list_top = 124;
+const result_row = 22;
+
+/// In 720p units: the built-in result screen puts its grade below this.
+pub fn resultListBottom(players: usize) f32 {
+    return result_list_top + 34 + result_row * @as(f32, @floatFromInt(players));
+}
+
 /// A score not checked yet is shown, and cannot win.
 pub fn drawResult(a: *App) void {
     const v = &a.versus;
@@ -318,12 +326,11 @@ pub fn drawResult(a: *App) void {
     const g = &a.g;
     const u = g.h / 720;
     const x = 30 * u;
-    // shortcut: a full room reaches the grade behind it, move this if the result screen gets a free column.
-    const y = 124 * u;
-    const row_h = 22 * u;
+    const y = result_list_top * u;
+    const row_h = result_row * u;
     var order: [room_mod.max_players]*const room_mod.Player = undefined;
     const list = sorted(&v.view, &order);
-    g.panel(x, y, 330 * u, 34 * u + row_h * @as(f32, @floatFromInt(list.len)), "VERSUS");
+    g.panel(x, y, 330 * u, resultListBottom(list.len) * u - y, "VERSUS");
     const top = roundWinner(v, list);
     for (list, 0..) |p, i| {
         const ry = y + 26 * u + row_h * @as(f32, @floatFromInt(i));

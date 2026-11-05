@@ -254,19 +254,18 @@ fn orderBy(sort: u8) []const u8 {
     };
 }
 
-/// shortcut: SQLite's LIKE folds ASCII case only, so accented Latin and Cyrillic stay case-sensitive; ICU if it matters.
 fn searchSql(al: std.mem.Allocator, words: usize, sort: u8) ![]const u8 {
     var sql: std.ArrayList(u8) = .empty;
     try sql.appendSlice(al, db_mod.song_select);
     for (1..words + 1) |i| {
         try sql.print(al, "{s} (", .{if (i == 1) " WHERE" else " AND"});
         for ([_][]const u8{ "title", "subtitle", "artist", "subartist", "genre" }, 0..) |col, j| {
-            try sql.print(al, "{s}s.{s} LIKE ?{d} ESCAPE '\\'", .{ if (j > 0) " OR " else "", col, i });
+            try sql.print(al, "{s}fold(s.{s}) LIKE fold(?{d}) ESCAPE '\\'", .{ if (j > 0) " OR " else "", col, i });
         }
         try sql.append(al, ')');
     }
     if (sort == 0) {
-        try sql.print(al, " ORDER BY s.title LIKE ?{d} ESCAPE '\\' DESC, s.title, s.difficulty", .{words + 1});
+        try sql.print(al, " ORDER BY fold(s.title) LIKE fold(?{d}) ESCAPE '\\' DESC, s.title, s.difficulty", .{words + 1});
     } else try sql.appendSlice(al, orderBy(sort));
     try sql.appendSlice(al, " LIMIT 2000");
     return sql.items;
@@ -366,6 +365,29 @@ test "search matches every word, in any order, title openings first" {
     one.bindText(2, try likePattern(al, "sky", false));
     try std.testing.expect(try one.step());
     try std.testing.expectEqualStrings("Sky Tower", (try db_mod.readSong(al, one)).title);
+}
+
+test "search ignores case in accented Latin, Greek and Cyrillic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const al = arena.allocator();
+    const d = try db_mod.Db.open(":memory:", std.testing.allocator, false);
+    defer d.close();
+    try d.exec(db_mod.schema);
+    try d.exec("INSERT INTO song(path,folder,sha256,md5,title,artist,subtitle,subartist,genre) VALUES" ++
+        "('1','f','a','a','ÉCLAIR Ŷ','','','','')," ++
+        "('2','f','b','b','МОСКВА','','','','')," ++
+        "('3','f','c','c','ΣΟΦΊΑ','','','','')");
+    const st = try d.prepare(try searchSql(al, 1, 0));
+    defer st.deinit();
+    for ([_][2][]const u8{ .{ "éclair ŷ", "ÉCLAIR Ŷ" }, .{ "москва", "МОСКВА" }, .{ "σοφία", "ΣΟΦΊΑ" } }) |want| {
+        defer st.reset();
+        st.bindText(1, try likePattern(al, want[0], true));
+        st.bindText(2, try likePattern(al, want[0], false));
+        try std.testing.expect(try st.step());
+        try std.testing.expectEqualStrings(want[1], (try db_mod.readSong(al, st)).title);
+        try std.testing.expect(!try st.step());
+    }
 }
 
 fn searchRows(a: *App, al: std.mem.Allocator, rows: *std.ArrayList(Row), words: *std.mem.TokenIterator(u8, .any)) !void {
@@ -623,7 +645,7 @@ fn startImageJob(a: *App, sg: db_mod.Song, name: []const u8, image: u64, max_w: 
     return j;
 }
 
-/// shortcut: point sampling, fine under a dim fade; a box filter if card art looks noisy.
+/// In place is safe: no block reads a pixel before its own target.
 fn shrink(px: []u8, w: c_int, h: c_int, max_w: c_int) [2]c_int {
     if (w <= max_w) return .{ w, h };
     const step: usize = @intCast(@divTrunc(w + max_w - 1, max_w));
@@ -631,9 +653,13 @@ fn shrink(px: []u8, w: c_int, h: c_int, max_w: c_int) [2]c_int {
     const nw = uw / step;
     const nh = @as(usize, @intCast(h)) / step;
     for (0..nh) |y| for (0..nw) |x| {
-        const from = (y * step * uw + x * step) * 4;
+        var sum: [4]u32 = @splat(0);
+        for (0..step) |dy| for (0..step) |dx| {
+            const from = ((y * step + dy) * uw + x * step + dx) * 4;
+            for (&sum, px[from .. from + 4]) |*s, b| s.* += b;
+        };
         const to = (y * nw + x) * 4;
-        std.mem.copyForwards(u8, px[to .. to + 4], px[from .. from + 4]);
+        for (px[to .. to + 4], sum) |*b, s| b.* = @intCast(s / @as(u32, @intCast(step * step)));
     };
     return .{ @intCast(nw), @intCast(nh) };
 }
@@ -1524,12 +1550,13 @@ fn tickDownload(a: *App) void {
     if (st == 1) startScan(a);
 }
 
-/// shortcut: the first table listing the chart, as its level is; pass the table along if one opened from another table must name that.
+/// The table a level row was opened from, as `levelRows` gives its level; otherwise the first, as `song_select` does.
 fn tableName(a: *App, song: db_mod.Song) usize {
-    const st = a.db.prepare("SELECT b.name FROM table_song t JOIN bms_table b ON b.url=t.url WHERE (t.md5=?1 AND t.md5<>'') OR (t.sha256=?2 AND t.sha256<>'') ORDER BY b.name LIMIT 1") catch return 0;
+    const st = a.db.prepare("SELECT b.name FROM table_song t JOIN bms_table b ON b.url=t.url WHERE (t.md5=?1 AND t.md5<>'') OR (t.sha256=?2 AND t.sha256<>'') ORDER BY b.url=?3 DESC, b.name LIMIT 1") catch return 0;
     defer st.deinit();
     st.bindText(1, song.md5);
     st.bindText(2, song.sha256);
+    st.bindText(3, if (a.sel.view == .level and a.sel.search.len == 0) a.sel.table_url else "");
     if (!(st.step() catch false)) return 0;
     const name = st.text(0);
     const n = @min(name.len, a.play_table_buf.len);
@@ -2152,11 +2179,12 @@ test "wheel easing does not depend on the frame rate" {
     try std.testing.expectEqual(@as(f32, 0), scrollStep(0.0005, 0, 0));
 }
 
-test "shrinking keeps a whole number of steps and the pixels it samples" {
+test "shrinking keeps a whole number of steps and averages each block" {
     var px: [4 * 4 * 2]u8 = undefined;
     for (&px, 0..) |*b, i| b.* = @intCast(i);
     try std.testing.expectEqual([2]c_int{ 2, 1 }, shrink(&px, 4, 2, 2));
-    try std.testing.expectEqualSlices(u8, &.{ 0, 1, 2, 3, 8, 9, 10, 11 }, px[0..8]);
+    // Block 0 is pixels 0, 1, 4 and 5; block 1 is 2, 3, 6 and 7.
+    try std.testing.expectEqualSlices(u8, &.{ 10, 11, 12, 13, 18, 19, 20, 21 }, px[0..8]);
     try std.testing.expectEqual([2]c_int{ 4, 2 }, shrink(&px, 4, 2, 4));
 }
 
@@ -2265,6 +2293,23 @@ test "a table opens by level and lists charts the library lacks" {
     key(a, c.SDL_SCANCODE_ESCAPE);
     try std.testing.expectEqual(.root, a.sel.view);
     try std.testing.expectEqual(@as(usize, 2), a.sel.cursor);
+}
+
+test "a chart opened from a table names that table, not the first listing it" {
+    const a = try testing.open();
+    defer testing.close(a);
+    try a.db.exec("INSERT INTO bms_table(url,name,symbol) VALUES('https://a.example/','Another','+');" ++
+        "INSERT INTO table_song(url,level,ord,md5,sha256,title) VALUES('https://a.example/','12',0,'md1','','Alpha')");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const st = try a.db.prepare(db_mod.song_select ++ " WHERE s.md5='md1'");
+    defer st.deinit();
+    try std.testing.expect(try st.step());
+    const song = try db_mod.readSong(arena.allocator(), st);
+    try std.testing.expectEqualStrings("Another", a.play_table_buf[0..tableName(a, song)]);
+    a.sel.view = .level;
+    a.sel.table_url = "https://t.example/";
+    try std.testing.expectEqualStrings("Table", a.play_table_buf[0..tableName(a, song)]);
 }
 
 test "the courses row lists courses by table" {
