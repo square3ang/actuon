@@ -25,6 +25,13 @@ pub fn writeAtomic(gpa: std.mem.Allocator, io: Io, path: []const u8, data: []con
     try rename(tmp, path);
 }
 
+/// Windows flushes only a handle opened for writing.
+pub fn sync(io: Io, path: []const u8) !void {
+    const f = try Dir.cwd().openFile(io, path, .{ .mode = .read_write });
+    defer f.close(io);
+    try f.sync(io);
+}
+
 pub fn exists(io: Io, path: []const u8) bool {
     Dir.cwd().access(io, path, .{}) catch return false;
     return true;

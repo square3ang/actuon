@@ -32,6 +32,7 @@ const macos_bundle = "actuon.app";
 const macos_exe = "Contents/MacOS/actuon";
 const staged_name = ".actuon-update";
 const old_suffix = ".actuon-old";
+const journal_name = ".actuon-swap";
 
 pub const Release = struct {
     version: []const u8,
@@ -97,8 +98,10 @@ fn fetchProof(gpa: std.mem.Allocator, io: std.Io, base: []const u8, url: []const
 fn replacePackage(a: std.mem.Allocator, io: std.Io, url: []const u8, proof: Proof, dir: []const u8, inner: []const u8, comptime swap: anytype, to: []const u8, progress: *http.Progress) !void {
     const archive = try std.fs.path.join(a, &.{ dir, staged_name ++ ".zip" });
     const staged = try std.fs.path.join(a, &.{ dir, staged_name });
+    const journal = try std.fs.path.join(a, &.{ dir, journal_name });
     defer fs.remove(io, archive);
-    defer fs.removeTree(io, staged);
+    // A journal left behind needs the staged files at the next start.
+    defer if (!fs.exists(io, journal)) fs.removeTree(io, staged);
     fs.removeTree(io, staged);
     try fetchVerified(a, io, url, proof, archive, progress);
     _ = try download.extract(a, io, archive, staged);
@@ -114,24 +117,56 @@ fn swapBundle(a: std.mem.Allocator, io: std.Io, from: []const u8, to: []const u8
     try fs.swap(from, to);
 }
 
-/// Windows can rename a running exe but not overwrite it. shortcut: a power cut mid-swap leaves old and new files mixed, reinstall by hand; add a journal if that is ever reported.
+/// Windows can rename a running exe but not overwrite it. The journal lets the next start finish a swap that a power cut stopped.
 fn swapFiles(a: std.mem.Allocator, io: std.Io, from: []const u8, to: []const u8) !void {
     const entries = try fs.list(a, io, from);
     var has_exe = false;
+    var plan: std.ArrayList(u8) = .empty;
     for (entries) |e| {
-        if (e.is_dir) return error.BadPackage;
+        if (e.is_dir or !plainName(e.name)) return error.BadPackage;
         if (std.mem.eql(u8, e.name, windows_exe)) has_exe = true;
+        // finishSwap rolls forward, so every staged file must be on disk before the journal is.
+        try fs.sync(io, try std.fs.path.join(a, &.{ from, e.name }));
+        try plan.print(a, "{s}\n", .{e.name});
     }
     if (!has_exe) return error.BadPackage;
+    const journal = try std.fs.path.join(a, &.{ to, journal_name });
+    try fs.writeAtomic(a, io, journal, plan.items);
     for (entries, 0..) |e, i| {
         swapIn(a, io, from, to, e.name) catch |err| {
             var intact = true;
             for (entries[0..i]) |back| swapBack(a, io, from, to, back.name) catch {
                 intact = false;
             };
-            return if (intact) err else error.UpdateLeftBroken;
+            if (!intact) return error.UpdateLeftBroken;
+            fs.remove(io, journal);
+            return err;
         };
     }
+    fs.remove(io, journal);
+}
+
+/// A journal line names one file in the game folder, never a path.
+fn plainName(name: []const u8) bool {
+    if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return false;
+    return std.mem.indexOfAny(u8, name, "/\\\n") == null;
+}
+
+/// Each file is still staged, or swapIn already moved it, so redoing swapIn for the staged ones finishes the update.
+fn finishSwap(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
+    const journal = try std.fs.path.join(a, &.{ dir, journal_name });
+    const plan = fs.readAlloc(a, io, journal, 1 << 16) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    var names = std.mem.tokenizeScalar(u8, plan, '\n');
+    while (names.next()) |name| if (!plainName(name)) return error.BadJournal;
+    const from = try std.fs.path.join(a, &.{ dir, staged_name, windows_folder });
+    names.reset();
+    while (names.next()) |name| {
+        if (fs.exists(io, try std.fs.path.join(a, &.{ from, name }))) try swapIn(a, io, from, dir, name);
+    }
+    fs.remove(io, journal);
 }
 
 fn swapIn(a: std.mem.Allocator, io: std.Io, from: []const u8, to: []const u8, name: []const u8) !void {
@@ -155,6 +190,7 @@ fn swapBack(a: std.mem.Allocator, io: std.Io, from: []const u8, to: []const u8, 
 
 /// The files in use by the last update have been released by now.
 fn removeLeftovers(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
+    try finishSwap(a, io, dir);
     for (try fs.list(a, io, dir)) |e| {
         if (std.mem.endsWith(u8, e.name, old_suffix)) fs.remove(io, try std.fs.path.join(a, &.{ dir, e.name }));
     }
@@ -518,6 +554,7 @@ test "a verified package replaces the folder, and the next launch clears what it
     const old = try std.fmt.allocPrint(a, "{s}" ++ old_suffix, .{exe});
     try std.testing.expectEqualStrings("old", try fs.readAlloc(a, std.testing.io, old, 16));
     try std.testing.expect(!fs.exists(std.testing.io, try std.fs.path.join(a, &.{ dir, staged_name })));
+    try std.testing.expect(!fs.exists(std.testing.io, try std.fs.path.join(a, &.{ dir, journal_name })));
 
     // As a download cut short leaves it.
     const archive = try std.fs.path.join(a, &.{ dir, staged_name ++ ".zip" });
@@ -577,6 +614,60 @@ test "a swap that fails partway puts every file back" {
 
     try std.testing.expect(std.meta.isError(swapFiles(a, std.testing.io, from, to)));
     for (names) |n| try std.testing.expectEqualStrings("old", try fs.readAlloc(a, std.testing.io, try std.fs.path.join(a, &.{ to, n }), 16));
+    try std.testing.expect(!fs.exists(std.testing.io, try std.fs.path.join(a, &.{ to, journal_name })));
+}
+
+test "the next start finishes a swap that stopped at any step" {
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const staged = staged_name ++ "/" ++ windows_folder ++ "/";
+    // swapIn's renames in order; new.dll has no old copy to keep.
+    const renames = [_][2][]const u8{
+        .{ windows_exe, windows_exe ++ old_suffix },
+        .{ staged ++ windows_exe, windows_exe },
+        .{ "a.dll", "a.dll" ++ old_suffix },
+        .{ staged ++ "a.dll", "a.dll" },
+        .{ staged ++ "new.dll", "new.dll" },
+    };
+    // Step 0 stops before the journal is written; step k after k-1 renames.
+    for (0..renames.len + 2) |step| {
+        const dir = try tmpPath(a, &tmp, try std.fmt.allocPrint(a, "game{d}", .{step}));
+        try fs.mkdirs(io, try std.fs.path.join(a, &.{ dir, staged }));
+        for ([_][]const u8{ windows_exe, "a.dll", "new.dll" }) |n| try fs.write(io, try std.fs.path.join(a, &.{ dir, staged, n }), "new");
+        for ([_][]const u8{ windows_exe, "a.dll" }) |n| try fs.write(io, try std.fs.path.join(a, &.{ dir, n }), "old");
+        if (step > 0) try fs.write(io, try std.fs.path.join(a, &.{ dir, journal_name }), windows_exe ++ "\na.dll\nnew.dll\n");
+        for (renames[0..step -| 1]) |r| try fs.rename(try std.fs.path.join(a, &.{ dir, r[0] }), try std.fs.path.join(a, &.{ dir, r[1] }));
+
+        try removeLeftovers(a, io, dir);
+        const want = if (step == 0) "old" else "new";
+        for ([_][]const u8{ windows_exe, "a.dll" }) |n| try std.testing.expectEqualStrings(want, try fs.readAlloc(a, io, try std.fs.path.join(a, &.{ dir, n }), 16));
+        try std.testing.expectEqual(step > 0, fs.exists(io, try std.fs.path.join(a, &.{ dir, "new.dll" })));
+        for ([_][]const u8{ journal_name, staged_name, windows_exe ++ old_suffix, "a.dll" ++ old_suffix }) |n| try std.testing.expect(!fs.exists(io, try std.fs.path.join(a, &.{ dir, n })));
+    }
+}
+
+test "a journal naming a path outside the game folder moves nothing" {
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmpPath(a, &tmp, "game");
+    const staged = try std.fs.path.join(a, &.{ dir, staged_name, windows_folder });
+    try fs.mkdirs(io, staged);
+    try fs.write(io, try std.fs.path.join(a, &.{ staged, windows_exe }), "new");
+    try fs.write(io, try std.fs.path.join(a, &.{ dir, windows_exe }), "old");
+    for ([_][]const u8{ windows_exe ++ "\n../" ++ windows_exe ++ "\n", windows_exe ++ "\n..\n", "sub\\" ++ windows_exe ++ "\n" }) |plan| {
+        try fs.write(io, try std.fs.path.join(a, &.{ dir, journal_name }), plan);
+        try std.testing.expectError(error.BadJournal, removeLeftovers(a, io, dir));
+        try std.testing.expectEqualStrings("old", try fs.readAlloc(a, io, try std.fs.path.join(a, &.{ dir, windows_exe }), 16));
+        try std.testing.expect(fs.exists(io, try std.fs.path.join(a, &.{ staged, windows_exe })));
+    }
 }
 
 test "a signature must be 64 bytes, and it vouches for the tag and asset in the url" {
