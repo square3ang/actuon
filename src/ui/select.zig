@@ -250,7 +250,7 @@ fn orderBy(sort: u8) []const u8 {
         2 => " ORDER BY s.max_bpm, s.title",
         3 => " ORDER BY s.length_ms, s.title",
         4 => " ORDER BY CAST(s.level AS INTEGER), s.title",
-        5 => " ORDER BY COALESCE(c.clear,0) DESC, s.title",
+        5 => " ORDER BY " ++ db_mod.lamp ++ " DESC, s.title",
         6 => " ORDER BY COALESCE(c.ex,0) DESC, s.title",
         // Charts never played have no miss count: they go last.
         7 => " ORDER BY COALESCE(c.min_bp,-1)<0, c.min_bp, s.title",
@@ -973,7 +973,8 @@ fn drawChartInfo(a: *App, wheel_x: f32, dock_y: f32) void {
                 _ = g.text(result.clear_names[song.clear], lx + 18 * u, iy + 18 * u, g.scaled(16), if (song.clear == 0) gfx.dim else lamp);
                 if (song.miss >= 0 and song.played > 0) g.fmt(lx + 18 * u, iy + 40 * u, g.scaled(12), gfx.dim, "BP {d}   PLAYS {d}", .{ song.miss, song.played });
                 g.digits(lx + lw * 0.74, iy + 14 * u, g.scaled(48), 5, song.ex, gfx.white);
-                if (song.clear > 0) g.textRight(result.rankOf(song.ex, song.notes), lx + lw - 10 * u, iy + 14 * u, g.scaled(48), gfx.cyan);
+                // An assist lamp alone has no score to rank.
+                if (song.ex > 0) g.textRight(result.rankOf(song.ex, song.notes), lx + lw - 10 * u, iy + 14 * u, g.scaled(48), gfx.cyan);
                 if (s.board) |b| {
                     var place: [64]u8 = undefined;
                     _ = g.text(b.placeText(&place), lx + 18 * u, iy + sh - 20 * u, g.scaled(12), gfx.sky);

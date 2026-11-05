@@ -91,10 +91,9 @@ fn saveLocal(a: *App, s: *session_mod.Session, snap: session_mod.Snapshot, bytes
     const r = &a.res;
     const ln_mode = @backingInt(s.params.rec.ln_mode);
     try a.db.exec("BEGIN IMMEDIATE");
-    // As asked, not as played: the list files a #RANDOM chart by its scanned branch.
-    const mode = try db_mod.scoreMode(a.db, &s.chart.sha256, @backingInt(a.load_params.rec.ln_mode));
+    const mode = try db_mod.scoreMode(a.db, &s.chart.sha256, @backingInt(a.load_params.rec.ln_mode), ln_mode);
     {
-        const look = try a.db.prepare("SELECT ex, MAX(clear,assist) FROM score WHERE sha256=?1 AND mode=?2");
+        const look = try a.db.prepare("SELECT ex, " ++ db_mod.lamp ++ " FROM score c WHERE sha256=?1 AND mode=?2");
         defer look.deinit();
         look.bindText(1, &s.chart.sha256);
         look.bindInt(2, mode);
