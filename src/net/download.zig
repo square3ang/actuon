@@ -32,13 +32,10 @@ fn extractWithin(a: std.mem.Allocator, io: std.Io, archive_path: []const u8, des
     const ar = c.archive_read_new() orelse return error.Archive;
     defer _ = c.archive_read_free(ar);
     // Not the _all calls: lrzip, lzop and grzip would run a program from PATH on the untrusted bytes.
-    // shortcut: a libarchive built without one of these libraries falls back to its program too; fine on distro and bundled builds.
-    _ = c.archive_read_support_filter_gzip(ar);
-    _ = c.archive_read_support_filter_bzip2(ar);
-    _ = c.archive_read_support_filter_xz(ar);
-    _ = c.archive_read_support_filter_lzma(ar);
-    _ = c.archive_read_support_filter_zstd(ar);
-    _ = c.archive_read_support_filter_lz4(ar);
+    try supportBuiltIn(ar, &.{
+        c.archive_read_support_filter_gzip, c.archive_read_support_filter_bzip2, c.archive_read_support_filter_xz,
+        c.archive_read_support_filter_lzma, c.archive_read_support_filter_zstd,  c.archive_read_support_filter_lz4,
+    });
     _ = c.archive_read_support_format_zip(ar);
     _ = c.archive_read_support_format_7zip(ar);
     _ = c.archive_read_support_format_rar(ar);
@@ -91,6 +88,17 @@ fn extractWithin(a: std.mem.Allocator, io: std.Io, archive_path: []const u8, des
         files += 1;
     }
     return files;
+}
+
+const Support = @TypeOf(&c.archive_read_support_filter_gzip);
+
+/// A libarchive built without a filter's library answers ARCHIVE_WARN and would run that program from PATH instead, so a throwaway reader asks first.
+fn supportBuiltIn(ar: *c.struct_archive, filters: []const Support) !void {
+    const probe = c.archive_read_new() orelse return error.Archive;
+    defer _ = c.archive_read_free(probe);
+    for (filters) |support| {
+        if (support(probe) == c.ARCHIVE_OK) _ = support(ar);
+    }
 }
 
 pub const Job = struct {
@@ -234,6 +242,26 @@ test "an archive needing an outside decompressor is refused" {
     const path = try std.fmt.allocPrint(a, "{s}/t.lrz", .{root});
     try fs.write(std.testing.io, path, "LRZI\x00\x06\x00\x00\x00\x00\x00\x00\x00\x00");
     try std.testing.expectError(error.Archive, extract(a, std.testing.io, path, try std.fmt.allocPrint(a, "{s}/out", .{root})));
+}
+
+test "a filter that would fall back to an outside program is left off" {
+    const Calls = struct {
+        var library: u32 = 0;
+        var program: u32 = 0;
+        fn builtIn(_: ?*c.struct_archive) callconv(.c) c_int {
+            library += 1;
+            return c.ARCHIVE_OK;
+        }
+        fn outside(_: ?*c.struct_archive) callconv(.c) c_int {
+            program += 1;
+            return c.ARCHIVE_WARN;
+        }
+    };
+    const ar = c.archive_read_new().?;
+    defer _ = c.archive_read_free(ar);
+    try supportBuiltIn(ar, &.{ &Calls.builtIn, &Calls.outside });
+    try std.testing.expectEqual(@as(u32, 2), Calls.library);
+    try std.testing.expectEqual(@as(u32, 1), Calls.program);
 }
 
 test "entry names cannot escape" {
