@@ -880,9 +880,10 @@ test "LR2 import maps clears through md5 and skips unknown charts" {
     defer d.close();
     try d.exec(schema);
     try d.exec("INSERT INTO song(path,folder,sha256,md5) VALUES('p','f','shaA','md5A')");
-    const lr2 = "actuon_test_lr2.db";
-    fs.remove(std.testing.io, lr2);
-    defer fs.remove(std.testing.io, lr2);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const lr2 = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/lr2.db", .{tmp.sub_path});
+    defer gpa.free(lr2);
     const src = try Db.open(lr2, gpa, false);
     try src.exec("CREATE TABLE score(hash TEXT, clear INT, perfect INT, great INT, good INT, bad INT, poor INT, minbp INT, playcount INT, clearcount INT);" ++
         "INSERT INTO score VALUES('md5A',4,10,5,1,1,1,3,7,2),('nope',1,1,1,1,1,1,1,1,1)");
@@ -942,17 +943,22 @@ test "a root inside another, or added twice, is scanned once" {
 
 test "a scan drops gone charts only in folders it could read" {
     const gpa = std.testing.allocator;
-    const root = "actuon_test_roots";
-    fs.removeTree(std.testing.io, root);
-    defer fs.removeTree(std.testing.io, root);
-    try fs.mkdirs(std.testing.io, root ++ "/bms");
-    try fs.mkdirs(std.testing.io, root ++ "/bms2");
-    try fs.write(std.testing.io, root ++ "/file", "not a folder");
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const bms = try std.fmt.allocPrint(a, "{s}/bms", .{root});
+    const file = try std.fmt.allocPrint(a, "{s}/file", .{root});
+    try fs.mkdirs(std.testing.io, bms);
+    try fs.mkdirs(std.testing.io, try std.fmt.allocPrint(a, "{s}/bms2", .{root}));
+    try fs.write(std.testing.io, file, "not a folder");
     const d = try Db.open(":memory:", gpa, false);
     defer d.close();
     try initSchema(d);
-    try d.exec("INSERT INTO song(path,folder,sha256,md5,mtime,size) VALUES('" ++ root ++ "/bms/gone.bms','','a','a',0,0),('" ++ root ++ "/bms2/kept.bms','','b','b',0,0),('" ++ root ++ "/file/kept.bms','','c','c',0,0)");
-    const roots = [_][]const u8{ root ++ "/bms", root ++ "/file" };
+    try d.exec(try std.fmt.allocPrintSentinel(a, "INSERT INTO song(path,folder,sha256,md5,mtime,size) VALUES('{0s}/bms/gone.bms','','a','a',0,0),('{0s}/bms2/kept.bms','','b','b',0,0),('{0s}/file/kept.bms','','c','c',0,0)", .{root}, 0));
+    const roots = [_][]const u8{ bms, file };
     try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, std.testing.io, d, &roots, null, null)).removed);
     const st = try d.prepare("SELECT COUNT(*) FROM song WHERE path LIKE '%kept.bms'");
     defer st.deinit();
@@ -985,19 +991,21 @@ test "an old database drops the columns nothing reads and keeps its rows" {
 
 test "a chart that fails to parse is read once, then again only when it changes, and forgotten when gone" {
     const gpa = std.testing.allocator;
-    const root = "actuon_test_unparsed";
-    fs.removeTree(std.testing.io, root);
-    defer fs.removeTree(std.testing.io, root);
-    try fs.mkdirs(std.testing.io, root);
-    try fs.write(std.testing.io, root ++ "/broken.bmson", "{");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(root);
+    const broken = try std.fmt.allocPrint(gpa, "{s}/broken.bmson", .{root});
+    defer gpa.free(broken);
+    try fs.write(std.testing.io, broken, "{");
     const d = try Db.open(":memory:", gpa, false);
     defer d.close();
     try initSchema(d);
     try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, std.testing.io, d, &.{root}, null, null)).failed);
     try std.testing.expectEqual(@as(u32, 0), (try scan(gpa, std.testing.io, d, &.{root}, null, null)).failed);
-    try fs.write(std.testing.io, root ++ "/broken.bmson", "{\"");
+    try fs.write(std.testing.io, broken, "{\"");
     try std.testing.expectEqual(@as(u32, 1), (try scan(gpa, std.testing.io, d, &.{root}, null, null)).failed);
-    fs.remove(std.testing.io, root ++ "/broken.bmson");
+    fs.remove(std.testing.io, broken);
     _ = try scan(gpa, std.testing.io, d, &.{root}, null, null);
     const st = try d.prepare("SELECT COUNT(*) FROM unparsed");
     defer st.deinit();
@@ -1007,15 +1015,17 @@ test "a chart that fails to parse is read once, then again only when it changes,
 
 test "a scan through links back to the root ends and stores each chart once" {
     const gpa = std.testing.allocator;
-    const root = "actuon_test_loop";
-    fs.removeTree(std.testing.io, root);
-    defer fs.removeTree(std.testing.io, root);
-    try fs.mkdirs(std.testing.io, root);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     const chart = try fs.readAlloc(gpa, std.testing.io, "tests/charts/five_key.bms", 1 << 20);
     defer gpa.free(chart);
-    try fs.write(std.testing.io, root ++ "/song.bms", chart);
-    try std.Io.Dir.cwd().symLink(std.testing.io, ".", root ++ "/a", .{ .is_directory = true });
-    try std.Io.Dir.cwd().symLink(std.testing.io, ".", root ++ "/b", .{ .is_directory = true });
+    try fs.write(std.testing.io, try std.fmt.allocPrint(a, "{s}/song.bms", .{root}), chart);
+    try std.Io.Dir.cwd().symLink(std.testing.io, ".", try std.fmt.allocPrint(a, "{s}/a", .{root}), .{ .is_directory = true });
+    try std.Io.Dir.cwd().symLink(std.testing.io, ".", try std.fmt.allocPrint(a, "{s}/b", .{root}), .{ .is_directory = true });
     const d = try Db.open(":memory:", gpa, false);
     defer d.close();
     try initSchema(d);
@@ -1032,7 +1042,14 @@ test "imports clamp negative and huge counts instead of trapping" {
     defer d.close();
     try d.exec(schema);
     try d.exec("INSERT INTO song(path,folder,sha256,md5) VALUES('p','f','shaL','md5L')");
-    const files = [_][]const u8{ "actuon_test_clamp_bo.db", "actuon_test_clamp_lr2.db" };
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const files = [_][]const u8{
+        try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}/clamp_bo.db", .{tmp.sub_path}),
+        try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}/clamp_lr2.db", .{tmp.sub_path}),
+    };
     const tables = [_][:0]const u8{
         "CREATE TABLE score(sha256 TEXT,clear INT,epg INT,lpg INT,egr INT,lgr INT,egd INT,lgd INT,ebd INT,lbd INT,epr INT,lpr INT,ems INT,lms INT,combo INT,minbp INT,playcount INT,clearcount INT,date INT,mode INT);" ++
             "INSERT INTO score VALUES('shaB',5,9223372036854775807,1,-5,0,0,0,0,0,0,0,0,0,-1,-1,-1,-1,0,0)",
@@ -1040,12 +1057,10 @@ test "imports clamp negative and huge counts instead of trapping" {
             "INSERT INTO score VALUES('md5L',4,-1,9999999999,0,0,0,-1,-1,-1)",
     };
     for (files, tables) |f, t| {
-        fs.remove(std.testing.io, f);
         const src = try Db.open(f, gpa, false);
         try src.exec(t);
         src.close();
     }
-    defer for (files) |f| fs.remove(std.testing.io, f);
     _ = try importBeatoraja(gpa, d, files[0]);
     _ = try importLr2(gpa, d, files[1]);
     const max: i64 = std.math.maxInt(u32);
@@ -1248,13 +1263,10 @@ test "a play count past u32 still lists its chart" {
 
 test "a scan leaves the database free for other writers between batches" {
     const gpa = std.testing.allocator;
-    const path = "actuon_test_scan.db";
-    fs.remove(std.testing.io, path);
-    defer {
-        fs.remove(std.testing.io, path);
-        fs.remove(std.testing.io, path ++ "-wal");
-        fs.remove(std.testing.io, path ++ "-shm");
-    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/scan.db", .{tmp.sub_path});
+    defer gpa.free(path);
     const d = try Db.open(path, gpa, false);
     defer d.close();
     try initSchema(d);
@@ -1268,13 +1280,15 @@ test "a scan leaves the database free for other writers between batches" {
 test "LN on any #RANDOM branch files plays as asked, and a CN judged play never lands in the LN row" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    const root = "actuon_test_random_ln";
-    fs.removeTree(io, root);
-    defer fs.removeTree(io, root);
-    try fs.mkdirs(io, root);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     const head = "#BPM 120\n#WAV01 a.wav\n#00111:01\n#RANDOM 2\n#IF 1\n#00112:01\n#ENDIF\n#IF 2\n";
-    try fs.write(io, root ++ "/ln.bms", head ++ "#TITLE ln\n#00151:0101\n#ENDIF\n#ENDRANDOM\n");
-    try fs.write(io, root ++ "/plain.bms", head ++ "#TITLE plain\n#00113:01\n#ENDIF\n#ENDRANDOM\n");
+    try fs.write(io, try std.fmt.allocPrint(a, "{s}/ln.bms", .{root}), head ++ "#TITLE ln\n#00151:0101\n#ENDIF\n#ENDRANDOM\n");
+    try fs.write(io, try std.fmt.allocPrint(a, "{s}/plain.bms", .{root}), head ++ "#TITLE plain\n#00113:01\n#ENDIF\n#ENDRANDOM\n");
     const d = try Db.open(":memory:", gpa, false);
     defer d.close();
     try initSchema(d);
@@ -1321,31 +1335,34 @@ test "a watched rescan lists only changed folders, drops removed ones and falls 
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    const root = "actuon_test_watch";
-    fs.removeTree(io, root);
-    defer fs.removeTree(io, root);
-    try fs.mkdirs(io, root ++ "/old");
-    try fs.mkdirs(io, root ++ "/gone/deep");
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try fs.mkdirs(io, try std.fmt.allocPrint(a, "{s}/old", .{root}));
+    try fs.mkdirs(io, try std.fmt.allocPrint(a, "{s}/gone/deep", .{root}));
     const chart = try fs.readAlloc(gpa, io, "tests/charts/five_key.bms", 1 << 20);
     defer gpa.free(chart);
-    try fs.write(io, root ++ "/old/a.bms", chart);
-    try fs.write(io, root ++ "/gone/deep/b.bms", chart);
+    try fs.write(io, try std.fmt.allocPrint(a, "{s}/old/a.bms", .{root}), chart);
+    try fs.write(io, try std.fmt.allocPrint(a, "{s}/gone/deep/b.bms", .{root}), chart);
     const d = try Db.open(":memory:", gpa, false);
     defer d.close();
     try initSchema(d);
     var w: Watch = .init(gpa);
     defer w.deinit();
     // A root as typed may end in a separator.
-    const roots = [_][]const u8{root ++ "/"};
+    const roots = [_][]const u8{try std.fmt.allocPrint(a, "{s}/", .{root})};
     try std.testing.expectEqual(@as(u32, 2), (try scan(gpa, io, d, &roots, null, &w)).parsed);
     // A stat pass would read every chart again now.
     try d.exec("UPDATE song SET mtime=1");
     try std.testing.expectEqual(ScanStats{}, try scan(gpa, io, d, &roots, null, &w));
-    try fs.mkdirs(io, root ++ "/new");
-    try fs.write(io, root ++ "/new/c.bms", chart);
-    fs.removeTree(io, root ++ "/gone");
+    try fs.mkdirs(io, try std.fmt.allocPrint(a, "{s}/new", .{root}));
+    try fs.write(io, try std.fmt.allocPrint(a, "{s}/new/c.bms", .{root}), chart);
+    fs.removeTree(io, try std.fmt.allocPrint(a, "{s}/gone", .{root}));
     try std.testing.expectEqual(ScanStats{ .parsed = 1, .removed = 1 }, try scan(gpa, io, d, &roots, null, &w));
-    try fs.write(io, root ++ "/old/d.bms", chart);
+    try fs.write(io, try std.fmt.allocPrint(a, "{s}/old/d.bms", .{root}), chart);
     try std.testing.expectEqual(ScanStats{ .parsed = 2 }, try scan(gpa, io, d, &roots, null, &w));
     try d.exec("UPDATE song SET mtime=1");
     w.lost = true;
@@ -1356,14 +1373,19 @@ test "a watched folder made again under its name, or moved to another watched on
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    const root = "actuon_test_watch_again";
-    fs.removeTree(io, root);
-    defer fs.removeTree(io, root);
-    try fs.mkdirs(io, root ++ "/a/pack/sub");
-    try fs.mkdirs(io, root ++ "/b");
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const pack = try std.fmt.allocPrint(a, "{s}/a/pack", .{root});
+    const moved = try std.fmt.allocPrint(a, "{s}/b/pack", .{root});
+    try fs.mkdirs(io, try std.fmt.allocPrint(a, "{s}/sub", .{pack}));
+    try fs.mkdirs(io, try std.fmt.allocPrint(a, "{s}/b", .{root}));
     const chart = try fs.readAlloc(gpa, io, "tests/charts/five_key.bms", 1 << 20);
     defer gpa.free(chart);
-    try fs.write(io, root ++ "/a/pack/sub/1.bms", chart);
+    try fs.write(io, try std.fmt.allocPrint(a, "{s}/sub/1.bms", .{pack}), chart);
     const d = try Db.open(":memory:", gpa, false);
     defer d.close();
     try initSchema(d);
@@ -1372,14 +1394,14 @@ test "a watched folder made again under its name, or moved to another watched on
     const roots = [_][]const u8{root};
     try std.testing.expectEqual(ScanStats{ .parsed = 1 }, try scan(gpa, io, d, &roots, null, &w));
     // As re-extracting an archive does.
-    fs.removeTree(io, root ++ "/a/pack");
-    try fs.mkdirs(io, root ++ "/a/pack");
-    try fs.write(io, root ++ "/a/pack/2.bms", chart);
+    fs.removeTree(io, pack);
+    try fs.mkdirs(io, pack);
+    try fs.write(io, try std.fmt.allocPrint(a, "{s}/2.bms", .{pack}), chart);
     try std.testing.expectEqual(ScanStats{ .parsed = 1, .removed = 1 }, try scan(gpa, io, d, &roots, null, &w));
-    try fs.write(io, root ++ "/a/pack/3.bms", chart);
+    try fs.write(io, try std.fmt.allocPrint(a, "{s}/3.bms", .{pack}), chart);
     try std.testing.expectEqual(ScanStats{ .parsed = 1 }, try scan(gpa, io, d, &roots, null, &w));
-    try fs.rename(root ++ "/a/pack", root ++ "/b/pack");
+    try fs.rename(pack, moved);
     try std.testing.expectEqual(ScanStats{ .parsed = 2, .removed = 2 }, try scan(gpa, io, d, &roots, null, &w));
-    try fs.write(io, root ++ "/b/pack/4.bms", chart);
+    try fs.write(io, try std.fmt.allocPrint(a, "{s}/4.bms", .{moved}), chart);
     try std.testing.expectEqual(ScanStats{ .parsed = 1 }, try scan(gpa, io, d, &roots, null, &w));
 }

@@ -262,9 +262,11 @@ test "extract keeps files and drops escapes and links" {
     defer arena.deinit();
     const al = arena.allocator();
     // A tar built by hand: one good file, one traversal, one symlink, one empty folder.
-    const tar_path = "actuon_test.tar";
-    const dest = "actuon_test_out";
-    defer fs.remove(io, tar_path);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(al, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const tar_path = try std.fmt.allocPrint(al, "{s}/t.tar", .{root});
+    const dest = try std.fmt.allocPrint(al, "{s}/out", .{root});
     var tar: std.ArrayList(u8) = .empty;
     const add = struct {
         fn f(out: *std.ArrayList(u8), all: std.mem.Allocator, name: []const u8, kind: u8, body: []const u8) !void {
@@ -290,20 +292,19 @@ test "extract keeps files and drops escapes and links" {
     try add(&tar, al, "song/empty/", '5', "");
     try tar.appendNTimes(al, 0, 1024);
     try fs.write(io, tar_path, tar.items);
-    const limited = dest ++ "_limits";
-    defer fs.removeTree(io, limited);
+    const limited = try std.fmt.allocPrint(al, "{s}/out_limits", .{root});
+    const kept = try std.fmt.allocPrint(al, "{s}/kept", .{limited});
     try std.testing.expectError(error.TooLarge, unpack(al, io, tar_path, limited, .{ .bytes = 4 }));
     try std.testing.expect(!fs.exists(io, limited));
     try std.testing.expectError(error.TooManyEntries, unpack(al, io, tar_path, limited, .{ .entries = 2 }));
     try std.testing.expect(!fs.exists(io, limited));
-    try fs.mkdirs(io, limited ++ "/kept");
+    try fs.mkdirs(io, kept);
     try std.testing.expectError(error.TooLarge, unpack(al, io, tar_path, limited, .{ .bytes = 4 }));
-    try std.testing.expect(fs.exists(io, limited ++ "/kept"));
+    try std.testing.expect(fs.exists(io, kept));
     const n = try extract(al, io, tar_path, dest);
     try std.testing.expectEqual(@as(u32, 1), n);
-    try std.testing.expect(fs.exists(io, dest ++ "/song/good.bms"));
-    try std.testing.expect(!fs.exists(io, "evil.bms"));
-    try std.testing.expect(!fs.exists(io, dest ++ "/link"));
-    try std.testing.expect(fs.stat(io, dest ++ "/song/empty").?.is_dir);
-    try std.Io.Dir.cwd().deleteTree(io, dest);
+    try std.testing.expect(fs.exists(io, try std.fmt.allocPrint(al, "{s}/song/good.bms", .{dest})));
+    try std.testing.expect(!fs.exists(io, try std.fmt.allocPrint(al, "{s}/evil.bms", .{root})));
+    try std.testing.expect(!fs.exists(io, try std.fmt.allocPrint(al, "{s}/link", .{dest})));
+    try std.testing.expect(fs.stat(io, try std.fmt.allocPrint(al, "{s}/song/empty", .{dest})).?.is_dir);
 }

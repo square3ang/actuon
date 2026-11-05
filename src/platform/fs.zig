@@ -256,14 +256,18 @@ test "an asset path cannot leave the chart folder" {
 test "writeAtomic replaces the file and leaves no temporary" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    const p = "actuon_test_atomic.txt";
-    defer remove(io, p);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const p = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/atomic.txt", .{tmp.sub_path});
+    defer gpa.free(p);
     try writeAtomic(gpa, io, p, "one");
     try writeAtomic(gpa, io, p, "two");
     const back = try readAlloc(gpa, io, p, 16);
     defer gpa.free(back);
     try std.testing.expectEqualStrings("two", back);
-    try std.testing.expect(!exists(io, p ++ ".tmp"));
+    const tmp_path = try std.fmt.allocPrint(gpa, "{s}.tmp", .{p});
+    defer gpa.free(tmp_path);
+    try std.testing.expect(!exists(io, tmp_path));
 }
 
 test "only a whole .. segment climbs" {
