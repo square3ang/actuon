@@ -54,7 +54,7 @@ pub fn parseRelease(a: std.mem.Allocator, json: []const u8, current: []const u8,
 
 fn fetchVerified(gpa: std.mem.Allocator, io: std.Io, url: []const u8, sha256: [32]u8, path: []const u8, progress: *http.Progress) !void {
     errdefer fs.remove(io, path);
-    try http.download(gpa, io, url, path, progress);
+    try http.download(gpa, io, url, url, path, progress);
     if (!std.mem.eql(u8, &(try fs.sha256(io, path)), &sha256)) return error.ChecksumMismatch;
 }
 

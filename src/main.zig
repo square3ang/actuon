@@ -50,7 +50,7 @@ pub fn main(init: std.process.Init) !void {
         const cfg = config.load(al, io);
         if (cfg.roots.len == 0) return error.NoLibraryFolder;
         const url = try download.expand(al, cfg.download_url, args[2]);
-        const j = download.start(gpa, io, url, cfg.roots[0], args[2]) orelse return error.BadHash;
+        const j = download.start(gpa, io, url, url, cfg.roots[0], args[2]) orelse return error.BadHash;
         defer j.destroy();
         while (j.state.load(.acquire) == 0) c.SDL_Delay(50);
         if (j.state.load(.acquire) != 1) return error.DownloadFailed;

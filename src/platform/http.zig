@@ -86,77 +86,148 @@ pub fn get(gpa: std.mem.Allocator, io: std.Io, url: []const u8) ![]u8 {
 }
 
 /// A GET that refuses every hop, redirects included, whose connection lands on the home network,
-/// except on the host of `own_url`, which the player chose.
+/// except on the host of `own_url` when the player wrote a home-network host there.
 pub fn getPublic(gpa: std.mem.Allocator, io: std.Io, url: []const u8, own_url: []const u8) ![]u8 {
     var c = client(gpa, io);
     defer c.deinit();
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    var own_buf: [std.Io.net.HostName.max_len]u8 = undefined;
-    const own: []const u8 = if (std.Uri.parse(own_url)) |u| (if (std.Io.net.HostName.fromUri(u, &own_buf)) |h| h.bytes else |_| "") else |_| "";
+    var req: std.http.Client.Request = undefined;
+    var res = try openPublic(&c, arena.allocator(), &req, url, own_url);
+    defer req.deinit();
+    var transfer: [64]u8 = undefined;
+    return res.reader(&transfer).allocRemaining(gpa, .limited(max_body)) catch |e| switch (e) {
+        error.StreamTooLong => error.TooLarge,
+        error.ReadFailed => res.bodyErr() orelse error.ReadFailed,
+        else => |other| other,
+    };
+}
+
+/// Follows redirects by hand so every hop gets the check getPublic describes. On success the caller deinits `req`.
+fn openPublic(c: *std.http.Client, arena: std.mem.Allocator, req: *std.http.Client.Request, url: []const u8, own_url: []const u8) !std.http.Client.Response {
+    const own = homeHost(own_url);
     var target = url;
     for (0..4) |_| {
         const uri = try std.Uri.parse(target);
         const protocol = std.http.Client.Protocol.fromUri(uri) orelse return error.UnsupportedUriScheme;
         var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
         const host = try std.Io.net.HostName.fromUri(uri, &host_buf);
-        const conn = if (std.ascii.eqlIgnoreCase(host.bytes, own)) null else try connectPublic(&c, host, uri.port orelse @as(u16, if (protocol == .tls) 443 else 80), protocol);
+        const port = uri.port orelse @as(u16, if (protocol == .tls) 443 else 80);
+        const conn = if (std.ascii.eqlIgnoreCase(host.bytes, own)) null else conn: {
+            var addresses: [16]std.Io.net.IpAddress = undefined;
+            break :conn try connectAs(c, host, try resolvePublic(c.io, host, port, &addresses), port, protocol);
+        };
         // No keep-alive, so a redirect's endless body is dropped with its connection, not read to the end.
-        var req = try c.request(.GET, uri, .{ .connection = conn, .redirect_behavior = .unhandled, .keep_alive = false, .headers = .{ .accept_encoding = .omit } });
-        defer req.deinit();
+        req.* = try c.request(.GET, uri, .{ .connection = conn, .redirect_behavior = .unhandled, .keep_alive = false, .headers = .{ .accept_encoding = .omit } });
+        errdefer req.deinit();
         try req.sendBodiless();
-        var res = try req.receiveHead(&.{});
+        const res = try req.receiveHead(&.{});
         if (res.head.status.class() == .redirect) {
-            target = try join(arena.allocator(), target, res.head.location orelse return error.HttpStatus);
+            target = try join(arena, target, res.head.location orelse return error.HttpStatus);
+            req.deinit();
             continue;
         }
         if (@backingInt(res.head.status) >= 400) return error.HttpStatus;
-        var transfer: [64]u8 = undefined;
-        return res.reader(&transfer).allocRemaining(gpa, .limited(max_body)) catch |e| switch (e) {
-            error.StreamTooLong => error.TooLarge,
-            error.ReadFailed => res.bodyErr() orelse error.ReadFailed,
-            else => |other| other,
-        };
+        return res;
     }
     return error.TooManyHttpRedirects;
 }
 
-/// Only global unicast is public, so mapped IPv4 and the other IPv6 ranges are private too.
+/// The host of `own_url` that may skip the address check, or "" when it is written as a public name a stranger could point home.
+fn homeHost(own_url: []const u8) []const u8 {
+    const host = urlHost(own_url) orelse return "";
+    return if (isPrivateHost(host)) host else "";
+}
+
+pub fn urlHost(url: []const u8) ?[]const u8 {
+    const uri = std.Uri.parse(url) catch return null;
+    if (!std.mem.eql(u8, uri.scheme, "http") and !std.mem.eql(u8, uri.scheme, "https")) return null;
+    const host = switch (uri.host orelse return null) {
+        .raw, .percent_encoded => |h| h,
+    };
+    // Encoded hosts would hide an address from the check below.
+    return if (std.mem.indexOfScalar(u8, host, '%') == null) host else null;
+}
+
+/// Refuses before any connection is made; getPublic then checks where a public name really leads.
+pub fn isPrivateHost(written: []const u8) bool {
+    const host = std.mem.trimEnd(u8, written, ".");
+    if (std.ascii.eqlIgnoreCase(host, "localhost") or std.ascii.endsWithIgnoreCase(host, ".localhost")) return true;
+    if (host.len > 0 and host[0] == '[') {
+        if (host.len < 2 or host[host.len - 1] != ']') return true;
+        return isPrivateAddress(std.Io.net.IpAddress.parseIp6(host[1 .. host.len - 1], 0) catch return true);
+    }
+    // Single-label names and these suffixes only resolve inside a home network, so a LAN table by name keeps working.
+    if (std.mem.indexOfScalar(u8, host, '.') == null) return true;
+    for ([_][]const u8{ ".local", ".home.arpa", ".internal" }) |suffix| if (std.ascii.endsWithIgnoreCase(host, suffix)) return true;
+    const last = host[if (std.mem.lastIndexOfScalar(u8, host, '.')) |dot| dot + 1 else 0..];
+    const is_number = for (last) |ch| {
+        if (!std.ascii.isDigit(ch)) break false;
+    } else true;
+    if (!is_number and !std.ascii.startsWithIgnoreCase(last, "0x")) return false;
+    // A resolver also reads 2130706433, 127.1, 0x7f.0.0.1 and 0177.0.0.1 as addresses, so only a plain quad can pass.
+    var octets: [4]u8 = undefined;
+    var it = std.mem.splitScalar(u8, host, '.');
+    for (&octets) |*octet| {
+        const text = it.next() orelse return true;
+        if (text.len > 1 and text[0] == '0') return true;
+        octet.* = std.fmt.parseInt(u8, text, 10) catch return true;
+    }
+    if (it.next() != null) return true;
+    return isPrivateAddress(.{ .ip4 = .{ .bytes = octets, .port = 0 } });
+}
+
+const nat64_prefix = [12]u8{ 0, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+/// IPv6 outside global unicast is private, which covers mapped IPv4 too.
 pub fn isPrivateAddress(address: std.Io.net.IpAddress) bool {
     return switch (address) {
-        .ip6 => |a| a.bytes[0] & 0xe0 != 0x20,
-        .ip4 => |a| a.bytes[0] == 0 or a.bytes[0] == 10 or a.bytes[0] == 127 or (a.bytes[0] == 169 and a.bytes[1] == 254) or
-            (a.bytes[0] == 172 and a.bytes[1] >= 16 and a.bytes[1] <= 31) or (a.bytes[0] == 192 and a.bytes[1] == 168),
+        // DNS64 on an IPv6-only network writes an IPv4-only host as 64:ff9b::a.b.c.d.
+        .ip6 => |a| if (std.mem.eql(u8, a.bytes[0..12], &nat64_prefix))
+            isPrivateAddress(.{ .ip4 = .{ .bytes = a.bytes[12..16].*, .port = 0 } })
+        else
+            a.bytes[0] & 0xe0 != 0x20,
+        // 100.64/10 is carrier NAT and where tailnets put the player's devices; 224 and up is multicast and reserved.
+        .ip4 => |a| a.bytes[0] == 0 or a.bytes[0] == 10 or a.bytes[0] == 127 or a.bytes[0] >= 224 or
+            (a.bytes[0] == 100 and a.bytes[1] & 0xc0 == 64) or (a.bytes[0] == 169 and a.bytes[1] == 254) or
+            (a.bytes[0] == 172 and a.bytes[1] & 0xf0 == 16) or (a.bytes[0] == 192 and a.bytes[1] == 168),
     };
 }
 
-/// Resolves `host` once and connects to the very address checked, so a second DNS answer cannot point home.
-fn connectPublic(c: *std.http.Client, host: std.Io.net.HostName, port: u16, protocol: std.http.Client.Protocol) !*std.http.Client.Connection {
-    // Lookup never blocks with room for 16.
+/// Every answer is checked, but only the first `out.len` are kept to dial.
+fn resolvePublic(io: std.Io, host: std.Io.net.HostName, port: u16, out: []std.Io.net.IpAddress) ![]std.Io.net.IpAddress {
     var results: [16]std.Io.net.HostName.LookupResult = undefined;
     var resolved: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&results);
-    try host.lookup(c.io, &resolved, .{ .port = port });
-    var addresses: [16]std.Io.net.IpAddress = undefined;
+    // Lookup blocks once the queue is full, and a host may publish any number of records, so it runs beside this drain.
+    var lookup = try io.concurrent(std.Io.net.HostName.lookup, .{ host, io, &resolved, .{ .port = port } });
+    defer lookup.cancel(io) catch {};
     var count: usize = 0;
-    while (resolved.getOne(c.io)) |r| switch (r) {
+    while (resolved.getOne(io)) |r| switch (r) {
         .address => |a| {
             if (isPrivateAddress(a)) return error.PrivateAddress;
-            addresses[count] = a;
-            count += 1;
+            if (count < out.len) {
+                out[count] = a;
+                count += 1;
+            }
         },
         .canonical_name => {},
     } else |e| switch (e) {
-        error.Closed => {},
+        error.Closed => try lookup.await(io),
         error.Canceled => |x| return x,
     }
+    return out[0..count];
+}
+
+/// Connects to one of the checked `addresses`, so a second DNS answer cannot point home.
+fn connectAs(c: *std.http.Client, host: std.Io.net.HostName, addresses: []const std.Io.net.IpAddress, port: u16, protocol: std.http.Client.Protocol) !*std.http.Client.Connection {
     if (protocol == .tls and c.now == null) {
-        // Client.request loads the certificates only when it connects itself.
+        // The TLS handshake below runs before Client.request would load the certificates.
         const now = std.Io.Clock.real.now(c.io);
-        try c.ca_bundle.rescan(c.allocator, c.io, now);
+        c.ca_bundle.rescan(c.allocator, c.io, now) catch |e| return if (e == error.Canceled) error.Canceled else error.CertificateBundleLoadFailure;
         c.now = now;
     }
     var failed: std.http.Client.ConnectTcpError = error.UnknownHostName;
-    for (addresses[0..count]) |address| {
+    for (addresses) |address| {
         var text_buf: [64]u8 = undefined;
         const text = switch (address) {
             .ip4 => |a| try std.fmt.bufPrint(&text_buf, "{d}.{d}.{d}.{d}", .{ a.bytes[0], a.bytes[1], a.bytes[2], a.bytes[3] }),
@@ -179,23 +250,23 @@ pub const Progress = struct {
     cancel: std.atomic.Value(bool) = .init(false),
 };
 
-pub fn download(gpa: std.mem.Allocator, io: std.Io, url: []const u8, path: []const u8, progress: *Progress) !void {
-    return downloadCapped(gpa, io, url, path, progress, max_download);
+/// Checked like getPublic, as the address may come from a stranger's table or a server's answer.
+pub fn download(gpa: std.mem.Allocator, io: std.Io, url: []const u8, own_url: []const u8, path: []const u8, progress: *Progress) !void {
+    return downloadCapped(gpa, io, url, own_url, path, progress, max_download);
 }
 
-fn downloadCapped(gpa: std.mem.Allocator, io: std.Io, url: []const u8, path: []const u8, progress: *Progress, limit: u64) !void {
+fn downloadCapped(gpa: std.mem.Allocator, io: std.Io, url: []const u8, own_url: []const u8, path: []const u8, progress: *Progress, limit: u64) !void {
     var c = client(gpa, io);
     defer c.deinit();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
     const file = try std.Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
     var buf: [1 << 16]u8 = undefined;
     var w = file.writer(io, &buf);
-    var req = try c.request(.GET, try std.Uri.parse(url), .{ .redirect_behavior = @fromBackingInt(@intCast(3)), .headers = .{ .accept_encoding = .omit } });
+    var req: std.http.Client.Request = undefined;
+    var res = try openPublic(&c, arena.allocator(), &req, url, own_url);
     defer req.deinit();
-    try req.sendBodiless();
-    var redirect_buf: [8192]u8 = undefined;
-    var res = try req.receiveHead(&redirect_buf);
-    if (@backingInt(res.head.status) >= 400) return error.HttpStatus;
     progress.done.store(0, .release);
     progress.total.store(res.head.content_length orelse 0, .release);
     var transfer: [64]u8 = undefined;
@@ -283,7 +354,7 @@ test "a download past the limit stops" {
     const thread = try std.Thread.spawn(.{}, TestPeer.run, .{ &server, &body });
     defer thread.join();
     var progress: Progress = .{};
-    try std.testing.expectError(error.TooLarge, downloadCapped(a, std.testing.io, url, path, &progress, 99));
+    try std.testing.expectError(error.TooLarge, downloadCapped(a, std.testing.io, url, url, path, &progress, 99));
 }
 
 test "a request sends its headers and does not follow a redirect with them" {
@@ -369,7 +440,7 @@ test "a public GET refuses a name or a redirect that lands on the home network" 
     const port = server.socket.address.getPort();
     const Peer = struct {
         fn run(s: *std.Io.net.Server, p: u16, asked: *usize) void {
-            for (0..3) |_| {
+            for (0..4) |_| {
                 const stream = s.accept(std.testing.io) catch return;
                 defer stream.close(std.testing.io);
                 var in_buf: [1024]u8 = undefined;
@@ -401,9 +472,41 @@ test "a public GET refuses a name or a redirect that lands on the home network" 
     try std.testing.expectError(error.PrivateAddress, getPublic(a, std.testing.io, try std.fmt.bufPrint(&buf[1], "http://127.0.0.1:{d}/home", .{port}), own));
     const body = try getPublic(a, std.testing.io, try std.fmt.bufPrint(&buf[2], "http://127.0.0.1:{d}/same", .{port}), own);
     defer a.free(body);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/part", .{tmp.sub_path});
+    var progress: Progress = .{};
+    try std.testing.expectError(error.PrivateAddress, download(a, std.testing.io, try std.fmt.bufPrint(&buf[1], "http://127.0.0.1:{d}/home", .{port}), own, path, &progress));
     thread.join();
     try std.testing.expectEqualStrings("ok", body);
-    try std.testing.expectEqual(@as(usize, 3), asked);
+    try std.testing.expectEqual(@as(usize, 4), asked);
+}
+
+test "only a host written as home network skips the address check" {
+    try std.testing.expectEqualStrings("", homeHost("https://evil.example/t.html"));
+    try std.testing.expectEqualStrings("192.168.0.5", homeHost("http://192.168.0.5/t.html"));
+    try std.testing.expectEqualStrings("nas.local", homeHost("http://nas.local/t.html"));
+}
+
+test "a checked address is dialled under the name it was resolved for" {
+    const a = std.testing.allocator;
+    const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    var server = try address.listen(std.testing.io, .{ .reuse_address = true });
+    defer server.deinit(std.testing.io);
+    const port = server.socket.address.getPort();
+    const thread = try std.Thread.spawn(.{}, TestPeer.run, .{ &server, "ok" });
+    defer thread.join();
+    var c = client(a, std.testing.io);
+    defer c.deinit();
+    const conn = try connectAs(&c, .{ .bytes = "example.com" }, &.{try std.Io.net.IpAddress.parse("127.0.0.1", port)}, port, .plain);
+    try std.testing.expectEqualStrings("example.com", conn.host().bytes);
+    var url_buf: [64]u8 = undefined;
+    var req = try c.request(.GET, try std.Uri.parse(try std.fmt.bufPrint(&url_buf, "http://example.com:{d}/", .{port})), .{ .connection = conn, .keep_alive = false });
+    defer req.deinit();
+    try req.sendBodiless();
+    const res = try req.receiveHead(&.{});
+    try std.testing.expectEqual(std.http.Status.ok, res.head.status);
 }
 
 test "url join" {
@@ -425,8 +528,14 @@ test "url join" {
 pub const WebSocket = struct {
     req: std.http.Client.Request,
 
+    const quiet_limit: std.Io.Duration = .fromSeconds(10);
+
     /// `ws` must stay where it is until `close`: the request holds the connection.
     pub fn open(ws: *WebSocket, c: *std.http.Client, url: []const u8, auth: []const std.http.Header) !void {
+        return ws.openWithin(c, url, auth, quiet_limit);
+    }
+
+    fn openWithin(ws: *WebSocket, c: *std.http.Client, url: []const u8, auth: []const std.http.Header, timeout: std.Io.Duration) !void {
         var raw: [16]u8 = undefined;
         c.io.random(&raw);
         var key: [24]u8 = undefined;
@@ -443,10 +552,17 @@ pub const WebSocket = struct {
             .redirect_behavior = .unhandled,
         });
         errdefer ws.req.deinit();
+        var watchdog = try c.io.concurrent(hangUpAfter, .{ c.io, ws.req.connection.?.stream_reader.stream, timeout });
+        const shook = ws.handshake(&key);
+        if (watchdog.cancel(c.io)) return error.Timeout;
+        return shook;
+    }
+
+    fn handshake(ws: *WebSocket, key: *const [24]u8) !void {
         try ws.req.sendBodiless();
         const res = try ws.req.receiveHead(&.{});
         if (res.head.status != .switching_protocols) return error.Refused;
-        const want = acceptKey(&key);
+        const want = acceptKey(key);
         var it = res.head.iterateHeaders();
         while (it.next()) |h| {
             if (std.ascii.eqlIgnoreCase(h.name, "sec-websocket-accept") and std.mem.eql(u8, h.value, &want)) return;
@@ -463,7 +579,7 @@ pub const WebSocket = struct {
     }
 
     pub fn receive(ws: *WebSocket, buf: []u8) ![]u8 {
-        return ws.receiveWithin(buf, .fromSeconds(10));
+        return ws.receiveWithin(buf, quiet_limit);
     }
 
     /// A network that drops silently would otherwise hold the read until TCP gives up, which can take many minutes.
@@ -660,4 +776,18 @@ test "a WebSocket whose server goes silent times out instead of waiting forever"
     defer ws.close();
     var buf: [64]u8 = undefined;
     try std.testing.expectError(error.Timeout, ws.receiveWithin(&buf, .fromMilliseconds(100)));
+}
+
+test "a WebSocket handshake that never gets an answer times out" {
+    const a = std.testing.allocator;
+    const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    // Never accepted: the kernel completes the connection, then nothing answers.
+    var server = try address.listen(std.testing.io, .{ .reuse_address = true });
+    defer server.deinit(std.testing.io);
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/play", .{server.socket.address.getPort()});
+    var c = client(a, std.testing.io);
+    defer c.deinit();
+    var ws: WebSocket = undefined;
+    try std.testing.expectError(error.Timeout, ws.openWithin(&c, url, &.{}, .fromMilliseconds(100)));
 }
