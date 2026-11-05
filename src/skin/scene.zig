@@ -825,8 +825,6 @@ fn drawStagefile(g: *gfx.Gfx, image: ?*gfx.Texture, d: c.SDL_FRect, alpha: f32) 
 pub fn drawLoading(g: *gfx.Gfx, skin: *m.Skin, st: *State, now_ms: i64) void {
     st.timers[1] = 0;
     const ctx = st.ctx(skin, now_ms);
-    skin_mod.setLuaCtx(&ctx);
-    defer skin_mod.setLuaCtx(null);
     const r: m.Renderer = .{ .g = g, .s = skin, .ctx = &ctx, .sx = g.w / skin.w, .sy = g.h / skin.h };
     const before: Snapshot = .{};
     for (skin.objects) |*o| switch (o.kind) {
@@ -850,8 +848,6 @@ pub fn drawPlay(g: *gfx.Gfx, skin: *m.Skin, st: *State, s: *Session, view: *play
     st.hidden = cfg.hiddenShown();
     st.update(snap);
     const ctx = st.ctx(skin, st.sceneMs(snap.time_us));
-    skin_mod.setLuaCtx(&ctx);
-    defer skin_mod.setLuaCtx(null);
     const r: m.Renderer = .{ .g = g, .s = skin, .ctx = &ctx, .sx = g.w / skin.w, .sy = g.h / skin.h };
     for (skin.objects) |*o| switch (o.kind) {
         .notes => drawNotes(&r, s, view, &snap, cfg),
@@ -950,8 +946,6 @@ fn drawBars(r: *const m.Renderer, list_obj: *const m.SongList, bars: BarList) ?u
 
 pub fn drawSelect(g: *gfx.Gfx, skin: *m.Skin, st: *State, now_ms: i64, bars: BarList) ?usize {
     const ctx = st.ctx(skin, now_ms);
-    skin_mod.setLuaCtx(&ctx);
-    defer skin_mod.setLuaCtx(null);
     const r: m.Renderer = .{ .g = g, .s = skin, .ctx = &ctx, .sx = g.w / skin.w, .sy = g.h / skin.h };
     var clicked: ?usize = null;
     for (skin.objects) |*o| switch (o.kind) {
@@ -982,8 +976,6 @@ test "a short text list falls back on its first entry" {
 
 pub fn drawStatic(g: *gfx.Gfx, skin: *m.Skin, st: *State, now_ms: i64) void {
     const ctx = st.ctx(skin, now_ms);
-    skin_mod.setLuaCtx(&ctx);
-    defer skin_mod.setLuaCtx(null);
     const r: m.Renderer = .{ .g = g, .s = skin, .ctx = &ctx, .sx = g.w / skin.w, .sy = g.h / skin.h };
     for (skin.objects) |*o| r.drawObject(o);
 }

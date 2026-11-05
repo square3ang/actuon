@@ -73,7 +73,7 @@ fn typeOfFile(a: std.mem.Allocator, io: std.Io, path: []const u8) ?i32 {
     }
     // Lua skins compute their header, so the script has to run; it runs sandboxed.
     if (std.ascii.endsWithIgnoreCase(path, ".luaskin")) {
-        const h = lua.header(a, path) catch return null;
+        const h = lua.header(a, io, path) catch return null;
         if (h != .object) return null;
         const t = h.object.get("type") orelse return null;
         return if (t == .integer) std.math.cast(i32, t.integer) else null;
@@ -225,7 +225,7 @@ pub fn saveConf(a: std.mem.Allocator, io: std.Io, root: []const u8, want: i32, c
 }
 
 fn headerOf(a: std.mem.Allocator, io: std.Io, path: []const u8) ?std.json.Value {
-    if (std.ascii.endsWithIgnoreCase(path, ".luaskin")) return lua.header(a, path) catch null;
+    if (std.ascii.endsWithIgnoreCase(path, ".luaskin")) return lua.header(a, io, path) catch null;
     if (std.ascii.endsWithIgnoreCase(path, ".json")) return jsonskin.parseFile(a, io, path) catch null;
     return null;
 }
@@ -341,7 +341,7 @@ pub fn clearTextures(gpa: std.mem.Allocator, g: *gfx.Gfx) void {
     texture_cache = .empty;
 }
 
-pub fn load(gpa: std.mem.Allocator, io: std.Io, g: *gfx.Gfx, path: []const u8, mode: core.types.Mode, resolver: *const fn (i32) bool, conf: Conf) !*Skin {
+pub fn load(gpa: std.mem.Allocator, io: std.Io, g: *gfx.Gfx, path: []const u8, mode: core.types.Mode, resolver: *const fn (i32) bool, conf: Conf, lua_env: lua.Env) !*Skin {
     const skin = try gpa.create(Skin);
     errdefer gpa.destroy(skin);
     skin.* = .{ .arena = std.heap.ArenaAllocator.init(gpa) };
@@ -356,7 +356,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, g: *gfx.Gfx, path: []const u8, m
     else if (std.ascii.endsWithIgnoreCase(path, ".json"))
         try jsonskin.load(skin, io, path, resolver, conf)
     else
-        try lua.load(skin, io, path, resolver, conf);
+        try lua.load(skin, io, path, resolver, conf, lua_env);
     skin.textures = try a.alloc(?*gfx.Texture, paths.len);
     skin.tex_sizes = try a.alloc([2]f32, paths.len);
     var videos: std.ArrayList(*bga.Video) = .empty;
@@ -394,12 +394,7 @@ pub fn changed(s: *const Skin, io: std.Io) bool {
 pub const lua_call_bool = lua.callBool;
 pub const lua_call_num = lua.callNum;
 pub const lua_call_str = lua.callStr;
-pub const lua_mod = lua;
-pub const setLuaCtx = struct {
-    pub fn f(ctx: ?*const model.Ctx) void {
-        lua.ctx = ctx;
-    }
-}.f;
+pub const LuaEnv = lua.Env;
 
 test "a saved pick reaches the wildcard, the option and the offset" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
