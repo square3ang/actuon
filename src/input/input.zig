@@ -123,9 +123,12 @@ export fn actuon_input_push_set1(code: u32, down: c_int) callconv(.c) void {
 
 /// Called from src/input/hid_macos.c: HID usage IDs are exactly SDL scancodes.
 export fn actuon_input_push_hid(usage: u32, down: c_int) callconv(.c) void {
-    if (!focused.load(.acquire) or usage == 0 or usage >= joy_base) return;
+    if (usage == 0 or usage >= joy_base) return;
+    // Kept while unfocused too: HID sees releases in other apps, and a stale bit would fake a blind sampler.
+    hid_held[usage].store(down != 0, .release);
+    if (!focused.load(.acquire)) return;
     // The sampler owns the keys it reads while it runs; HID still brings the rest, such as F11.
-    if (poll_hz.load(.acquire) != 0 and sampled.isSet(usage)) return;
+    if (poll_hz.load(.acquire) != 0 and !sampler_blind.load(.acquire) and sampled.isSet(usage)) return;
     push(.{ .mono_ns = c.SDL_GetTicksNS(), .code = @intCast(usage), .down = down != 0 });
 }
 
@@ -180,6 +183,17 @@ fn sampleMac(bits: *KeyBits) void {
     }
 }
 
+var hid_held: [joy_base]std.atomic.Value(bool) = @splat(.init(false));
+/// Set for good once the macOS sampler reads a key up that HID has held down for a while; HID then takes all keys back.
+var sampler_blind: std.atomic.Value(bool) = .init(false);
+
+fn missesHidKey(cur: *const KeyBits) bool {
+    for (set1_to_sdl, 0..) |sc, i| {
+        if (sc != 0 and hid_held[sc].load(.acquire) and cur[i / 8] >> @intCast(i % 8) & 1 == 0) return true;
+    }
+    return false;
+}
+
 fn pushEdges(prev: *const KeyBits, cur: *const KeyBits, ns: u64) void {
     for (prev, cur, 0..) |p, n, byte| {
         var changed = p ^ n;
@@ -196,8 +210,9 @@ fn pollThread(_: ?*anyopaque) callconv(.c) c_int {
     var prev: KeyBits = @splat(0);
     var was_on = false;
     var next: u64 = 0;
+    var misses: u32 = 0;
     while (true) {
-        const hz = if (direct_keyboard.load(.acquire)) poll_hz.load(.acquire) else 0;
+        const hz = if (direct_keyboard.load(.acquire) and !sampler_blind.load(.acquire)) poll_hz.load(.acquire) else 0;
         if (hz == 0) {
             was_on = false;
             c.SDL_Delay(20);
@@ -206,6 +221,15 @@ fn pollThread(_: ?*anyopaque) callconv(.c) c_int {
         var cur: KeyBits = @splat(0);
         sample(&cur);
         const now = c.SDL_GetTicksNS();
+        if (builtin.os.tag == .macos) {
+            // A HID press beats the next sample by under one period, so 100 ms of misses means the sampler cannot see keys.
+            misses = if (missesHidKey(&cur)) misses + 1 else 0;
+            if (misses > hz / 10) {
+                std.log.warn("key polling reads keys HID sees held as up: back to HID events", .{});
+                sampler_blind.store(true, .release);
+                continue;
+            }
+        }
         if (was_on and focused.load(.acquire)) pushEdges(&prev, &cur, now);
         prev = cur;
         was_on = true;
@@ -475,21 +499,38 @@ test "while polling, HID events only bring keys the sampler cannot read" {
     try std.testing.expectEqual(@as(u16, 29), pop().?.code);
 }
 
+test "a sampler that reads a key HID holds as up is caught, and HID takes the key back" {
+    io = std.testing.io;
+    clear();
+    focused.store(true, .release);
+    defer focused.store(false, .release);
+    setPollRate(1000);
+    defer setPollRate(0);
+    var cur: KeyBits = @splat(0);
+    actuon_input_push_hid(29, 1); // Z, filtered while the sampler is trusted
+    try std.testing.expect(pop() == null);
+    try std.testing.expect(missesHidKey(&cur));
+    cur[44 / 8] |= 1 << 44 % 8; // the sampler sees Z
+    try std.testing.expect(!missesHidKey(&cur));
+    sampler_blind.store(true, .release);
+    defer sampler_blind.store(false, .release);
+    actuon_input_push_hid(29, 0);
+    try std.testing.expectEqual(@as(u16, 29), pop().?.code);
+    try std.testing.expect(!missesHidKey(&@as(KeyBits, @splat(0))));
+}
+
 extern fn actuon_rawinput_key(make: c_uint, flags: c_uint) void;
 
-test "keypad keys and their navigation twins sample apart" {
+test "a twin key whose release raw input missed does not stay down" {
     if (builtin.os.tag != .windows) return;
     if (actuon_rawinput_start() == 0) return error.SkipZigTest;
     const e0 = 2; // RI_KEY_E0
     const @"break" = 1; // RI_KEY_BREAK
     var bits: KeyBits = @splat(0);
-    actuon_rawinput_key(0x47, 0); // KP7
-    actuon_rawinput_sample(&bits);
-    try std.testing.expect(bits[71 / 8] >> 71 % 8 & 1 == 1 and bits[102 / 8] >> 102 % 8 & 1 == 0);
-    actuon_rawinput_key(0x47, @"break");
+    actuon_rawinput_key(0x47, 0); // KP7, no break follows
     actuon_rawinput_key(0x47, e0); // HOME
-    bits = @splat(0);
     actuon_rawinput_sample(&bits);
-    try std.testing.expect(bits[71 / 8] >> 71 % 8 & 1 == 0 and bits[102 / 8] >> 102 % 8 & 1 == 1);
+    try std.testing.expect(bits[71 / 8] >> 71 % 8 & 1 == 0 and bits[102 / 8] >> 102 % 8 & 1 == 0);
+    actuon_rawinput_key(0x47, @"break");
     actuon_rawinput_key(0x47, e0 | @"break");
 }
