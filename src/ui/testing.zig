@@ -2,6 +2,7 @@
 const std = @import("std");
 const app_mod = @import("app.zig");
 const select = @import("select.zig");
+const settings = @import("settings.zig");
 const db_mod = @import("../db/db.zig");
 const engine_mod = @import("../audio/engine.zig");
 const fs = @import("../platform/fs.zig");
@@ -48,6 +49,7 @@ pub fn close(a: *App) void {
     if (a.sel.search.len > 0) gpa.free(a.sel.search);
     if (a.sel.arena) |*ar| ar.deinit();
     if (a.sel.replay_arena) |*r| r.deinit();
+    settings.freeDrop(&a.set);
     a.text.deinit(gpa);
     a.engine.destroy();
     a.db.close();

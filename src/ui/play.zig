@@ -56,11 +56,11 @@ pub fn paceDiff(ex: u32, target_ex: u32, judged: u32, total_notes: u32) i64 {
     return @as(i64, ex) - @divTrunc(@as(i64, target_ex) * @min(judged, total_notes), total_notes);
 }
 
-pub fn referenceBpm(chart: *const core.types.Chart, hs_fix: u8) f64 {
+pub fn referenceBpm(gpa: std.mem.Allocator, chart: *const core.types.Chart, hs_fix: u8) f64 {
     return switch (hs_fix) {
         0 => chart.bpm,
         1 => chart.max_bpm,
-        2 => mainBpm(chart),
+        2 => mainBpm(gpa, chart),
         4 => chart.min_bpm,
         else => 150,
     };
@@ -88,12 +88,12 @@ pub const Scroll = struct {
 };
 
 /// `aids` are the play's own: a versus round or a course plays without them whatever the settings say.
-pub fn scrollAt(v: *View, chart: *const core.types.Chart, cfg: *const config.Config, aids: config.Assists, t: i64) Scroll {
+pub fn scrollAt(v: *View, gpa: std.mem.Allocator, chart: *const core.types.Chart, cfg: *const config.Config, aids: config.Assists, t: i64) Scroll {
     const green_us: f64 = @as(f64, @floatFromInt(cfg.green_ms)) * 1000;
     return .{
         .t = t,
         .now_y = chart.yAt(t),
-        .per_y = chart.speedAt(t) / visibleY(cfg.green_ms, v.refBpm(chart, cfg.hs_fix)),
+        .per_y = chart.speedAt(t) / visibleY(cfg.green_ms, v.refBpm(gpa, chart, cfg.hs_fix)),
         .per_us = if (aids.constant) 1 / green_us else null,
         .appear_us = if (cfg.constant) @as(i64, cfg.green_ms) * 1000 else null,
     };
@@ -111,24 +111,22 @@ pub fn bpmChanges(chart: *const core.types.Chart, i: usize) bool {
     return i > 0 and chart.timelines[i].bpm != chart.timelines[i - 1].bpm;
 }
 
-pub fn mainBpm(chart: *const core.types.Chart) f64 {
-    // shortcut: tempos past the 256th distinct one are ignored, use a map if a chart needs more
-    var bpms: [256]f64 = undefined;
-    var totals: [256]i64 = @splat(0);
-    var n: usize = 0;
+pub fn mainBpm(gpa: std.mem.Allocator, chart: *const core.types.Chart) f64 {
+    // Keyed by bit pattern, as floats do not hash; insertion order keeps the first tempo heard on a tie.
+    var totals: std.array_hash_map.Auto(u64, i64) = .empty;
+    defer totals.deinit(gpa);
     const tl = chart.timelines;
     for (tl, 0..) |t, j| {
-        const i = std.mem.indexOfScalar(f64, bpms[0..n], t.bpm) orelse blk: {
-            if (n == bpms.len) continue;
-            bpms[n] = t.bpm;
-            n += 1;
-            break :blk n - 1;
+        const slot = totals.getOrPut(gpa, @bitCast(t.bpm)) catch |e| {
+            std.log.err("main BPM: {t}, using the chart's", .{e});
+            return chart.bpm;
         };
+        if (!slot.found_existing) slot.value_ptr.* = 0;
         const end = if (j + 1 < tl.len) tl[j + 1].time_us else chart.last_time_us;
-        totals[i] += @max(end - t.time_us - t.stop_us, 0);
+        slot.value_ptr.* += @max(end - t.time_us - t.stop_us, 0);
     }
-    if (n == 0) return chart.bpm;
-    return bpms[std.mem.indexOfMax(i64, totals[0..n])];
+    if (totals.count() == 0) return chart.bpm;
+    return @bitCast(totals.keys()[std.mem.indexOfMax(i64, totals.values())]);
 }
 
 pub fn visibleY(green_ms: u32, ref_bpm: f64) f64 {
@@ -182,10 +180,10 @@ pub const View = struct {
     timing_n: u32 = 0,
     timing_at: i64 = -1,
 
-    pub fn refBpm(v: *View, chart: *const core.types.Chart, hs_fix: u8) f64 {
+    pub fn refBpm(v: *View, gpa: std.mem.Allocator, chart: *const core.types.Chart, hs_fix: u8) f64 {
         if (v.ref_hs_fix != hs_fix) {
             v.ref_hs_fix = hs_fix;
-            v.ref_bpm = referenceBpm(chart, hs_fix);
+            v.ref_bpm = referenceBpm(gpa, chart, hs_fix);
         }
         return v.ref_bpm;
     }
@@ -208,7 +206,7 @@ pub const View = struct {
         const l = layoutLanes(g, mode, cfg, v.scratch_right);
         drawGear(g, &l, s, &snap);
         const aids = s.params.assist.picked;
-        const sc = scrollAt(v, chart, cfg, aids, t);
+        const sc = scrollAt(v, s.gpa, chart, cfg, aids, t);
         if (aids.judge_area) {
             const area = judgeAreaShare(chart, sc);
             const y0 = l.judge_y - area[1] * l.lane_h;
@@ -755,17 +753,19 @@ test "scroll takes CONSTANT from the play, not from the settings" {
     const chart: core.types.Chart = .{ .arena = undefined, .bpm = 150, .timelines = @constCast(&tl) };
     var v: View = .{ .render_state = &.{} };
     const cfg: config.Config = .{ .hs_fix = 3, .assist = .{ .constant = true } };
-    try std.testing.expect(scrollAt(&v, &chart, &cfg, .{}, 0).per_us == null);
-    try std.testing.expect(scrollAt(&v, &chart, &cfg, .{ .constant = true }, 0).per_us != null);
+    try std.testing.expect(scrollAt(&v, std.testing.allocator, &chart, &cfg, .{}, 0).per_us == null);
+    try std.testing.expect(scrollAt(&v, std.testing.allocator, &chart, &cfg, .{ .constant = true }, 0).per_us != null);
 }
 
-test "main BPM finds a tempo that only starts late in the chart" {
+test "main BPM finds a tempo that only starts late in the chart, past hundreds of others" {
     const base: core.types.Timeline = .{ .time_us = 0, .y = 0, .section = 0, .bpm = 100, .stop_us = 0, .scroll = 1, .speed = 1, .bar = false };
     var tl: [600]core.types.Timeline = @splat(base);
-    for (&tl, 0..) |*t, i| t.time_us = @intCast(i * 1000);
-    tl[599].bpm = 200;
+    for (&tl, 0..) |*t, i| {
+        t.time_us = @intCast(i * 1000);
+        t.bpm = @floatFromInt(100 + i);
+    }
     const chart: core.types.Chart = .{ .arena = undefined, .bpm = 100, .timelines = &tl, .last_time_us = 60_000_000 };
-    try std.testing.expectEqual(@as(f64, 200), mainBpm(&chart));
+    try std.testing.expectEqual(@as(f64, 699), mainBpm(std.testing.allocator, &chart));
 }
 
 test "a long note outlasting the margin is not skipped" {

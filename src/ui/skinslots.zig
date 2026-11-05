@@ -19,7 +19,14 @@ pub const State = struct {
     choices: [slots.len][]const []const u8 = @splat(&.{}),
     cursor: usize = 0,
     drop: Drop = .{},
+    io: std.Io = undefined,
+    thread: ?*c.SDL_Thread = null,
+    done: std.atomic.Value(bool) = .init(false),
+    stop: std.atomic.Value(bool) = .init(false),
+    failed: ?ListError = null,
 };
+
+const ListError = error{ OutOfMemory, NoPrefPath, Canceled };
 
 fn slotName(slot: Slot) []const u8 {
     return switch (slot) {
@@ -36,23 +43,44 @@ fn slotName(slot: Slot) []const u8 {
     };
 }
 
-/// shortcut: Lua headers run on the main thread as this opens; a thread if skin folders grow large.
+/// Reading every skin's Lua header can take seconds, so a thread does it; nothing else touches the arena until `done`.
 pub fn open(a: *App) void {
     close(a);
-    var arena = std.heap.ArenaAllocator.init(a.gpa);
-    const al = arena.allocator();
-    const files = skin_mod.allFiles(al, a.io) catch &.{};
-    a.skinslots = .{};
-    for (slots, &a.skinslots.choices) |slot, *out| {
+    a.skinslots = .{ .arena = .init(a.gpa), .io = a.io };
+    a.scene = .skinslots;
+    const s = &a.skinslots;
+    s.thread = c.SDL_CreateThread(listChoices, "skinslots", s);
+    if (s.thread == null) _ = listChoices(s);
+}
+
+fn listChoices(ud: ?*anyopaque) callconv(.c) c_int {
+    const s: *State = @ptrCast(@alignCast(ud));
+    defer s.done.store(true, .release);
+    fillChoices(s) catch |e| {
+        if (e == error.Canceled) return 0;
+        std.log.err("skin list: {t}", .{e});
+        s.failed = e;
+    };
+    return 0;
+}
+
+fn fillChoices(s: *State) ListError!void {
+    const al = s.arena.?.allocator();
+    const files = try skin_mod.allFiles(al, s.io, try skin_mod.skinsDir(al), &s.stop);
+    for (slots, &s.choices) |slot, *out| {
         var list: std.ArrayList([]const u8) = .empty;
-        for (files) |f| if (f.type == skin_mod.slotType(slot)) list.append(al, f.path) catch {};
+        for (files) |f| if (f.type == skin_mod.slotType(slot)) try list.append(al, f.path);
         out.* = list.items;
     }
-    a.skinslots.arena = arena;
-    a.scene = .skinslots;
+}
+
+fn loading(s: *const State) bool {
+    return !s.done.load(.acquire);
 }
 
 pub fn close(a: *App) void {
+    a.skinslots.stop.store(true, .release);
+    if (a.skinslots.thread) |t| c.SDL_WaitThread(t, null);
     if (a.skinslots.arena) |*arena| arena.deinit();
     a.skinslots = .{};
 }
@@ -118,6 +146,7 @@ fn change(a: *App, dir: i32) void {
 
 pub fn key(a: *App, sc: c.SDL_Scancode) void {
     const s = &a.skinslots;
+    if (loading(s) and sc != c.SDL_SCANCODE_ESCAPE) return;
     if (s.drop.open) {
         if (s.drop.key(a, sc)) |i| choose(a, i);
         return;
@@ -164,16 +193,21 @@ pub fn draw(a: *App) void {
         a.scene = .settings;
         return;
     }
+    _ = g.text(tr("Skins per screen"), 22 * u, 18 * u, g.scaled(32), gfx.white);
+    var buf: [1024]u8 = undefined;
+    if (loading(s)) {
+        _ = g.text(tr("Loading..."), 22 * u, 76 * u, g.scaled(16), gfx.dim);
+        return;
+    }
+    if (s.failed) |e| _ = g.text(i18n.bufPrint(&buf, "Could not list the skins: {t}", .{e}) catch "", 22 * u, g.h - 70 * u, g.scaled(14), gfx.amber);
     const drop_click = s.drop.open and g.clicked;
     if (drop_click) g.clicked = false;
-    _ = g.text(tr("Skins per screen"), 22 * u, 18 * u, g.scaled(32), gfx.white);
     const top = 76 * u;
     const row_h = 44 * u;
     const rx = 14 * u;
     const rw = g.w - 28 * u;
     const options_w = 84 * u;
     const right = rx + rw - 14 * u - options_w - 12 * u;
-    var buf: [1024]u8 = undefined;
     for (slots, 0..) |slot, i| {
         const y = top + @as(f32, @floatFromInt(i)) * row_h;
         const rh = row_h - 4 * u;
@@ -214,4 +248,20 @@ test "cycling passes default, built-in and each file, and wraps" {
     try std.testing.expectEqualStrings("a", cycled(config.builtin_skin, &files, 1));
     try std.testing.expectEqualStrings("", cycled("b", &files, 1));
     try std.testing.expectEqualStrings("b", cycled("", &files, -1));
+}
+
+test "skins are listed on a thread, and escape leaves even before the list is done" {
+    const testing = @import("testing.zig");
+    const a = try testing.open();
+    defer testing.close(a);
+    open(a);
+    key(a, c.SDL_SCANCODE_ESCAPE);
+    try std.testing.expectEqual(.settings, a.scene);
+    try std.testing.expect(a.skinslots.arena == null);
+    open(a);
+    defer close(a);
+    while (loading(&a.skinslots)) std.Thread.yield() catch {};
+    try std.testing.expect(a.skinslots.failed == null);
+    key(a, c.SDL_SCANCODE_DOWN);
+    try std.testing.expectEqual(@as(usize, 1), a.skinslots.cursor);
 }
