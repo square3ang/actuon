@@ -63,6 +63,8 @@ pub const Config = struct {
     /// Hz. 0 uses OS key events instead, which on Linux carry evdev's kernel timestamps.
     input_poll_hz: u32 = if (@import("builtin").os.tag == .linux) 0 else 1000,
     volume: f32 = 0.8,
+    key_volume: f32 = 1,
+    bg_volume: f32 = 1,
     bgm_volume: f32 = 0.5,
     sfx_volume: f32 = 0.8,
     /// Added to input timestamps: positive means "the player hits late, forgive it".

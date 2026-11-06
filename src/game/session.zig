@@ -358,6 +358,7 @@ pub const Session = struct {
             .wav = n.wav,
             .start = @intCast(e.usToFrame(n.wav_start_us)),
             .len = @intCast(e.usToFrame(n.wav_dur_us)),
+            .key = true,
         });
         std.mem.sort(engine_mod.Sched, out.items, {}, struct {
             fn lt(_: void, a: engine_mod.Sched, b: engine_mod.Sched) bool {

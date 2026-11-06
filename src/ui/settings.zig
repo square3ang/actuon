@@ -80,6 +80,8 @@ pub const Item = enum {
     assist_bpm_guide,
     assist_no_mine,
     volume,
+    key_volume,
+    bg_volume,
     bgm_volume,
     bgm_set,
     sfx_volume,
@@ -135,7 +137,7 @@ pub const Item = enum {
             .add_table, .update_tables, .table_list => .tables,
             .random, .random2, .double_option, .gauge, .gauge_auto_shift, .gas_floor, .hs_fix, .hs_auto_adjust, .ln_mode, .judge_algorithm, .pace_target, .constant, .judge_auto_adjust => .play,
             .assist_expand_judge, .assist_constant, .assist_judge_area, .assist_legacy, .assist_mark_note, .assist_bpm_guide, .assist_no_mine => .assist,
-            .volume, .bgm_volume, .bgm_set, .sfx_volume, .sound_set, .audio_rate, .audio_frames, .audio_device => .audio,
+            .volume, .key_volume, .bg_volume, .bgm_volume, .bgm_set, .sfx_volume, .sound_set, .audio_rate, .audio_frames, .audio_device => .audio,
             .resolution, .fullscreen, .vsync, .fps_limit, .reflex, .bga, .bga_upscale, .language => .display,
             .skin, .skin_slots, .open_skins => .skin,
             .green, .lane_cover, .lane_cover_on, .lift, .lift_on, .hidden, .hidden_on, .judge_offset, .visual_offset => .timing,
@@ -177,6 +179,8 @@ pub const Item = enum {
             .lift_on => tr("Show lift"),
             .hidden_on => tr("Show hidden"),
             .volume => tr("Master volume"),
+            .key_volume => tr("Key sounds"),
+            .bg_volume => tr("Song music"),
             .bgm_volume => tr("Menu music"),
             .bgm_set => tr("Music set"),
             .sound_set => tr("Sound set"),
@@ -251,6 +255,8 @@ pub const Item = enum {
             .lane_cover => tr("Covers the top of the lane. Page Up and Page Down change it during play."),
             .lane_cover_on, .lift_on, .hidden_on => tr("Off keeps the amount for when it is back on."),
             .volume => tr("Everything the game plays."),
+            .key_volume => tr("Sounds of the notes you play."),
+            .bg_volume => tr("The chart's background sounds, which play by themselves."),
             .sound_set => tr("Enter or click lists the sound sets, or picks a folder holding them. Left/Right steps through them."),
             .bgm_set => tr("Enter or click lists select and decide music, or picks a folder holding it. Left/Right steps through them."),
             .bgm_volume => tr("The loop behind song select and settings: the skin's own music if it has any."),
@@ -600,7 +606,7 @@ pub fn keyName(code: u16, buf: []u8) []const u8 {
 fn drawSlider(g: *gfx.Gfx, right: f32, y: f32, h: f32, v: f32, on: bool) ?f32 {
     const u = g.h / 720;
     const w = 220 * u;
-    const x = right - w - 56 * u;
+    const x = right - w - 72 * u;
     const th = 6 * u;
     const ty = y + (h - th) / 2;
     g.round(x, ty, w, th, 3 * u, if (on) gfx.white.alpha(70) else gfx.rule);
@@ -843,6 +849,14 @@ fn drawValue(a: *App, it: Item, x: f32, right: f32, y: f32, h: f32, on: bool) vo
             cfg.volume = v;
             a.engine.gain = v;
         },
+        .key_volume => if (drawSlider(g, right, y, h, cfg.key_volume, on)) |v| {
+            cfg.key_volume = v;
+            a.engine.key_gain = v;
+        },
+        .bg_volume => if (drawSlider(g, right, y, h, cfg.bg_volume, on)) |v| {
+            cfg.bg_volume = v;
+            a.engine.bg_gain = v;
+        },
         .bgm_volume => if (drawSlider(g, right, y, h, cfg.bgm_volume, on)) |v| {
             cfg.bgm_volume = v;
             if (a.bgm_on) a.engine.uiGain(a.bgm_slot, v);
@@ -1068,7 +1082,7 @@ fn flagOf(cfg: *config.Config, it: Item) ?*bool {
 
 fn rowActs(it: Item) bool {
     return switch (it) {
-        .volume, .bgm_volume, .sfx_volume, .audio_rate, .audio_frames, .audio_device, .resolution, .vsync, .fps_limit, .reflex, .language, .input_poll, .lift, .hidden, .judge_offset, .visual_offset, .skin, .bgm_set, .sound_set => false,
+        .volume, .key_volume, .bg_volume, .bgm_volume, .sfx_volume, .audio_rate, .audio_frames, .audio_device, .resolution, .vsync, .fps_limit, .reflex, .language, .input_poll, .lift, .hidden, .judge_offset, .visual_offset, .skin, .bgm_set, .sound_set => false,
         .bga, .random, .random2, .double_option, .gauge, .gauge_auto_shift, .gas_floor, .hs_fix, .ln_mode, .judge_algorithm, .pace_target, .lane_cover => false,
         else => true,
     };
@@ -1090,6 +1104,14 @@ fn adjust(a: *App, it: Item, dir: i32) void {
         .volume => {
             cfg.volume = std.math.clamp(cfg.volume + 0.05 * @as(f32, @floatFromInt(dir)), 0, 1);
             a.engine.gain = cfg.volume;
+        },
+        .key_volume => {
+            cfg.key_volume = std.math.clamp(cfg.key_volume + 0.05 * @as(f32, @floatFromInt(dir)), 0, 1);
+            a.engine.key_gain = cfg.key_volume;
+        },
+        .bg_volume => {
+            cfg.bg_volume = std.math.clamp(cfg.bg_volume + 0.05 * @as(f32, @floatFromInt(dir)), 0, 1);
+            a.engine.bg_gain = cfg.bg_volume;
         },
         .bgm_volume => {
             cfg.bgm_volume = std.math.clamp(cfg.bgm_volume + 0.05 * @as(f32, @floatFromInt(dir)), 0, 1);

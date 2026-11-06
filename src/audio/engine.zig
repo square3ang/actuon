@@ -19,7 +19,7 @@ pub const menu_slots = 3;
 pub const decide_slot = menu_slots;
 pub const first_oneshot_slot = decide_slot + 1;
 
-pub const Sched = struct { frame: i64, wav: i32, start: u32 = 0, len: u32 = 0 };
+pub const Sched = struct { frame: i64, wav: i32, start: u32 = 0, len: u32 = 0, key: bool = false };
 
 const Voice = struct {
     data: []const f32 = &.{}, // stereo interleaved
@@ -65,6 +65,9 @@ pub const Engine = struct {
     /// The sim and UI threads both send commands, and the ring takes one producer at a time.
     cmd_lock: std.atomic.Value(bool) = .init(false),
     gain: f32 = 1,
+    /// Read when a voice starts, so a change is heard from the next sound.
+    key_gain: f32 = 1,
+    bg_gain: f32 = 1,
     /// Tick clock (song µs - monotonic µs), fixed once settled; the writer thread is the only writer.
     clock_offset_us: std.atomic.Value(i64) = .init(0),
     clock_valid: std.atomic.Value(bool) = .init(false),
@@ -420,7 +423,7 @@ pub const Engine = struct {
         }
     }
 
-    fn startVoice(e: *Engine, wav: i32, start_frame: u32, len: u32, delay: u32) void {
+    fn startVoice(e: *Engine, wav: i32, start_frame: u32, len: u32, delay: u32, gain: f32) void {
         if (wav < 0 or wav >= e.samples.len) return;
         const data = e.samples[@intCast(wav)].data;
         const begin: usize = @min(@as(usize, start_frame) * 2, data.len);
@@ -438,7 +441,7 @@ pub const Engine = struct {
             } else if (oldest == null or v.pos > oldest.?.pos) oldest = v;
         }
         const v = slot orelse oldest orelse return;
-        v.* = .{ .data = data[begin..end], .wav = wav, .delay = delay };
+        v.* = .{ .data = data[begin..end], .wav = wav, .delay = delay, .gain = gain };
     }
 
     fn processCmds(e: *Engine) void {
@@ -446,7 +449,7 @@ pub const Engine = struct {
         const h = e.cmd_head.load(.acquire);
         while (t != h) : (t +%= 1) {
             switch (e.cmd_buf[t % e.cmd_buf.len]) {
-                .play => |p| if (!e.paused) e.startVoice(p.wav, p.start, p.len, 0),
+                .play => |p| if (!e.paused) e.startVoice(p.wav, p.start, p.len, 0, e.key_gain),
                 .stop_wav => |w| for (&e.voices) |*v| {
                     if (v.wav == w) v.data = &.{};
                 },
@@ -505,7 +508,7 @@ pub const Engine = struct {
         while (e.sched_pos < e.schedule.len and e.schedule[e.sched_pos].frame < f1) : (e.sched_pos += 1) {
             const s = e.schedule[e.sched_pos];
             const delay: u32 = if (s.frame > f0) @intCast(s.frame - f0) else 0;
-            e.startVoice(s.wav, s.start, s.len, delay);
+            e.startVoice(s.wav, s.start, s.len, delay, if (s.key) e.key_gain else e.bg_gain);
         }
         for (&e.voices) |*v| {
             if (v.data.len == 0) continue;
@@ -626,6 +629,22 @@ test "mixer schedules sample accurately" {
     try std.testing.expectEqual(@as(f32, 0), out[8]);
 }
 
+test "key sounds and background sounds take their own gain" {
+    const e = try Engine.create(std.testing.allocator);
+    defer e.destroy();
+    const data = [_]f32{ 1, 1 };
+    const samples = [_]decode.Sample{ .{ .data = @constCast(&data) }, .{ .data = @constCast(&data) } };
+    const sched = [_]Sched{ .{ .frame = 0, .wav = 0 }, .{ .frame = 1, .wav = 1, .key = true } };
+    e.samples = &samples;
+    e.schedule = &sched;
+    e.key_gain = 0.5;
+    e.bg_gain = 0.25;
+    var out: [4]f32 = undefined;
+    e.mix(&out, 2);
+    try std.testing.expectEqual(@as(f32, 0.25), out[0]);
+    try std.testing.expectEqual(@as(f32, 0.5), out[2]);
+}
+
 test "the PortAudio callback mixes each buffer it is asked for and keeps the clock" {
     const e = try Engine.create(std.testing.allocator);
     defer e.destroy();
@@ -667,7 +686,7 @@ test "tick clock stays fixed after settling and audio follows it" {
     const data: [96000]f32 = @splat(0.25);
     const samples = [_]decode.Sample{.{ .data = @constCast(&data) }};
     e.samples = &samples;
-    e.startVoice(0, 0, 0, 0);
+    e.startVoice(0, 0, 0, 0, 1);
     e.slew = 0;
     e.audio_err_us = -100_000;
     e.steerAudio(-100_000, 128);
@@ -684,7 +703,7 @@ test "audio far ahead holds the song until the clock catches up" {
     const data: [96000]f32 = @splat(0.25);
     const samples = [_]decode.Sample{.{ .data = @constCast(&data) }};
     e.samples = &samples;
-    e.startVoice(0, 0, 0, 0);
+    e.startVoice(0, 0, 0, 0, 1);
     e.audio_err_us = 60_000;
     e.steerAudio(60_000, 128);
     try std.testing.expectEqual(@as(i64, 2880), e.hold_frames);

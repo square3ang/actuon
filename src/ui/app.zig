@@ -1207,6 +1207,8 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, opts: Options) !void {
     const engine = try engine_mod.Engine.create(gpa);
     defer engine.destroy();
     engine.gain = cfg.volume;
+    engine.key_gain = cfg.key_volume;
+    engine.bg_gain = cfg.bg_volume;
     try engine.open(cfg.audio_rate, cfg.audio_frames, opts.null_audio, cfg.audio_device);
     const direct_input = input.startDirect();
 
