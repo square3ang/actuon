@@ -44,6 +44,8 @@ pub const Video = struct {
     filters: ?Filters,
     stream: c_int,
     tb: f64,
+    /// MPEG files usually start their timestamps near 0.5 s, not 0.
+    start_us: i64,
     w: c_int,
     h: c_int,
     pix_fmt: c_int,
@@ -99,6 +101,7 @@ pub const Video = struct {
             .filters = filters,
             .stream = si,
             .tb = c.av_q2d(st.*.time_base),
+            .start_us = if (st.*.start_time == c.AV_NOPTS_VALUE) 0 else frameUs(st.*.start_time, c.av_q2d(st.*.time_base)),
             .w = w,
             .h = h,
             .pix_fmt = dec.?.pix_fmt,
@@ -158,7 +161,7 @@ pub const Video = struct {
     }
 
     fn seekTo(v: *Video, us: i64) void {
-        const ts: i64 = std.math.lossyCast(i64, @as(f64, @floatFromInt(us)) / 1e6 / v.tb);
+        const ts: i64 = std.math.lossyCast(i64, @as(f64, @floatFromInt(us + v.start_us)) / 1e6 / v.tb);
         _ = c.av_seek_frame(v.fmt, v.stream, ts, c.AVSEEK_FLAG_BACKWARD);
         c.avcodec_flush_buffers(v.dec);
     }
@@ -196,7 +199,7 @@ pub const Video = struct {
                 continue;
             }
             defer c.av_frame_unref(frame);
-            if (frame.best_effort_timestamp != c.AV_NOPTS_VALUE) pts = frameUs(frame.best_effort_timestamp, v.tb);
+            if (frame.best_effort_timestamp != c.AV_NOPTS_VALUE) pts = frameUs(frame.best_effort_timestamp, v.tb) - v.start_us;
             if (pts + 50_000 < clock) continue;
             // sws and the deblock graph are built for the opening size; a file that changes it mid-stream would overread.
             if (frame.width != v.w or frame.height != v.h or frame.format != v.pix_fmt) continue;
